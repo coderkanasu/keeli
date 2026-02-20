@@ -47,6 +47,7 @@ keeli update
 | `keeli init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
 | `keeli start <name> [-c file] [-p P0\|P1\|P2] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist |
 | `keeli bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
+| `keeli feature <title> [-c file] [-p P0\|P1\|P2] [-f]` | Create a feature request (`docs/tasks/feat-<slug>.md`) with user story + acceptance criteria |
 | `keeli progress <name>` | Mark a task as **In Progress** |
 | `keeli block <name>` | Mark a task as **Blocked** |
 | `keeli complete <name>` | Mark a task as **Completed** and suggest the next task |
@@ -87,6 +88,17 @@ keeli bug "Login crash on empty password" -p P0 --found-during "implement-auth"
 ```
 
 Bug reports are saved as `docs/tasks/bug-<slug>.md` with their own template including reproduction steps, expected/actual behavior, and a regression test checklist. They participate in the same lifecycle and priority queue as regular tasks.
+
+### Feature Requests
+
+Use `keeli feature` to capture product ideas and requirements:
+
+```bash
+keeli feature "Dark Mode Support" -p P2
+keeli feature "Payment Gateway" -p P0 -c docs/requirements/payment-spec.md
+```
+
+Feature files are saved as `docs/tasks/feat-<slug>.md` with a template covering User Story, Acceptance Criteria, Design Notes, and a full checklist (including @architect approval, TDD, @security review, and @author documentation). They participate in the same lifecycle and priority queue as tasks and bugs.
 
 ### Auto-Completion Rule
 

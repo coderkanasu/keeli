@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Keeli CLI — main entry-point.
+Persona CLI — main entry-point.
 
 Commands
 --------
-  init                  Scaffold the Keeli framework in the current project.
+  init                  Scaffold the Persona framework in the current project.
   start <task-name>     Create a new task file in docs/tasks/.
   log <message>         Append a timestamped entry to docs/ai_log.md.
   resume                Dump current project context for a new AI session.
@@ -18,12 +18,11 @@ import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
-from keeli.templates import (
+from persona_cli.templates import (
     AI_LOG_MD,
     BUG_TEMPLATE,
     COPILOT_INSTRUCTIONS,
     DECISION_MD,
-    FEATURE_TEMPLATE,
     GITIGNORE_CONTENT,
     PROJECT_MD,
     SCHEMA_VERSION,
@@ -66,9 +65,9 @@ def _tail(path: Path, n: int = 30) -> str:
 # ── Commands ───────────────────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Scaffold the Keeli framework in the current project."""
+    """Scaffold the Persona framework in the current project."""
     force = args.force
-    print(f"Initializing Keeli Framework v{SCHEMA_VERSION} …\n")
+    print(f"Initializing Persona Framework v{SCHEMA_VERSION} …\n")
 
     try:
         # Directories
@@ -110,7 +109,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     """Create a new task file in docs/tasks/."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
         return
 
     slug = _slugify(args.task_name)
@@ -216,7 +215,7 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -
     """Generic helper to transition a task to a new status."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
         return
 
     slug = _slugify(args.task_name)
@@ -254,7 +253,7 @@ def cmd_reopen(args: argparse.Namespace) -> None:
     """Reopen a completed task (move it back to In Progress)."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
         return
 
     slug = _slugify(args.task_name)
@@ -288,7 +287,7 @@ def cmd_bug(args: argparse.Namespace) -> None:
     """Log a bug found during development and create a tracked bug task."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
         return
 
     slug = _slugify(args.title)
@@ -315,48 +314,11 @@ def cmd_bug(args: argparse.Namespace) -> None:
     _append_log(f"@developer | Bug reported: {args.title} [{priority}] → {task_file}")
 
 
-def cmd_feature(args: argparse.Namespace) -> None:
-    """Create a feature request task with user story and acceptance criteria."""
-    tasks_dir = Path("docs/tasks")
-    if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
-        return
-
-    slug = _slugify(args.title)
-    task_file = tasks_dir / f"feat-{slug}.md"
-
-    if task_file.exists() and not args.force:
-        print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
-        return
-
-    # Resolve optional context file
-    context_note = "None"
-    if args.context:
-        ctx_path = Path(args.context)
-        if ctx_path.exists():
-            context_note = f"See [{ctx_path}]({ctx_path})"
-        else:
-            print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
-
-    priority = args.priority or "P1"
-
-    content = FEATURE_TEMPLATE.format(
-        title=args.title,
-        priority=priority,
-        timestamp=_now_iso(),
-        context_note=context_note,
-    )
-    task_file.write_text(content)
-    print(f"✨ Created feature: {task_file}")
-
-    _append_log(f"@architect | Feature created: {args.title} [{priority}] → {task_file}")
-
-
 def cmd_complete(args: argparse.Namespace) -> None:
     """Mark a task as completed and suggest the next one."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
         return
 
     slug = _slugify(args.task_name)
@@ -470,7 +432,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
             sections.append("## Recent Decisions (summary)\n" + "\n---\n".join(recent))
 
     # 5. Schema version footer
-    sections.append(f"\n> Keeli Framework v{SCHEMA_VERSION}")
+    sections.append(f"\n> Persona Framework v{SCHEMA_VERSION}")
 
     output = "\n\n---\n\n".join(sections)
     print(output)
@@ -484,7 +446,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Health-check: verify all expected files exist."""
-    print(f"Keeli Framework v{SCHEMA_VERSION} — Status Check\n")
+    print(f"Persona Framework v{SCHEMA_VERSION} — Status Check\n")
 
     paths = [
         Path(".github/copilot-instructions.md"),
@@ -509,7 +471,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         task_count = len(list(tasks_dir.glob("*.md")))
         print(f"\n  📋 Tasks: {task_count} file(s) in docs/tasks/")
 
-    print("\n" + ("🟢 Healthy" if all_ok else "🔴 Incomplete — run `keeli init` to fix"))
+    print("\n" + ("🟢 Healthy" if all_ok else "🔴 Incomplete — run `persona init` to fix"))
 
 
 def cmd_clear_log(args: argparse.Namespace) -> None:
@@ -519,7 +481,7 @@ def cmd_clear_log(args: argparse.Namespace) -> None:
         log_file.write_text(AI_LOG_MD)
         print("✅ Cleared docs/ai_log.md")
     else:
-        print("⚠️  docs/ai_log.md not found. Run `keeli init` first.")
+        print("⚠️  docs/ai_log.md not found. Run `persona init` first.")
 
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -530,14 +492,14 @@ def cmd_update(args: argparse.Namespace) -> None:
     """
     instructions = Path(".github/copilot-instructions.md")
     if not instructions.exists():
-        print("❌ .github/copilot-instructions.md not found. Run `keeli init` first.")
+        print("❌ .github/copilot-instructions.md not found. Run `persona init` first.")
         return
 
     old_text = instructions.read_text()
     # Extract old version if possible
     old_version = "unknown"
     for line in old_text.splitlines():
-        if "Keeli Framework v" in line:
+        if "Persona Framework v" in line:
             import re as _re
             m = _re.search(r"v(\d+\.\d+\.\d+)", line)
             if m:
@@ -566,8 +528,8 @@ def cmd_update(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="keeli",
-        description="Keeli CLI — Enforce a Four-Persona Architecture for AI Agents.",
+        prog="persona",
+        description="Persona CLI — Enforce a Three-Persona Architecture for AI Agents.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {SCHEMA_VERSION}"
@@ -575,7 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
     # init
-    p_init = sub.add_parser("init", help="Scaffold the Keeli framework.")
+    p_init = sub.add_parser("init", help="Scaffold the Persona framework.")
     p_init.add_argument("-f", "--force", action="store_true", help="Overwrite existing files.")
 
     # start
@@ -604,7 +566,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--full", action="store_true", help="Full output (~3000 tokens).")
 
     # status
-    sub.add_parser("status", help="Health-check all Keeli files.")
+    sub.add_parser("status", help="Health-check all Persona files.")
 
     # clear-log
     sub.add_parser("clear-log", help="Reset the AI audit log.")
@@ -633,13 +595,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_bug.add_argument("--found-during", help="What task or activity the bug was found during.")
     p_bug.add_argument("-f", "--force", action="store_true", help="Overwrite existing bug file.")
 
-    # feature
-    p_feature = sub.add_parser("feature", help="Create a feature request with user story and acceptance criteria.")
-    p_feature.add_argument("title", help="Short feature title.")
-    p_feature.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
-    p_feature.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P1", help="Feature priority (default: P1).")
-    p_feature.add_argument("-f", "--force", action="store_true", help="Overwrite existing feature file.")
-
     return parser
 
 
@@ -661,7 +616,6 @@ def main() -> None:
         "update": cmd_update,
         "reopen": cmd_reopen,
         "bug": cmd_bug,
-        "feature": cmd_feature,
     }
 
     handler = dispatch.get(args.command)

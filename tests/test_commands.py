@@ -498,3 +498,66 @@ class TestInitSkills:
         assert "AngularJS" in content
         assert "Python" in content
         assert "Trading" in content
+
+
+# ── keeli feature ──────────────────────────────────────────────────────────
+
+class TestFeature:
+    def test_creates_feature_file(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Dark Mode Support"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "feat-dark-mode-support.md"
+        assert task.exists()
+        content = task.read_text()
+        assert "# Feature: Dark Mode Support" in content
+        assert "**Priority:** P1" in content  # default
+        assert "## User Story" in content
+        assert "## Acceptance Criteria" in content
+        assert "## Design Notes" in content
+        assert "- [ ] @author docs updated" in content
+
+    def test_feature_with_priority(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Payment Gateway", "-p", "P0"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "feat-payment-gateway.md"
+        assert "**Priority:** P0" in task.read_text()
+
+    def test_feature_with_context(self, initialized_dir):
+        ctx = initialized_dir / "docs" / "requirements" / "payment-spec.md"
+        ctx.write_text("# Payment Spec")
+
+        with patch("sys.argv", ["keeli", "feature", "Checkout Flow", "-c", str(ctx)]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "feat-checkout-flow.md"
+        assert "payment-spec.md" in task.read_text()
+
+    def test_feature_logs_event(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Search Bar"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Feature created: Search Bar" in log
+
+    def test_feature_no_overwrite_without_force(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Dup Feature"]):
+            main()
+        marker = "ORIGINAL"
+        (initialized_dir / "docs" / "tasks" / "feat-dup-feature.md").write_text(marker)
+
+        with patch("sys.argv", ["keeli", "feature", "Dup Feature"]):
+            main()
+        assert (initialized_dir / "docs" / "tasks" / "feat-dup-feature.md").read_text() == marker
+
+    def test_feature_force_overwrites(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Overwrite Me"]):
+            main()
+        (initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md").write_text("OLD")
+
+        with patch("sys.argv", ["keeli", "feature", "Overwrite Me", "-f"]):
+            main()
+
+        content = (initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md").read_text()
+        assert "# Feature: Overwrite Me" in content
