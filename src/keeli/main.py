@@ -5,11 +5,19 @@ Keeli CLI — main entry-point.
 Commands
 --------
   init                  Scaffold the Keeli framework in the current project.
-  start <task-name>     Create a new task file in docs/tasks/.
+  start <name>          Create a new task file in docs/tasks/<slug>.md.
+  bug <title>           Log a bug as docs/tasks/bug-<slug>.md.
+  feature <title>       Create a feature request docs/tasks/feat-<slug>.md.
+  progress <name>       Mark a task as In Progress.
+  block <name>          Mark a task as Blocked.
+  complete <name>       Mark a task as Completed and show the next task.
+  reopen <name>         Reopen a Completed task (back to In Progress).
+  next                  Show the next task by priority and age.
   log <message>         Append a timestamped entry to docs/ai_log.md.
   resume                Dump current project context for a new AI session.
   status                Health-check: verify all expected files exist.
   clear-log             Reset docs/ai_log.md to its default state.
+  update                Update copilot-instructions.md to the latest template.
 """
 
 import argparse
@@ -177,6 +185,18 @@ def _update_task_field(text: str, field: str, new_value: str) -> str:
     return "\n".join(lines)
 
 
+def _resolve_task_file(tasks_dir: Path, slug: str) -> "Path | None":
+    """Return the first existing file matching plain, bug-, or feat- prefix."""
+    for candidate in (
+        tasks_dir / f"{slug}.md",
+        tasks_dir / f"bug-{slug}.md",
+        tasks_dir / f"feat-{slug}.md",
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _get_next_task() -> tuple[Path | None, str | None]:
     """Find the next task to work on based on priority and age.
 
@@ -191,7 +211,6 @@ def _get_next_task() -> tuple[Path | None, str | None]:
         text = tf.read_text()
         status = _parse_task_field(text, "Status")
         if status.lower() == "in progress":
-            title = _parse_task_field(text, "").split("\n")[0] if not text.startswith("# Task:") else text.splitlines()[0].replace("# Task: ", "")
             return tf, tf.stem
 
     # Second: Backlog tasks sorted by priority (P0 > P1 > P2) then by creation date
@@ -220,10 +239,10 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -
         return
 
     slug = _slugify(args.task_name)
-    task_file = tasks_dir / f"{slug}.md"
+    task_file = _resolve_task_file(tasks_dir, slug)
 
-    if not task_file.exists():
-        print(f"❌ Task file {task_file} not found.")
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
         return
 
     text = task_file.read_text()
@@ -258,16 +277,11 @@ def cmd_reopen(args: argparse.Namespace) -> None:
         return
 
     slug = _slugify(args.task_name)
-    task_file = tasks_dir / f"{slug}.md"
+    task_file = _resolve_task_file(tasks_dir, slug)
 
-    # Also check bug- prefix
-    if not task_file.exists():
-        bug_file = tasks_dir / f"bug-{slug}.md"
-        if bug_file.exists():
-            task_file = bug_file
-        else:
-            print(f"❌ Task file {task_file} not found.")
-            return
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
 
     text = task_file.read_text()
     status = _parse_task_field(text, "Status")
@@ -360,10 +374,10 @@ def cmd_complete(args: argparse.Namespace) -> None:
         return
 
     slug = _slugify(args.task_name)
-    task_file = tasks_dir / f"{slug}.md"
+    task_file = _resolve_task_file(tasks_dir, slug)
 
-    if not task_file.exists():
-        print(f"❌ Task file {task_file} not found.")
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
         return
 
     text = task_file.read_text()

@@ -561,3 +561,51 @@ class TestFeature:
 
         content = (initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md").read_text()
         assert "# Feature: Overwrite Me" in content
+
+
+# ── cross-prefix task resolution ──────────────────────────────────────────
+
+class TestPrefixResolution:
+    """complete / progress / block / reopen should find bug- and feat- files."""
+
+    def test_complete_resolves_bug_prefix(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "bug", "Some Bug"]):
+            main()
+        with patch("sys.argv", ["keeli", "complete", "Some Bug"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-some-bug.md"
+        from keeli.main import _parse_task_field
+        assert _parse_task_field(task.read_text(), "Status") == "Completed"
+
+    def test_complete_resolves_feat_prefix(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Cool Feature"]):
+            main()
+        with patch("sys.argv", ["keeli", "complete", "Cool Feature"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "feat-cool-feature.md"
+        from keeli.main import _parse_task_field
+        assert _parse_task_field(task.read_text(), "Status") == "Completed"
+
+    def test_progress_resolves_bug_prefix(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "bug", "Flaky Test"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Flaky Test"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-flaky-test.md"
+        from keeli.main import _parse_task_field
+        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
+
+    def test_reopen_resolves_feat_prefix(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Dark Theme"]):
+            main()
+        # Complete it first, then reopen
+        task = initialized_dir / "docs" / "tasks" / "feat-dark-theme.md"
+        from keeli.main import _update_task_field, _parse_task_field
+        task.write_text(_update_task_field(task.read_text(), "Status", "Completed"))
+
+        with patch("sys.argv", ["keeli", "reopen", "Dark Theme"]):
+            main()
+        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
