@@ -1,4 +1,4 @@
-"""Tests for `persona init` command."""
+"""Tests for `keeli init` command."""
 
 import os
 import pytest
@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 # We test by invoking main() directly with patched sys.argv
-from persona_cli.main import main
+from keeli.main import main
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def clean_dir(tmp_path, monkeypatch):
 
 class TestInit:
     def test_creates_all_files(self, clean_dir):
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         assert (clean_dir / ".github" / "copilot-instructions.md").exists()
@@ -34,7 +34,7 @@ class TestInit:
         (clean_dir / ".github").mkdir()
         (clean_dir / ".github" / "copilot-instructions.md").write_text(marker)
 
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         content = (clean_dir / ".github" / "copilot-instructions.md").read_text()
@@ -45,7 +45,7 @@ class TestInit:
         (clean_dir / ".github").mkdir()
         (clean_dir / ".github" / "copilot-instructions.md").write_text(marker)
 
-        with patch("sys.argv", ["persona", "init", "--force"]):
+        with patch("sys.argv", ["keeli", "init", "--force"]):
             main()
 
         content = (clean_dir / ".github" / "copilot-instructions.md").read_text()
@@ -55,7 +55,7 @@ class TestInit:
     def test_gitignore_appends_if_exists(self, clean_dir):
         (clean_dir / ".gitignore").write_text("node_modules/\n")
 
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         content = (clean_dir / ".gitignore").read_text()
@@ -63,9 +63,9 @@ class TestInit:
         assert "docs/ai_log.md" in content
 
     def test_schema_version_in_files(self, clean_dir):
-        from persona_cli.templates import SCHEMA_VERSION
+        from keeli.templates import SCHEMA_VERSION
 
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         for f in ["docs/project.md", "docs/decision.md", ".github/copilot-instructions.md"]:

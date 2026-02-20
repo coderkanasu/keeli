@@ -1,17 +1,17 @@
-"""Tests for `persona start`, `persona log`, `persona resume`, `persona status`, `persona clear-log`."""
+"""Tests for `keeli start`, `keeli log`, `keeli resume`, `keeli status`, `keeli clear-log`."""
 
 import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from persona_cli.main import main
+from keeli.main import main
 
 
 @pytest.fixture
 def initialized_dir(tmp_path, monkeypatch):
     """Run `persona init` in a temp dir and return the path."""
     monkeypatch.chdir(tmp_path)
-    with patch("sys.argv", ["persona", "init"]):
+    with patch("sys.argv", ["keeli", "init"]):
         main()
     return tmp_path
 
@@ -20,7 +20,7 @@ def initialized_dir(tmp_path, monkeypatch):
 
 class TestStart:
     def test_creates_task_file(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Implement Auth"]):
+        with patch("sys.argv", ["keeli", "start", "Implement Auth"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "implement-auth.md"
@@ -31,7 +31,7 @@ class TestStart:
         assert "**Priority:** P1" in content  # default priority
 
     def test_slugifies_name(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Fix Bug #42!!"]):
+        with patch("sys.argv", ["keeli", "start", "Fix Bug #42!!"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "fix-bug-42.md"
@@ -41,7 +41,7 @@ class TestStart:
         ctx = initialized_dir / "docs" / "requirements" / "auth-spec.md"
         ctx.write_text("# Auth Spec\nDetails here.")
 
-        with patch("sys.argv", ["persona", "start", "Auth Feature", "-c", str(ctx)]):
+        with patch("sys.argv", ["keeli", "start", "Auth Feature", "-c", str(ctx)]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "auth-feature.md"
@@ -49,26 +49,26 @@ class TestStart:
         assert "auth-spec.md" in content
 
     def test_does_not_overwrite_without_force(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "My Task"]):
+        with patch("sys.argv", ["keeli", "start", "My Task"]):
             main()
         marker = "ORIGINAL"
         (initialized_dir / "docs" / "tasks" / "my-task.md").write_text(marker)
 
-        with patch("sys.argv", ["persona", "start", "My Task"]):
+        with patch("sys.argv", ["keeli", "start", "My Task"]):
             main()
 
         content = (initialized_dir / "docs" / "tasks" / "my-task.md").read_text()
         assert content == marker
 
     def test_auto_logs_creation(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "New Feature"]):
+        with patch("sys.argv", ["keeli", "start", "New Feature"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Task created: New Feature" in log
 
     def test_priority_flag(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Critical Fix", "-p", "P0"]):
+        with patch("sys.argv", ["keeli", "start", "Critical Fix", "-p", "P0"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "critical-fix.md"
@@ -80,9 +80,9 @@ class TestStart:
 
 class TestComplete:
     def test_marks_task_completed(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "My Task"]):
+        with patch("sys.argv", ["keeli", "start", "My Task"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "My Task"]):
+        with patch("sys.argv", ["keeli", "complete", "My Task"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "my-task.md"
@@ -91,20 +91,20 @@ class TestComplete:
         assert "**Completed:** 20" in content  # timestamp starts with year
 
     def test_logs_completion(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Log Test"]):
+        with patch("sys.argv", ["keeli", "start", "Log Test"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Log Test"]):
+        with patch("sys.argv", ["keeli", "complete", "Log Test"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Task completed: Log Test" in log
 
     def test_suggests_next_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "First Task", "-p", "P0"]):
+        with patch("sys.argv", ["keeli", "start", "First Task", "-p", "P0"]):
             main()
-        with patch("sys.argv", ["persona", "start", "Second Task", "-p", "P1"]):
+        with patch("sys.argv", ["keeli", "start", "Second Task", "-p", "P1"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "First Task"]):
+        with patch("sys.argv", ["keeli", "complete", "First Task"]):
             main()
 
         output = capsys.readouterr().out
@@ -112,20 +112,20 @@ class TestComplete:
         assert "second-task" in output
 
     def test_all_done_message(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "Only Task"]):
+        with patch("sys.argv", ["keeli", "start", "Only Task"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Only Task"]):
+        with patch("sys.argv", ["keeli", "complete", "Only Task"]):
             main()
 
         output = capsys.readouterr().out
         assert "All tasks are complete" in output
 
     def test_already_completed(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "Done Task"]):
+        with patch("sys.argv", ["keeli", "start", "Done Task"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Done Task"]):
+        with patch("sys.argv", ["keeli", "complete", "Done Task"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Done Task"]):
+        with patch("sys.argv", ["keeli", "complete", "Done Task"]):
             main()
 
         output = capsys.readouterr().out
@@ -136,18 +136,18 @@ class TestComplete:
 
 class TestNext:
     def test_shows_highest_priority_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "Low Prio", "-p", "P2"]):
+        with patch("sys.argv", ["keeli", "start", "Low Prio", "-p", "P2"]):
             main()
-        with patch("sys.argv", ["persona", "start", "High Prio", "-p", "P0"]):
+        with patch("sys.argv", ["keeli", "start", "High Prio", "-p", "P0"]):
             main()
-        with patch("sys.argv", ["persona", "next", "-q"]):
+        with patch("sys.argv", ["keeli", "next", "-q"]):
             main()
 
         output = capsys.readouterr().out
         assert "high-prio" in output
 
     def test_no_tasks_remaining(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "next"]):
+        with patch("sys.argv", ["keeli", "next"]):
             main()
 
         output = capsys.readouterr().out
@@ -158,7 +158,7 @@ class TestNext:
 
 class TestLog:
     def test_appends_timestamped_entry(self, initialized_dir):
-        with patch("sys.argv", ["persona", "log", "Fixed auth bug"]):
+        with patch("sys.argv", ["keeli", "log", "Fixed auth bug"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
@@ -168,7 +168,7 @@ class TestLog:
 
     def test_multiple_entries(self, initialized_dir):
         for msg in ["First entry", "Second entry", "Third entry"]:
-            with patch("sys.argv", ["persona", "log", msg]):
+            with patch("sys.argv", ["keeli", "log", msg]):
                 main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
@@ -180,35 +180,35 @@ class TestLog:
 
 class TestResume:
     def test_brief_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "Active Task"]):
+        with patch("sys.argv", ["keeli", "start", "Active Task"]):
             main()
 
-        with patch("sys.argv", ["persona", "resume", "--brief"]):
+        with patch("sys.argv", ["keeli", "resume", "--brief"]):
             main()
 
         output = capsys.readouterr().out
         assert "Project" in output or "Active Tasks" in output
 
     def test_full_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "resume", "--full"]):
+        with patch("sys.argv", ["keeli", "resume", "--full"]):
             main()
 
         output = capsys.readouterr().out
-        assert "Persona Framework" in output
+        assert "Keeli Framework" in output
 
     def test_default_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "resume"]):
+        with patch("sys.argv", ["keeli", "resume"]):
             main()
 
         output = capsys.readouterr().out
-        assert "Persona Framework" in output
+        assert "Keeli Framework" in output
 
 
 # ── persona status ─────────────────────────────────────────────────────────
 
 class TestStatus:
     def test_healthy_after_init(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "status"]):
+        with patch("sys.argv", ["keeli", "status"]):
             main()
 
         output = capsys.readouterr().out
@@ -217,7 +217,7 @@ class TestStatus:
     def test_unhealthy_when_file_missing(self, initialized_dir, capsys):
         (initialized_dir / "docs" / "decision.md").unlink()
 
-        with patch("sys.argv", ["persona", "status"]):
+        with patch("sys.argv", ["keeli", "status"]):
             main()
 
         output = capsys.readouterr().out
@@ -228,9 +228,9 @@ class TestStatus:
 
 class TestClearLog:
     def test_clears_log(self, initialized_dir):
-        with patch("sys.argv", ["persona", "log", "Some noise"]):
+        with patch("sys.argv", ["keeli", "log", "Some noise"]):
             main()
-        with patch("sys.argv", ["persona", "clear-log"]):
+        with patch("sys.argv", ["keeli", "clear-log"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
@@ -242,9 +242,9 @@ class TestClearLog:
 
 class TestProgress:
     def test_marks_task_in_progress(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "My Task"]):
+        with patch("sys.argv", ["keeli", "start", "My Task"]):
             main()
-        with patch("sys.argv", ["persona", "progress", "My Task"]):
+        with patch("sys.argv", ["keeli", "progress", "My Task"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "my-task.md"
@@ -252,27 +252,27 @@ class TestProgress:
         assert "**Status:** In Progress" in content
 
     def test_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Log Progress"]):
+        with patch("sys.argv", ["keeli", "start", "Log Progress"]):
             main()
-        with patch("sys.argv", ["persona", "progress", "Log Progress"]):
+        with patch("sys.argv", ["keeli", "progress", "Log Progress"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Task started: Log Progress" in log
 
     def test_already_in_progress(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "WIP Task"]):
+        with patch("sys.argv", ["keeli", "start", "WIP Task"]):
             main()
-        with patch("sys.argv", ["persona", "progress", "WIP Task"]):
+        with patch("sys.argv", ["keeli", "progress", "WIP Task"]):
             main()
-        with patch("sys.argv", ["persona", "progress", "WIP Task"]):
+        with patch("sys.argv", ["keeli", "progress", "WIP Task"]):
             main()
 
         output = capsys.readouterr().out
         assert "already In Progress" in output
 
     def test_not_found(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "progress", "Nonexistent"]):
+        with patch("sys.argv", ["keeli", "progress", "Nonexistent"]):
             main()
 
         output = capsys.readouterr().out
@@ -283,9 +283,9 @@ class TestProgress:
 
 class TestBlock:
     def test_marks_task_blocked(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Blocked Task"]):
+        with patch("sys.argv", ["keeli", "start", "Blocked Task"]):
             main()
-        with patch("sys.argv", ["persona", "block", "Blocked Task"]):
+        with patch("sys.argv", ["keeli", "block", "Blocked Task"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "blocked-task.md"
@@ -293,9 +293,9 @@ class TestBlock:
         assert "**Status:** Blocked" in content
 
     def test_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Block Log"]):
+        with patch("sys.argv", ["keeli", "start", "Block Log"]):
             main()
-        with patch("sys.argv", ["persona", "block", "Block Log"]):
+        with patch("sys.argv", ["keeli", "block", "Block Log"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
@@ -310,7 +310,7 @@ class TestUpdate:
         instructions = initialized_dir / ".github" / "copilot-instructions.md"
         instructions.write_text("# Old template v0.1.0\nStale content.")
 
-        with patch("sys.argv", ["persona", "update"]):
+        with patch("sys.argv", ["keeli", "update"]):
             main()
 
         output = capsys.readouterr().out
@@ -319,14 +319,14 @@ class TestUpdate:
         assert "Four-Persona Architecture" in content
 
     def test_skip_if_same_version(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "update"]):
+        with patch("sys.argv", ["keeli", "update"]):
             main()
 
         output = capsys.readouterr().out
         assert "Already at" in output
 
     def test_force_regenerate(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "update", "--force"]):
+        with patch("sys.argv", ["keeli", "update", "--force"]):
             main()
 
         output = capsys.readouterr().out
@@ -337,7 +337,7 @@ class TestUpdate:
         project = initialized_dir / "docs" / "project.md"
         project.write_text("# My Custom Project")
 
-        with patch("sys.argv", ["persona", "update", "--force"]):
+        with patch("sys.argv", ["keeli", "update", "--force"]):
             main()
 
         # project.md should be untouched
@@ -348,7 +348,7 @@ class TestUpdate:
 
 class TestResumeTokenEstimate:
     def test_shows_token_estimate(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "resume"]):
+        with patch("sys.argv", ["keeli", "resume"]):
             main()
 
         output = capsys.readouterr().out
@@ -356,14 +356,14 @@ class TestResumeTokenEstimate:
         assert "default mode" in output
 
     def test_brief_mode_label(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "resume", "--brief"]):
+        with patch("sys.argv", ["keeli", "resume", "--brief"]):
             main()
 
         output = capsys.readouterr().out
         assert "brief mode" in output
 
     def test_full_mode_label(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "resume", "--full"]):
+        with patch("sys.argv", ["keeli", "resume", "--full"]):
             main()
 
         output = capsys.readouterr().out
@@ -375,7 +375,7 @@ class TestResumeTokenEstimate:
 class TestInitGitkeep:
     def test_creates_gitkeep_files(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         assert (tmp_path / "docs" / "tasks" / ".gitkeep").exists()
@@ -386,11 +386,11 @@ class TestInitGitkeep:
 
 class TestReopen:
     def test_reopens_completed_task(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Reopen Me"]):
+        with patch("sys.argv", ["keeli", "start", "Reopen Me"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Reopen Me"]):
+        with patch("sys.argv", ["keeli", "complete", "Reopen Me"]):
             main()
-        with patch("sys.argv", ["persona", "reopen", "Reopen Me"]):
+        with patch("sys.argv", ["keeli", "reopen", "Reopen Me"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "reopen-me.md"
@@ -399,27 +399,27 @@ class TestReopen:
         assert "**Completed:** —" in content
 
     def test_logs_reopen_event(self, initialized_dir):
-        with patch("sys.argv", ["persona", "start", "Log Reopen"]):
+        with patch("sys.argv", ["keeli", "start", "Log Reopen"]):
             main()
-        with patch("sys.argv", ["persona", "complete", "Log Reopen"]):
+        with patch("sys.argv", ["keeli", "complete", "Log Reopen"]):
             main()
-        with patch("sys.argv", ["persona", "reopen", "Log Reopen"]):
+        with patch("sys.argv", ["keeli", "reopen", "Log Reopen"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Task reopened: Log Reopen" in log
 
     def test_cannot_reopen_backlog_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "start", "Backlog Task"]):
+        with patch("sys.argv", ["keeli", "start", "Backlog Task"]):
             main()
-        with patch("sys.argv", ["persona", "reopen", "Backlog Task"]):
+        with patch("sys.argv", ["keeli", "reopen", "Backlog Task"]):
             main()
 
         output = capsys.readouterr().out
         assert "reopen only works on Completed or Review" in output
 
     def test_reopen_not_found(self, initialized_dir, capsys):
-        with patch("sys.argv", ["persona", "reopen", "Nonexistent"]):
+        with patch("sys.argv", ["keeli", "reopen", "Nonexistent"]):
             main()
 
         output = capsys.readouterr().out
@@ -430,7 +430,7 @@ class TestReopen:
 
 class TestBug:
     def test_creates_bug_report(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "Login crash"]):
+        with patch("sys.argv", ["keeli", "bug", "Login crash"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "bug-login-crash.md"
@@ -441,7 +441,7 @@ class TestBug:
         assert "- [ ] Write regression test" in content
 
     def test_bug_with_description(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "NullPointer in OrderService", "-d", "Happens when order.qty is null"]):
+        with patch("sys.argv", ["keeli", "bug", "NullPointer in OrderService", "-d", "Happens when order.qty is null"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "bug-nullpointer-in-orderservice.md"
@@ -449,7 +449,7 @@ class TestBug:
         assert "Happens when order.qty is null" in content
 
     def test_bug_with_priority(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "Minor typo", "-p", "P2"]):
+        with patch("sys.argv", ["keeli", "bug", "Minor typo", "-p", "P2"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "bug-minor-typo.md"
@@ -457,7 +457,7 @@ class TestBug:
         assert "**Priority:** P2" in content
 
     def test_bug_with_found_during(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "Race condition", "--found-during", "implement-auth"]):
+        with patch("sys.argv", ["keeli", "bug", "Race condition", "--found-during", "implement-auth"]):
             main()
 
         task = initialized_dir / "docs" / "tasks" / "bug-race-condition.md"
@@ -465,19 +465,19 @@ class TestBug:
         assert "implement-auth" in content
 
     def test_bug_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "Auth bypass"]):
+        with patch("sys.argv", ["keeli", "bug", "Auth bypass"]):
             main()
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Bug reported: Auth bypass" in log
 
     def test_bug_no_overwrite_without_force(self, initialized_dir):
-        with patch("sys.argv", ["persona", "bug", "Dup Bug"]):
+        with patch("sys.argv", ["keeli", "bug", "Dup Bug"]):
             main()
         marker = "ORIGINAL"
         (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").write_text(marker)
 
-        with patch("sys.argv", ["persona", "bug", "Dup Bug"]):
+        with patch("sys.argv", ["keeli", "bug", "Dup Bug"]):
             main()
         assert (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").read_text() == marker
 
@@ -487,7 +487,7 @@ class TestBug:
 class TestInitSkills:
     def test_project_md_has_skills(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        with patch("sys.argv", ["persona", "init"]):
+        with patch("sys.argv", ["keeli", "init"]):
             main()
 
         content = (tmp_path / "docs" / "project.md").read_text()

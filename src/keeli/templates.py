@@ -1,5 +1,5 @@
 """
-All file templates used by `persona init`, `persona start`, and `persona log`.
+All file templates used by `keeli init`, `keeli start`, and `keeli log`.
 Centralised here so they can be tested and versioned independently.
 """
 
@@ -11,7 +11,7 @@ SCHEMA_VERSION = "0.3.0"
 # ---------------------------------------------------------------------------
 # .github/copilot-instructions.md
 # ---------------------------------------------------------------------------
-COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions  (Persona Framework v{SCHEMA_VERSION})
+COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
 
 ## Core Philosophy
 You are operating under a strict **Four-Persona Architecture**.
@@ -132,7 +132,7 @@ A task is **done** when:
 
 ### Auto-Completion Rule
 You **MUST** mark a task as completed yourself the moment you finish it.
-Do **NOT** wait for the human to run `persona complete`. When you finish
+Do **NOT** wait for the human to run `keeli complete`. When you finish
 implementing and all checklist items are done:
 1. Edit the task file: set `**Status:** Completed` and `**Completed:** <ISO-8601 timestamp>`.
 2. Check off all checklist boxes (`- [x]`).
@@ -150,7 +150,7 @@ You must maintain a continuous audit trail and project state:
 | `docs/project.md` | @architect | Project context, tech stack, architecture |
 | `docs/decision.md` | @architect | Decisions with rationale and rejected alternatives |
 | `docs/tasks/<slug>.md` | @architect / @developer | Per-task tracking with TDD checklist |
-| `docs/tasks/bug-*.md` | @developer | Bug reports created via `persona bug` |
+| `docs/tasks/bug-*.md` | @developer | Bug reports created via `keeli bug` |
 | `docs/requirements/` | Human / @architect | Requirements and specs linked via `--context` |
 | `docs/ai_log.md` | All | Timestamped audit log with session markers |
 
@@ -163,7 +163,7 @@ You must maintain a continuous audit trail and project state:
 # ---------------------------------------------------------------------------
 # docs/project.md
 # ---------------------------------------------------------------------------
-PROJECT_MD = f"""# Project Documentation  (Persona Framework v{SCHEMA_VERSION})
+PROJECT_MD = f"""# Project Documentation  (Keeli Framework v{SCHEMA_VERSION})
 
 ## Overview
 <!-- Describe the project purpose, users, and high-level goals. -->
@@ -195,7 +195,7 @@ PROJECT_MD = f"""# Project Documentation  (Persona Framework v{SCHEMA_VERSION})
 # ---------------------------------------------------------------------------
 # docs/decision.md
 # ---------------------------------------------------------------------------
-DECISION_MD = f"""# Decision Log  (Persona Framework v{SCHEMA_VERSION})
+DECISION_MD = f"""# Decision Log  (Keeli Framework v{SCHEMA_VERSION})
 
 Record every significant decision using the template below.
 
@@ -218,9 +218,9 @@ Record every significant decision using the template below.
 # ---------------------------------------------------------------------------
 # docs/ai_log.md
 # ---------------------------------------------------------------------------
-AI_LOG_MD = f"""# AI Audit Log  (Persona Framework v{SCHEMA_VERSION})
+AI_LOG_MD = f"""# AI Audit Log  (Keeli Framework v{SCHEMA_VERSION})
 
-<!-- Timestamped entries appended by the AI and by `persona log`. -->
+<!-- Timestamped entries appended by the AI and by `keeli log`. -->
 <!-- Format: YYYY-MM-DDTHH:MM:SS | <persona> | <message> -->
 
 """
@@ -253,7 +253,7 @@ TASK_TEMPLATE = """# Task: {title}
 # ---------------------------------------------------------------------------
 # .gitignore additions
 # ---------------------------------------------------------------------------
-GITIGNORE_CONTENT = """# Persona CLI
+GITIGNORE_CONTENT = """# Keeli
 docs/ai_log.md
 
 # Python

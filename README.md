@@ -1,4 +1,4 @@
-# Persona CLI
+# Keeli
 
 A command-line tool to enforce a strict **Four-Persona Architecture** for GitHub Copilot and other AI agents. Designed to help **stateless LLMs regain context fast** and make steady progress across sessions.
 
@@ -14,50 +14,50 @@ pip install -e .
 
 ```bash
 # 1. Scaffold the framework in any project
-persona init
+keeli init
 
 # 2. Create a task (team of personas kicks in)
-persona start "Implement Auth" --context docs/requirements/auth-spec.md -p P0
+keeli start "Implement Auth" --context docs/requirements/auth-spec.md -p P0
 
 # 3. Transition task status as work progresses
-persona progress "Implement Auth"   # Backlog → In Progress
-persona block "Implement Auth"      # In Progress → Blocked
-persona complete "Implement Auth"   # → Completed (suggests next task)
-persona reopen "Implement Auth"     # Completed → In Progress (rework needed)
+keeli progress "Implement Auth"   # Backlog → In Progress
+keeli block "Implement Auth"      # In Progress → Blocked
+keeli complete "Implement Auth"   # → Completed (suggests next task)
+keeli reopen "Implement Auth"     # Completed → In Progress (rework needed)
 
 # 4. Found a bug while debugging? Log it as a tracked task
-persona bug "NullPointer in OrderService" -d "Happens when qty is null" --found-during "implement-auth"
+keeli bug "NullPointer in OrderService" -d "Happens when qty is null" --found-during "implement-auth"
 
 # 5. Log an event for audit
-persona log "Unit tests passed for auth module"
+keeli log "Unit tests passed for auth module"
 
 # 6. New session? Catch up fast (token-aware!)
-persona resume            # default ~1500 tokens
-persona resume --brief    # minimal ~500 tokens
-persona resume --full     # everything ~3000 tokens
+keeli resume            # default ~1500 tokens
+keeli resume --brief    # minimal ~500 tokens
+keeli resume --full     # everything ~3000 tokens
 
-# 7. Upgrade instructions after a Persona CLI update
-persona update
+# 7. Upgrade instructions after a Keeli update
+keeli update
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `persona init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
-| `persona start <name> [-c file] [-p P0\|P1\|P2] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist |
-| `persona bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
-| `persona progress <name>` | Mark a task as **In Progress** |
-| `persona block <name>` | Mark a task as **Blocked** |
-| `persona complete <name>` | Mark a task as **Completed** and suggest the next task |
-| `persona reopen <name>` | Reopen a **Completed** task (back to In Progress) |
-| `persona next [-q]` | Show the next task to work on (by priority, then age) |
-| `persona log <message>` | Append a timestamped entry to `docs/ai_log.md` |
-| `persona resume [--brief\|--full]` | Dump project context sized to your token budget |
-| `persona status` | Health-check all expected Persona files |
-| `persona clear-log` | Reset `docs/ai_log.md` to its default state |
-| `persona update [-f]` | Update `copilot-instructions.md` to latest template (preserves user files) |
-| `persona --version` | Print the current Persona Framework version |
+| `keeli init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
+| `keeli start <name> [-c file] [-p P0\|P1\|P2] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist |
+| `keeli bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
+| `keeli progress <name>` | Mark a task as **In Progress** |
+| `keeli block <name>` | Mark a task as **Blocked** |
+| `keeli complete <name>` | Mark a task as **Completed** and suggest the next task |
+| `keeli reopen <name>` | Reopen a **Completed** task (back to In Progress) |
+| `keeli next [-q]` | Show the next task to work on (by priority, then age) |
+| `keeli log <message>` | Append a timestamped entry to `docs/ai_log.md` |
+| `keeli resume [--brief\|--full]` | Dump project context sized to your token budget |
+| `keeli status` | Health-check all expected Keeli files |
+| `keeli clear-log` | Reset `docs/ai_log.md` to its default state |
+| `keeli update [-f]` | Update `copilot-instructions.md` to latest template (preserves user files) |
+| `keeli --version` | Print the current Keeli Framework version |
 
 ## Task Lifecycle
 
@@ -80,23 +80,23 @@ When picking the next task:
 
 ### Bug Tracking
 
-Use `persona bug` to quickly log issues found during debugging:
+Use `keeli bug` to quickly log issues found during debugging:
 
 ```bash
-persona bug "Login crash on empty password" -p P0 --found-during "implement-auth"
+keeli bug "Login crash on empty password" -p P0 --found-during "implement-auth"
 ```
 
 Bug reports are saved as `docs/tasks/bug-<slug>.md` with their own template including reproduction steps, expected/actual behavior, and a regression test checklist. They participate in the same lifecycle and priority queue as regular tasks.
 
 ### Auto-Completion Rule
 
-The AI is instructed to mark tasks as completed **itself** — it doesn't wait for you to run `persona complete`. When the AI finishes work, it:
+The AI is instructed to mark tasks as completed **itself** — it doesn't wait for you to run `keeli complete`. When the AI finishes work, it:
 1. Sets `**Status:** Completed` and adds a timestamp.
 2. Checks off all checklist boxes.
 3. Logs the completion event.
 4. Immediately picks up the next task.
 
-## What `persona init` Creates
+## What `keeli init` Creates
 
 ```
 .github/
@@ -139,9 +139,9 @@ The AI must pause and ask for confirmation when:
 
 Since LLMs are stateless with limited context windows, the framework is designed to **expand or shrink** based on available tokens:
 
-- **`persona resume --brief`** (~500 tokens): Project overview + active task names only.
-- **`persona resume`** (~1500 tokens): Above + recent log entries + decision summary.
-- **`persona resume --full`** (~3000 tokens): Everything including full decision log.
+- **`keeli resume --brief`** (~500 tokens): Project overview + active task names only.
+- **`keeli resume`** (~1500 tokens): Above + recent log entries + decision summary.
+- **`keeli resume --full`** (~3000 tokens): Everything including full decision log.
 
 Each invocation prints an approximate token estimate so you can verify the output fits your context window.
 
@@ -161,7 +161,7 @@ Every new AI session is instructed to:
 The framework embeds a version number (`v0.3.0`) in all generated files. When you upgrade the CLI, run:
 
 ```bash
-persona update
+keeli update
 ```
 
 This regenerates `copilot-instructions.md` with the latest template while preserving your `project.md`, `decision.md`, tasks, and logs.
