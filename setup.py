@@ -2,12 +2,14 @@ from setuptools import setup, find_packages
 
 setup(
     name="persona-cli",
-    version="0.1.0",
-    packages=find_packages(),
+    version="0.2.0",
+    description="Enforce a Three-Persona Architecture for AI Agents.",
+    packages=find_packages(where="src"),
+    package_dir={"": "src"},
+    python_requires=">=3.8",
     entry_points={
         "console_scripts": [
-            "persona=persona:main",
+            "persona=persona_cli.main:main",
         ],
     },
-    py_modules=["persona"],
 )

@@ -1,4 +1,17 @@
-# GitHub Copilot Custom Instructions  (Persona Framework v0.2.0)
+"""
+All file templates used by `persona init`, `persona start`, and `persona log`.
+Centralised here so they can be tested and versioned independently.
+"""
+
+# ---------------------------------------------------------------------------
+# Schema version – bump when template format changes
+# ---------------------------------------------------------------------------
+SCHEMA_VERSION = "0.2.0"
+
+# ---------------------------------------------------------------------------
+# .github/copilot-instructions.md
+# ---------------------------------------------------------------------------
+COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions  (Persona Framework v{SCHEMA_VERSION})
 
 ## Core Philosophy
 You are operating under a strict **Three-Persona Architecture**.
@@ -86,3 +99,97 @@ You must maintain a continuous audit trail and project state:
 - Every log entry **MUST** include an ISO-8601 timestamp.
 - At the start of each session, append a `--- SESSION START ---` marker.
 - Keep individual log entries to **one line** when possible to save tokens.
+"""
+
+# ---------------------------------------------------------------------------
+# docs/project.md
+# ---------------------------------------------------------------------------
+PROJECT_MD = f"""# Project Documentation  (Persona Framework v{SCHEMA_VERSION})
+
+## Overview
+<!-- Describe the project purpose, users, and high-level goals. -->
+
+## Tech Stack
+<!-- e.g. Python 3.12, FastAPI, PostgreSQL, React -->
+
+## Architecture
+<!-- High-level system design, key modules, data flow. -->
+
+## Key Decisions
+<!-- Link to docs/decision.md for detailed ADRs. -->
+"""
+
+# ---------------------------------------------------------------------------
+# docs/decision.md
+# ---------------------------------------------------------------------------
+DECISION_MD = f"""# Decision Log  (Persona Framework v{SCHEMA_VERSION})
+
+Record every significant decision using the template below.
+
+---
+
+### TEMPLATE
+**Date:** YYYY-MM-DD
+**Decision:** <What was decided>
+**Context:** <Why this decision was needed>
+**Alternatives Considered:**
+1. <Option A> — rejected because …
+2. <Option B> — rejected because …
+**Consequences:** <What this means going forward>
+
+---
+
+<!-- Add new decisions above this line -->
+"""
+
+# ---------------------------------------------------------------------------
+# docs/ai_log.md
+# ---------------------------------------------------------------------------
+AI_LOG_MD = f"""# AI Audit Log  (Persona Framework v{SCHEMA_VERSION})
+
+<!-- Timestamped entries appended by the AI and by `persona log`. -->
+<!-- Format: YYYY-MM-DDTHH:MM:SS | <persona> | <message> -->
+
+"""
+
+# ---------------------------------------------------------------------------
+# docs/tasks/ — individual task template
+# ---------------------------------------------------------------------------
+TASK_TEMPLATE = """# Task: {title}
+
+**Status:** Backlog
+**Created:** {timestamp}
+**Context:** {context_note}
+
+## Objective
+<!-- @architect: describe what needs to be done and why -->
+
+## Checklist
+- [ ] Create tests
+- [ ] Implement solution
+- [ ] @security review
+- [ ] Update docs/project.md if needed
+- [ ] Log completion in docs/ai_log.md
+
+## Notes
+<!-- @developer: add implementation notes, questions, blockers -->
+"""
+
+# ---------------------------------------------------------------------------
+# .gitignore additions
+# ---------------------------------------------------------------------------
+GITIGNORE_CONTENT = """# Persona CLI
+docs/ai_log.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+.env
+venv/
+env/
+"""
