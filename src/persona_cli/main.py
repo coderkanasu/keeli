@@ -73,6 +73,12 @@ def cmd_init(args: argparse.Namespace) -> None:
         for d in [Path(".github"), Path("docs"), Path("docs/tasks"), Path("docs/requirements")]:
             d.mkdir(parents=True, exist_ok=True)
 
+        # .gitkeep for empty dirs (so Git tracks them)
+        for d in [Path("docs/tasks"), Path("docs/requirements")]:
+            gitkeep = d / ".gitkeep"
+            if not gitkeep.exists():
+                gitkeep.touch()
+
         # Core files
         _write_file(Path(".github/copilot-instructions.md"), COPILOT_INSTRUCTIONS, force=force)
         _write_file(Path("docs/project.md"), PROJECT_MD, force=force)
@@ -204,6 +210,44 @@ def _get_next_task() -> tuple[Path | None, str | None]:
     return None, None
 
 
+def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -> None:
+    """Generic helper to transition a task to a new status."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = tasks_dir / f"{slug}.md"
+
+    if not task_file.exists():
+        print(f"❌ Task file {task_file} not found.")
+        return
+
+    text = task_file.read_text()
+    current = _parse_task_field(text, "Status")
+
+    if current.lower() == new_status.lower():
+        print(f"⚠️  {task_file} is already {new_status}.")
+        return
+
+    text = _update_task_field(text, "Status", new_status)
+    task_file.write_text(text)
+    print(f"✅ Marked as {new_status}: {task_file}")
+
+    _append_log(f"@developer | Task {log_verb}: {args.task_name} → {task_file}")
+
+
+def cmd_progress(args: argparse.Namespace) -> None:
+    """Mark a task as In Progress."""
+    _transition_task(args, "In Progress", "started")
+
+
+def cmd_block(args: argparse.Namespace) -> None:
+    """Mark a task as Blocked."""
+    _transition_task(args, "Blocked", "blocked")
+
+
 def cmd_complete(args: argparse.Namespace) -> None:
     """Mark a task as completed and suggest the next one."""
     tasks_dir = Path("docs/tasks")
@@ -290,16 +334,12 @@ def cmd_resume(args: argparse.Namespace) -> None:
         active: list[str] = []
         for tf in sorted(tasks_dir.glob("*.md")):
             text = tf.read_text()
-            # Find status line
-            for line in text.splitlines():
-                if line.startswith("**Status:**"):
-                    status = line.split(":**")[1].strip()
-                    if status.lower() in ("in progress", "blocked", "backlog"):
-                        if brief:
-                            active.append(f"- [{tf.stem}] {status}")
-                        else:
-                            active.append(f"### {tf.stem} ({status})\n{text}")
-                    break
+            status = _parse_task_field(text, "Status")
+            if status.lower() in ("in progress", "blocked", "backlog"):
+                if brief:
+                    active.append(f"- [{tf.stem}] {status}")
+                else:
+                    active.append(f"### {tf.stem} ({status})\n{text}")
         if active:
             sections.append("## Active Tasks\n" + "\n".join(active))
         else:
@@ -330,6 +370,12 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
     output = "\n\n---\n\n".join(sections)
     print(output)
+
+    # Token estimate
+    word_count = len(output.split())
+    token_estimate = int(word_count * 1.3)  # rough word→token ratio
+    mode_label = "brief" if brief else ("full" if full else "default")
+    print(f"\n📊 ~{word_count} words / ~{token_estimate} tokens ({mode_label} mode)")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -370,6 +416,46 @@ def cmd_clear_log(args: argparse.Namespace) -> None:
         print("✅ Cleared docs/ai_log.md")
     else:
         print("⚠️  docs/ai_log.md not found. Run `persona init` first.")
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    """Update copilot-instructions.md to the latest template version.
+
+    Preserves user files (project.md, decision.md, tasks, log).
+    Only regenerates the instruction file and .gitignore rules.
+    """
+    instructions = Path(".github/copilot-instructions.md")
+    if not instructions.exists():
+        print("❌ .github/copilot-instructions.md not found. Run `persona init` first.")
+        return
+
+    old_text = instructions.read_text()
+    # Extract old version if possible
+    old_version = "unknown"
+    for line in old_text.splitlines():
+        if "Persona Framework v" in line:
+            import re as _re
+            m = _re.search(r"v(\d+\.\d+\.\d+)", line)
+            if m:
+                old_version = m.group(1)
+            break
+
+    if old_version == SCHEMA_VERSION and not args.force:
+        print(f"✅ Already at v{SCHEMA_VERSION}. Use --force to regenerate.")
+        return
+
+    instructions.write_text(COPILOT_INSTRUCTIONS)
+    print(f"✅ Updated copilot-instructions.md: v{old_version} → v{SCHEMA_VERSION}")
+
+    # Ensure .gitkeep files exist
+    for d in [Path("docs/tasks"), Path("docs/requirements")]:
+        d.mkdir(parents=True, exist_ok=True)
+        gitkeep = d / ".gitkeep"
+        if not gitkeep.exists():
+            gitkeep.touch()
+
+    _append_log(f"@architect | Schema updated: v{old_version} → v{SCHEMA_VERSION}")
+    print(f"📝 User files (project.md, decision.md, tasks, log) preserved.")
 
 
 # ── Argument parser ────────────────────────────────────────────────────────
@@ -419,6 +505,18 @@ def build_parser() -> argparse.ArgumentParser:
     # clear-log
     sub.add_parser("clear-log", help="Reset the AI audit log.")
 
+    # progress
+    p_progress = sub.add_parser("progress", help="Mark a task as In Progress.")
+    p_progress.add_argument("task_name", help="Task title or slug.")
+
+    # block
+    p_block = sub.add_parser("block", help="Mark a task as Blocked.")
+    p_block.add_argument("task_name", help="Task title or slug.")
+
+    # update
+    p_update = sub.add_parser("update", help="Update copilot-instructions.md to latest template.")
+    p_update.add_argument("-f", "--force", action="store_true", help="Regenerate even if same version.")
+
     return parser
 
 
@@ -435,6 +533,9 @@ def main() -> None:
         "resume": cmd_resume,
         "status": cmd_status,
         "clear-log": cmd_clear_log,
+        "progress": cmd_progress,
+        "block": cmd_block,
+        "update": cmd_update,
     }
 
     handler = dispatch.get(args.command)

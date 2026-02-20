@@ -236,3 +236,147 @@ class TestClearLog:
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Some noise" not in log
         assert "AI Audit Log" in log
+
+
+# ── persona progress ───────────────────────────────────────────────────────
+
+class TestProgress:
+    def test_marks_task_in_progress(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "My Task"]):
+            main()
+        with patch("sys.argv", ["persona", "progress", "My Task"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "my-task.md"
+        content = task.read_text()
+        assert "**Status:** In Progress" in content
+
+    def test_logs_event(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Log Progress"]):
+            main()
+        with patch("sys.argv", ["persona", "progress", "Log Progress"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Task started: Log Progress" in log
+
+    def test_already_in_progress(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "WIP Task"]):
+            main()
+        with patch("sys.argv", ["persona", "progress", "WIP Task"]):
+            main()
+        with patch("sys.argv", ["persona", "progress", "WIP Task"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "already In Progress" in output
+
+    def test_not_found(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "progress", "Nonexistent"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "not found" in output
+
+
+# ── persona block ──────────────────────────────────────────────────────────
+
+class TestBlock:
+    def test_marks_task_blocked(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Blocked Task"]):
+            main()
+        with patch("sys.argv", ["persona", "block", "Blocked Task"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "blocked-task.md"
+        content = task.read_text()
+        assert "**Status:** Blocked" in content
+
+    def test_logs_event(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Block Log"]):
+            main()
+        with patch("sys.argv", ["persona", "block", "Block Log"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Task blocked: Block Log" in log
+
+
+# ── persona update ─────────────────────────────────────────────────────────
+
+class TestUpdate:
+    def test_updates_instructions(self, initialized_dir, capsys):
+        # Tamper with version to simulate old template
+        instructions = initialized_dir / ".github" / "copilot-instructions.md"
+        instructions.write_text("# Old template v0.1.0\nStale content.")
+
+        with patch("sys.argv", ["persona", "update"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "Updated" in output
+        content = instructions.read_text()
+        assert "Three-Persona Architecture" in content
+
+    def test_skip_if_same_version(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "update"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "Already at" in output
+
+    def test_force_regenerate(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "update", "--force"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "Updated" in output
+
+    def test_preserves_user_files(self, initialized_dir):
+        # Write custom content to project.md
+        project = initialized_dir / "docs" / "project.md"
+        project.write_text("# My Custom Project")
+
+        with patch("sys.argv", ["persona", "update", "--force"]):
+            main()
+
+        # project.md should be untouched
+        assert project.read_text() == "# My Custom Project"
+
+
+# ── persona resume token estimate ──────────────────────────────────────────
+
+class TestResumeTokenEstimate:
+    def test_shows_token_estimate(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "resume"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "~" in output and "tokens" in output
+        assert "default mode" in output
+
+    def test_brief_mode_label(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "resume", "--brief"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "brief mode" in output
+
+    def test_full_mode_label(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "resume", "--full"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "full mode" in output
+
+
+# ── persona init .gitkeep ──────────────────────────────────────────────────
+
+class TestInitGitkeep:
+    def test_creates_gitkeep_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with patch("sys.argv", ["persona", "init"]):
+            main()
+
+        assert (tmp_path / "docs" / "tasks" / ".gitkeep").exists()
+        assert (tmp_path / "docs" / "requirements" / ".gitkeep").exists()
