@@ -1,8 +1,8 @@
 # Persona CLI
 
-A command-line tool to enforce a strict **Three-Persona Architecture** for GitHub Copilot and other AI agents. Designed to help **stateless LLMs regain context fast** and make steady progress across sessions.
+A command-line tool to enforce a strict **Four-Persona Architecture** for GitHub Copilot and other AI agents. Designed to help **stateless LLMs regain context fast** and make steady progress across sessions.
 
-This ensures security governance, responsible AI use, and zero hallucination by forcing the AI to act as a team of three distinct personas: `@architect`, `@developer`, and `@security`.
+This ensures security governance, responsible AI use, and zero hallucination by forcing the AI to act as a team of four distinct personas: `@architect`, `@developer`, `@security`, and `@author`.
 
 ## Installation
 
@@ -23,16 +23,20 @@ persona start "Implement Auth" --context docs/requirements/auth-spec.md -p P0
 persona progress "Implement Auth"   # Backlog → In Progress
 persona block "Implement Auth"      # In Progress → Blocked
 persona complete "Implement Auth"   # → Completed (suggests next task)
+persona reopen "Implement Auth"     # Completed → In Progress (rework needed)
 
-# 4. Log an event for audit
+# 4. Found a bug while debugging? Log it as a tracked task
+persona bug "NullPointer in OrderService" -d "Happens when qty is null" --found-during "implement-auth"
+
+# 5. Log an event for audit
 persona log "Unit tests passed for auth module"
 
-# 5. New session? Catch up fast (token-aware!)
+# 6. New session? Catch up fast (token-aware!)
 persona resume            # default ~1500 tokens
 persona resume --brief    # minimal ~500 tokens
 persona resume --full     # everything ~3000 tokens
 
-# 6. Upgrade instructions after a Persona CLI update
+# 7. Upgrade instructions after a Persona CLI update
 persona update
 ```
 
@@ -42,9 +46,11 @@ persona update
 |---------|-------------|
 | `persona init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
 | `persona start <name> [-c file] [-p P0\|P1\|P2] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist |
+| `persona bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
 | `persona progress <name>` | Mark a task as **In Progress** |
 | `persona block <name>` | Mark a task as **Blocked** |
 | `persona complete <name>` | Mark a task as **Completed** and suggest the next task |
+| `persona reopen <name>` | Reopen a **Completed** task (back to In Progress) |
 | `persona next [-q]` | Show the next task to work on (by priority, then age) |
 | `persona log <message>` | Append a timestamped entry to `docs/ai_log.md` |
 | `persona resume [--brief\|--full]` | Dump project context sized to your token budget |
@@ -59,8 +65,8 @@ Every task follows this state machine:
 
 ```
 Backlog → In Progress → Review → Completed
-                ↓
-             Blocked → (unblocked) → In Progress
+                ↓                     ↓
+             Blocked → (unblocked)   Reopened → In Progress
 ```
 
 ### Priority System
@@ -71,6 +77,16 @@ When picking the next task:
 1. Resume any **In Progress** task first.
 2. Otherwise pick the highest-priority **Backlog** task (P0 > P1 > P2).
 3. Break ties by age (oldest first).
+
+### Bug Tracking
+
+Use `persona bug` to quickly log issues found during debugging:
+
+```bash
+persona bug "Login crash on empty password" -p P0 --found-during "implement-auth"
+```
+
+Bug reports are saved as `docs/tasks/bug-<slug>.md` with their own template including reproduction steps, expected/actual behavior, and a regression test checklist. They participate in the same lifecycle and priority queue as regular tasks.
 
 ### Auto-Completion Rule
 
@@ -84,9 +100,9 @@ The AI is instructed to mark tasks as completed **itself** — it doesn't wait f
 
 ```
 .github/
-  copilot-instructions.md   # Three-Persona rules + Session Start Protocol
+  copilot-instructions.md   # Four-Persona rules + Session Start Protocol
 docs/
-  project.md                # Project context, tech stack, architecture
+  project.md                # Project context, tech stack, skills, architecture
   decision.md               # Decision log with rationale + rejected alternatives
   ai_log.md                 # Timestamped audit log with session markers
   tasks/                    # Per-task files with TDD checklists
@@ -96,11 +112,19 @@ docs/
 .gitignore                  # Ignores ai_log.md + Python build artifacts
 ```
 
-## The Three Personas
+## The Four Personas
 
 1. **`@architect`**: Dissects tasks, creates strategy, records decisions in `docs/decision.md`, and breaks work into `docs/tasks/`.
 2. **`@developer`**: Executes tasks with TDD, asks clarifying questions, and engages the human-in-the-loop if scope is large or ambiguous.
 3. **`@security`**: Reviews all architecture and code for vulnerabilities, compliance, PII leaks, and responsible AI practices.
+4. **`@author`**: Writes clear, SEO-friendly documentation, README files, blog posts, and web copy. Ensures accessibility (WCAG) and proper API/component docs.
+
+## Bundled Skills
+
+The generated `docs/project.md` comes pre-populated with your tech stack:
+
+- **Languages & Frameworks**: Java, Spring Framework (Boot, Security, Data JPA), Python, JavaScript/TypeScript, React, React Native, AngularJS, CSS/SCSS
+- **Domain Expertise**: Trading systems, financial data pipelines
 
 ## Scope Guardrails
 
@@ -134,7 +158,7 @@ Every new AI session is instructed to:
 
 ## Schema Versioning
 
-The framework embeds a version number (`v0.2.0`) in all generated files. When you upgrade the CLI, run:
+The framework embeds a version number (`v0.3.0`) in all generated files. When you upgrade the CLI, run:
 
 ```bash
 persona update

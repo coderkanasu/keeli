@@ -20,6 +20,7 @@ from pathlib import Path
 
 from persona_cli.templates import (
     AI_LOG_MD,
+    BUG_TEMPLATE,
     COPILOT_INSTRUCTIONS,
     DECISION_MD,
     GITIGNORE_CONTENT,
@@ -246,6 +247,71 @@ def cmd_progress(args: argparse.Namespace) -> None:
 def cmd_block(args: argparse.Namespace) -> None:
     """Mark a task as Blocked."""
     _transition_task(args, "Blocked", "blocked")
+
+
+def cmd_reopen(args: argparse.Namespace) -> None:
+    """Reopen a completed task (move it back to In Progress)."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = tasks_dir / f"{slug}.md"
+
+    # Also check bug- prefix
+    if not task_file.exists():
+        bug_file = tasks_dir / f"bug-{slug}.md"
+        if bug_file.exists():
+            task_file = bug_file
+        else:
+            print(f"❌ Task file {task_file} not found.")
+            return
+
+    text = task_file.read_text()
+    status = _parse_task_field(text, "Status")
+
+    if status.lower() not in ("completed", "review"):
+        print(f"⚠️  {task_file} is currently '{status}' — reopen only works on Completed or Review tasks.")
+        return
+
+    text = _update_task_field(text, "Status", "In Progress")
+    text = _update_task_field(text, "Completed", "—")
+    task_file.write_text(text)
+    print(f"✅ Reopened: {task_file} (now In Progress)")
+
+    _append_log(f"@developer | Task reopened: {args.task_name} → {task_file}")
+
+
+def cmd_bug(args: argparse.Namespace) -> None:
+    """Log a bug found during development and create a tracked bug task."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
+        return
+
+    slug = _slugify(args.title)
+    task_file = tasks_dir / f"bug-{slug}.md"
+
+    if task_file.exists() and not args.force:
+        print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
+        return
+
+    priority = args.priority or "P0"
+    found_during = args.found_during or "debugging"
+    description = args.description or "<!-- Describe the bug here -->"
+
+    content = BUG_TEMPLATE.format(
+        title=args.title,
+        priority=priority,
+        timestamp=_now_iso(),
+        found_during=found_during,
+        description=description,
+    )
+    task_file.write_text(content)
+    print(f"🐛 Created bug report: {task_file}")
+
+    _append_log(f"@developer | Bug reported: {args.title} [{priority}] → {task_file}")
 
 
 def cmd_complete(args: argparse.Namespace) -> None:
@@ -517,6 +583,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_update = sub.add_parser("update", help="Update copilot-instructions.md to latest template.")
     p_update.add_argument("-f", "--force", action="store_true", help="Regenerate even if same version.")
 
+    # reopen
+    p_reopen = sub.add_parser("reopen", help="Reopen a completed task (back to In Progress).")
+    p_reopen.add_argument("task_name", help="Task title or slug to reopen.")
+
+    # bug
+    p_bug = sub.add_parser("bug", help="Log a bug report as a tracked task.")
+    p_bug.add_argument("title", help="Short bug title.")
+    p_bug.add_argument("-d", "--description", help="Bug description.")
+    p_bug.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P0", help="Bug priority (default: P0).")
+    p_bug.add_argument("--found-during", help="What task or activity the bug was found during.")
+    p_bug.add_argument("-f", "--force", action="store_true", help="Overwrite existing bug file.")
+
     return parser
 
 
@@ -536,6 +614,8 @@ def main() -> None:
         "progress": cmd_progress,
         "block": cmd_block,
         "update": cmd_update,
+        "reopen": cmd_reopen,
+        "bug": cmd_bug,
     }
 
     handler = dispatch.get(args.command)

@@ -316,7 +316,7 @@ class TestUpdate:
         output = capsys.readouterr().out
         assert "Updated" in output
         content = instructions.read_text()
-        assert "Three-Persona Architecture" in content
+        assert "Four-Persona Architecture" in content
 
     def test_skip_if_same_version(self, initialized_dir, capsys):
         with patch("sys.argv", ["persona", "update"]):
@@ -380,3 +380,121 @@ class TestInitGitkeep:
 
         assert (tmp_path / "docs" / "tasks" / ".gitkeep").exists()
         assert (tmp_path / "docs" / "requirements" / ".gitkeep").exists()
+
+
+# ── persona reopen ─────────────────────────────────────────────────────────
+
+class TestReopen:
+    def test_reopens_completed_task(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Reopen Me"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Reopen Me"]):
+            main()
+        with patch("sys.argv", ["persona", "reopen", "Reopen Me"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "reopen-me.md"
+        content = task.read_text()
+        assert "**Status:** In Progress" in content
+        assert "**Completed:** —" in content
+
+    def test_logs_reopen_event(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Log Reopen"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Log Reopen"]):
+            main()
+        with patch("sys.argv", ["persona", "reopen", "Log Reopen"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Task reopened: Log Reopen" in log
+
+    def test_cannot_reopen_backlog_task(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "Backlog Task"]):
+            main()
+        with patch("sys.argv", ["persona", "reopen", "Backlog Task"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "reopen only works on Completed or Review" in output
+
+    def test_reopen_not_found(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "reopen", "Nonexistent"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "not found" in output
+
+
+# ── persona bug ────────────────────────────────────────────────────────────
+
+class TestBug:
+    def test_creates_bug_report(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "Login crash"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-login-crash.md"
+        assert task.exists()
+        content = task.read_text()
+        assert "# Bug: Login crash" in content
+        assert "**Priority:** P0" in content  # default for bugs
+        assert "- [ ] Write regression test" in content
+
+    def test_bug_with_description(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "NullPointer in OrderService", "-d", "Happens when order.qty is null"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-nullpointer-in-orderservice.md"
+        content = task.read_text()
+        assert "Happens when order.qty is null" in content
+
+    def test_bug_with_priority(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "Minor typo", "-p", "P2"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-minor-typo.md"
+        content = task.read_text()
+        assert "**Priority:** P2" in content
+
+    def test_bug_with_found_during(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "Race condition", "--found-during", "implement-auth"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "bug-race-condition.md"
+        content = task.read_text()
+        assert "implement-auth" in content
+
+    def test_bug_logs_event(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "Auth bypass"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Bug reported: Auth bypass" in log
+
+    def test_bug_no_overwrite_without_force(self, initialized_dir):
+        with patch("sys.argv", ["persona", "bug", "Dup Bug"]):
+            main()
+        marker = "ORIGINAL"
+        (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").write_text(marker)
+
+        with patch("sys.argv", ["persona", "bug", "Dup Bug"]):
+            main()
+        assert (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").read_text() == marker
+
+
+# ── persona init skills ───────────────────────────────────────────────────
+
+class TestInitSkills:
+    def test_project_md_has_skills(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with patch("sys.argv", ["persona", "init"]):
+            main()
+
+        content = (tmp_path / "docs" / "project.md").read_text()
+        assert "Java" in content
+        assert "Spring Framework" in content
+        assert "React" in content
+        assert "React Native" in content
+        assert "AngularJS" in content
+        assert "Python" in content
+        assert "Trading" in content
