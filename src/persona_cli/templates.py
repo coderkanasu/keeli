@@ -120,6 +120,16 @@ A task is **done** when:
 > **Important:** Never leave a session without updating the task status.
 > The next session depends on accurate status to resume efficiently.
 
+### Auto-Completion Rule
+You **MUST** mark a task as completed yourself the moment you finish it.
+Do **NOT** wait for the human to run `persona complete`. When you finish
+implementing and all checklist items are done:
+1. Edit the task file: set `**Status:** Completed` and `**Completed:** <ISO-8601 timestamp>`.
+2. Check off all checklist boxes (`- [x]`).
+3. Append a completion log entry to `docs/ai_log.md`.
+4. Immediately scan for the next task and begin work — or inform the user
+   *"All tasks are complete. Awaiting new instructions."*
+
 ---
 
 ## Memory and Logging
