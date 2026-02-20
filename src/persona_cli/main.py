@@ -121,10 +121,13 @@ def cmd_start(args: argparse.Namespace) -> None:
         else:
             print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
 
+    priority = getattr(args, "priority", "P1") or "P1"
+
     content = TASK_TEMPLATE.format(
         title=args.task_name,
         timestamp=_now_iso(),
         context_note=context_note,
+        priority=priority,
     )
     task_file.write_text(content)
     print(f"✅ Created task: {task_file}")
@@ -146,6 +149,116 @@ def _append_log(message: str) -> None:
         log_file.write_text(AI_LOG_MD)
     with log_file.open("a") as f:
         f.write(f"{_now_iso()} | {message}\n")
+
+
+def _parse_task_field(text: str, field: str) -> str:
+    """Extract the value of a **Field:** line from a task file."""
+    for line in text.splitlines():
+        if line.startswith(f"**{field}:**"):
+            return line.split(":**", 1)[1].strip()
+    return ""
+
+
+def _update_task_field(text: str, field: str, new_value: str) -> str:
+    """Replace the value of a **Field:** line in task file content."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(f"**{field}:**"):
+            lines[i] = f"**{field}:** {new_value}"
+            break
+    return "\n".join(lines)
+
+
+def _get_next_task() -> tuple[Path | None, str | None]:
+    """Find the next task to work on based on priority and age.
+
+    Returns (task_path, task_title) or (None, None).
+    """
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        return None, None
+
+    # First: any In Progress tasks (resume those first)
+    for tf in sorted(tasks_dir.glob("*.md")):
+        text = tf.read_text()
+        status = _parse_task_field(text, "Status")
+        if status.lower() == "in progress":
+            title = _parse_task_field(text, "").split("\n")[0] if not text.startswith("# Task:") else text.splitlines()[0].replace("# Task: ", "")
+            return tf, tf.stem
+
+    # Second: Backlog tasks sorted by priority (P0 > P1 > P2) then by creation date
+    backlog: list[tuple[str, str, Path]] = []
+    for tf in sorted(tasks_dir.glob("*.md")):
+        text = tf.read_text()
+        status = _parse_task_field(text, "Status")
+        if status.lower() == "backlog":
+            priority = _parse_task_field(text, "Priority") or "P1"
+            created = _parse_task_field(text, "Created") or "9999"
+            backlog.append((priority, created, tf))
+
+    if backlog:
+        backlog.sort(key=lambda x: (x[0], x[1]))  # P0 < P1 < P2 lexically, then oldest first
+        best = backlog[0]
+        return best[2], best[2].stem
+
+    return None, None
+
+
+def cmd_complete(args: argparse.Namespace) -> None:
+    """Mark a task as completed and suggest the next one."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `persona init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = tasks_dir / f"{slug}.md"
+
+    if not task_file.exists():
+        print(f"❌ Task file {task_file} not found.")
+        return
+
+    text = task_file.read_text()
+    status = _parse_task_field(text, "Status")
+
+    if status.lower() == "completed":
+        print(f"⚠️  {task_file} is already marked as Completed.")
+        return
+
+    # Update status and add completion timestamp
+    text = _update_task_field(text, "Status", "Completed")
+    text = _update_task_field(text, "Completed", _now_iso())
+    task_file.write_text(text) 
+    print(f"✅ Marked as Completed: {task_file}")
+
+    # Auto-log
+    _append_log(f"@developer | Task completed: {args.task_name} → {task_file}")
+
+    # Suggest next task
+    next_path, next_slug = _get_next_task()
+    if next_path:
+        next_text = next_path.read_text()
+        next_status = _parse_task_field(next_text, "Status")
+        next_priority = _parse_task_field(next_text, "Priority")
+        print(f"\n📋 Next task: {next_slug} [{next_priority}] ({next_status})")
+        print(f"   → {next_path}")
+    else:
+        print("\n🎉 All tasks are complete. Awaiting new instructions.")
+
+
+def cmd_next(args: argparse.Namespace) -> None:
+    """Show the next task to work on."""
+    next_path, next_slug = _get_next_task()
+    if next_path:
+        next_text = next_path.read_text()
+        next_status = _parse_task_field(next_text, "Status")
+        next_priority = _parse_task_field(next_text, "Priority")
+        print(f"📋 Next task: {next_slug} [{next_priority}] ({next_status})")
+        print(f"   → {next_path}")
+        if not args.quiet:
+            print(f"\n{next_text}")
+    else:
+        print("🎉 All tasks are complete. Awaiting new instructions.")
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
@@ -279,7 +392,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = sub.add_parser("start", help="Create a new task in docs/tasks/.")
     p_start.add_argument("task_name", help="Human-readable task title.")
     p_start.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
+    p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P1", help="Task priority: P0 (critical), P1 (default), P2 (low).")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
+
+    # complete
+    p_complete = sub.add_parser("complete", help="Mark a task as completed and show next task.")
+    p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
+
+    # next
+    p_next = sub.add_parser("next", help="Show the next task to work on.")
+    p_next.add_argument("-q", "--quiet", action="store_true", help="Show only task name, not full content.")
 
     # log
     p_log = sub.add_parser("log", help="Append a timestamped entry to the audit log.")
@@ -307,6 +429,8 @@ def main() -> None:
     dispatch = {
         "init": cmd_init,
         "start": cmd_start,
+        "complete": cmd_complete,
+        "next": cmd_next,
         "log": cmd_log,
         "resume": cmd_resume,
         "status": cmd_status,

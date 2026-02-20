@@ -71,6 +71,44 @@ The @developer **MUST** pause and ask the user for confirmation when:
 
 ---
 
+## Task Lifecycle
+Every task in `docs/tasks/<slug>.md` follows this lifecycle:
+
+```
+Backlog → In Progress → Review → Completed
+                ↓
+             Blocked → (unblocked) → In Progress
+```
+
+### Status Transitions
+| From | To | Who | Trigger |
+|------|----|-----|--------|
+| Backlog | In Progress | @developer | Starting work on the task |
+| In Progress | Blocked | @developer | Waiting on human input or external dependency |
+| Blocked | In Progress | @developer | Blocker resolved |
+| In Progress | Review | @developer | All checklist items done except @security review |
+| Review | Completed | @security | Security review passed |
+
+### How to Pick the Next Task
+When the current task is completed (or while waiting on a blocked task):
+1. Scan `docs/tasks/` for files with **Status: In Progress** — resume those first.
+2. If none, scan for **Status: Backlog** — pick the one with the **highest priority** (P0 > P1 > P2).
+3. If same priority, pick the **oldest** (earliest Created timestamp).
+4. If no tasks remain, inform the user: *"All tasks are complete. Awaiting new instructions."*
+
+### Completion Checklist
+A task is **done** when:
+- [ ] All checklist items in the task file are checked.
+- [ ] `**Status:**` is updated to `Completed`.
+- [ ] `**Completed:**` timestamp is added.
+- [ ] A log entry is appended to `docs/ai_log.md`.
+- [ ] @developer immediately scans for the next task (see above).
+
+> **Important:** Never leave a session without updating the task status.
+> The next session depends on accurate status to resume efficiently.
+
+---
+
 ## Memory and Logging
 You must maintain a continuous audit trail and project state:
 

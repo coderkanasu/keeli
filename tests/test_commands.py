@@ -28,6 +28,7 @@ class TestStart:
         content = task.read_text()
         assert "Implement Auth" in content
         assert "- [ ] Create tests" in content
+        assert "**Priority:** P1" in content  # default priority
 
     def test_slugifies_name(self, initialized_dir):
         with patch("sys.argv", ["persona", "start", "Fix Bug #42!!"]):
@@ -65,6 +66,92 @@ class TestStart:
 
         log = (initialized_dir / "docs" / "ai_log.md").read_text()
         assert "Task created: New Feature" in log
+
+    def test_priority_flag(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Critical Fix", "-p", "P0"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "critical-fix.md"
+        content = task.read_text()
+        assert "**Priority:** P0" in content
+
+
+# ── persona complete ───────────────────────────────────────────────────────
+
+class TestComplete:
+    def test_marks_task_completed(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "My Task"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "My Task"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "my-task.md"
+        content = task.read_text()
+        assert "**Status:** Completed" in content
+        assert "**Completed:** 20" in content  # timestamp starts with year
+
+    def test_logs_completion(self, initialized_dir):
+        with patch("sys.argv", ["persona", "start", "Log Test"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Log Test"]):
+            main()
+
+        log = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Task completed: Log Test" in log
+
+    def test_suggests_next_task(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "First Task", "-p", "P0"]):
+            main()
+        with patch("sys.argv", ["persona", "start", "Second Task", "-p", "P1"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "First Task"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "Next task:" in output
+        assert "second-task" in output
+
+    def test_all_done_message(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "Only Task"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Only Task"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "All tasks are complete" in output
+
+    def test_already_completed(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "Done Task"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Done Task"]):
+            main()
+        with patch("sys.argv", ["persona", "complete", "Done Task"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "already marked as Completed" in output
+
+
+# ── persona next ───────────────────────────────────────────────────────────
+
+class TestNext:
+    def test_shows_highest_priority_task(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "start", "Low Prio", "-p", "P2"]):
+            main()
+        with patch("sys.argv", ["persona", "start", "High Prio", "-p", "P0"]):
+            main()
+        with patch("sys.argv", ["persona", "next", "-q"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "high-prio" in output
+
+    def test_no_tasks_remaining(self, initialized_dir, capsys):
+        with patch("sys.argv", ["persona", "next"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "All tasks are complete" in output
 
 
 # ── persona log ────────────────────────────────────────────────────────────
