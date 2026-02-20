@@ -1,2 +1,14 @@
 # Persona CLI
 docs/ai_log.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+.env
+venv/
+env/

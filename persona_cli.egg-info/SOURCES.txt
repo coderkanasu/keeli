@@ -1,8 +1,0 @@
-README.md
-persona.py
-setup.py
-persona_cli.egg-info/PKG-INFO
-persona_cli.egg-info/SOURCES.txt
-persona_cli.egg-info/dependency_links.txt
-persona_cli.egg-info/entry_points.txt
-persona_cli.egg-info/top_level.txt
