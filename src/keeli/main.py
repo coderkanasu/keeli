@@ -1066,8 +1066,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_note.add_argument("message", nargs="?", default=None, help="Note text. Prompted if omitted.")
     p_note.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona adding the note.")
 
+    # mcp
+    p_mcp = sub.add_parser("mcp", help="Start the Keeli MCP server.")
+    p_mcp.add_argument("--sse", action="store_true", help="Run over HTTP/SSE instead of stdio.")
+    p_mcp.add_argument("--port", type=int, default=8000, help="Port for SSE server (default: 8000).")
+
     return parser
 
+def cmd_mcp(args: argparse.Namespace) -> None:
+    """Start the Keeli MCP server."""
+    try:
+        from keeli.mcp_server import main as mcp_main
+        transport = "sse" if args.sse else "stdio"
+        mcp_main(transport=transport, port=args.port)
+    except ImportError:
+        import sys
+        print("Error: The 'mcp' package is required to run the MCP server.")
+        print("Install it with: pip install mcp")
+        sys.exit(1)
 
 def main() -> None:
     parser = build_parser()
@@ -1093,6 +1109,7 @@ def main() -> None:
         "bug": cmd_bug,
         "feature": cmd_feature,
         "skill": cmd_skill,
+        "mcp": cmd_mcp,
     }
 
     handler = dispatch.get(args.command)

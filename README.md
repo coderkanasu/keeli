@@ -60,6 +60,7 @@ keeli update
 | `keeli status` | Health-check all expected Keeli files |
 | `keeli clear-log` | Reset `docs/ai_log.md` to its default state |
 | `keeli update [-f]` | Update `copilot-instructions.md` to latest template (preserves user files) |
+| `keeli mcp [--sse] [--port 8000]` | Start the Keeli Model Context Protocol (MCP) server |
 | `keeli --version` | Print the current Keeli Framework version |
 
 ## Task Lifecycle
@@ -109,6 +110,44 @@ The AI is instructed to mark tasks as completed **itself** — it doesn't wait f
 2. Checks off all checklist boxes.
 3. Logs the completion event.
 4. Immediately picks up the next task.
+
+## Model Context Protocol (MCP) Server
+
+Keeli includes a built-in Model Context Protocol (MCP) server. This allows AI assistants like Claude Desktop, Cursor, and GitHub Copilot to natively interact with your Keeli task board and project context without needing custom LangChain scripts.
+
+### Starting the Server
+
+You can run the MCP server in two modes:
+
+**1. Standard I/O (stdio) Mode**
+This is the default mode used by most desktop AI assistants.
+```bash
+keeli mcp
+```
+
+**2. HTTP/SSE Mode**
+If you need to connect to Keeli over a network or from a web-based AI tool, you can run it as an HTTP Server-Sent Events (SSE) server.
+```bash
+keeli mcp --sse --port 8000
+```
+
+### Configuring Claude Desktop
+
+To use Keeli with Claude Desktop, add the following to your `claude_desktop_config.json` file (usually located at `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "keeli": {
+      "command": "keeli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+*Note: Ensure the `keeli` command is available in your system PATH, or provide the absolute path to the executable.*
+
+Once configured, Claude will be able to read your `project.md`, `decision.md`, and task files as MCP Resources, and it will be able to call Keeli commands (`keeli_next`, `keeli_start`, `keeli_complete`, `keeli_log`) as MCP Tools.
 
 ## Agentic AI & Headless Usage
 
