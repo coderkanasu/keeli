@@ -158,6 +158,16 @@ You must maintain a continuous audit trail and project state:
 - Every log entry **MUST** include an ISO-8601 timestamp.
 - At the start of each session, append a `--- SESSION START ---` marker.
 - Keep individual log entries to **one line** when possible to save tokens.
+
+---
+
+## Bundled Skills
+These are the specialization skills registered for this project.
+Personas **MUST** apply this expertise when writing or reviewing code.
+
+<!-- KEELI_SKILLS_START -->
+(no skills registered — run `keeli skill add` to populate)
+<!-- KEELI_SKILLS_END -->
 """
 
 # ---------------------------------------------------------------------------
@@ -226,7 +236,7 @@ AI_LOG_MD = f"""# AI Audit Log  (Keeli Framework v{SCHEMA_VERSION})
 """
 
 # ---------------------------------------------------------------------------
-# docs/tasks/ — individual task template
+# docs/tasks/ — individual task template (default / @developer)
 # ---------------------------------------------------------------------------
 TASK_TEMPLATE = """# Task: {title}
 
@@ -234,21 +244,55 @@ TASK_TEMPLATE = """# Task: {title}
 **Priority:** {priority}
 **Created:** {timestamp}
 **Completed:** —
+**Depends On:** {depends_on}
 **Context:** {context_note}
+**Persona:** {persona}
 
 ## Objective
 <!-- @architect: describe what needs to be done and why -->
 
 ## Checklist
-- [ ] Create tests
-- [ ] Implement solution
-- [ ] @security review
-- [ ] Update docs/project.md if needed
-- [ ] Log completion in docs/ai_log.md
+{checklist}
 
 ## Notes
 <!-- @developer: add implementation notes, questions, blockers -->
 """
+
+# Per-persona checklists injected into TASK_TEMPLATE
+TASK_CHECKLISTS = {
+    "architect": """\
+- [ ] Define objective and scope clearly
+- [ ] Break task into sub-tasks in docs/tasks/
+- [ ] Record decision in docs/decision.md if applicable
+- [ ] Assign priority and context
+- [ ] @developer review scope before starting
+- [ ] Log completion in docs/ai_log.md""",
+
+    "developer": """\
+- [ ] Write tests first (TDD)
+- [ ] Implement solution
+- [ ] All tests pass
+- [ ] @security review
+- [ ] Update docs/project.md if needed
+- [ ] Log completion in docs/ai_log.md""",
+
+    "security": """\
+- [ ] Threat model: identify attack surfaces
+- [ ] Check for hardcoded secrets or PII
+- [ ] Validate all inputs / sanitise outputs
+- [ ] Audit third-party dependencies (CVE check)
+- [ ] Verify auth/authz boundaries not widened
+- [ ] OWASP Top-10 review applicable items
+- [ ] Log completion in docs/ai_log.md""",
+
+    "author": """\
+- [ ] Write or update README / user-facing docs
+- [ ] API or component documented with examples
+- [ ] SEO: headings, meta descriptions, keywords checked
+- [ ] WCAG accessibility standards met
+- [ ] Tone and grammar reviewed
+- [ ] Log completion in docs/ai_log.md""",
+}
 
 # ---------------------------------------------------------------------------
 # .gitignore additions
@@ -267,6 +311,18 @@ dist/
 .env
 venv/
 env/
+"""
+
+# ---------------------------------------------------------------------------
+# docs/skills.md — skills registry
+# ---------------------------------------------------------------------------
+SKILLS_MD = """# Keeli Skills Registry  (Keeli Framework v{version})
+
+<!-- Managed by `keeli skill`. Do not edit manually. -->
+<!-- Format: type | skill name -->
+
+| Type | Skill |
+|------|-------|
 """
 
 # ---------------------------------------------------------------------------

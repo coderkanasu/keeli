@@ -27,8 +27,37 @@ class TestStart:
         assert task.exists()
         content = task.read_text()
         assert "Implement Auth" in content
-        assert "- [ ] Create tests" in content
+        # default persona is @architect
+        assert "- [ ] Define objective and scope clearly" in content
+        assert "**Persona:** @architect" in content
         assert "**Priority:** P1" in content  # default priority
+
+    def test_persona_developer_checklist(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Build Route", "-k", "developer"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "build-route.md"
+        content = task.read_text()
+        assert "**Persona:** @developer" in content
+        assert "- [ ] Write tests first (TDD)" in content
+
+    def test_persona_security_checklist(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Audit Login", "-k", "security"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "audit-login.md"
+        content = task.read_text()
+        assert "**Persona:** @security" in content
+        assert "- [ ] Threat model: identify attack surfaces" in content
+
+    def test_persona_author_checklist(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Write Docs", "-k", "author"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "write-docs.md"
+        content = task.read_text()
+        assert "**Persona:** @author" in content
+        assert "- [ ] Write or update README / user-facing docs" in content
 
     def test_slugifies_name(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Fix Bug #42!!"]):

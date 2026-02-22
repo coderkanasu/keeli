@@ -35,6 +35,8 @@ from keeli.templates import (
     GITIGNORE_CONTENT,
     PROJECT_MD,
     SCHEMA_VERSION,
+    SKILLS_MD,
+    TASK_CHECKLISTS,
     TASK_TEMPLATE,
 )
 
@@ -71,6 +73,100 @@ def _tail(path: Path, n: int = 30) -> str:
     return "\n".join(lines[-n:])
 
 
+# ── Interactive prompt (Angular-CLI style) ─────────────────────────────────
+
+def _prompt(
+    question: str,
+    default: str | None = None,
+    choices: list[str] | None = None,
+) -> str:
+    """Angular-CLI style interactive prompt.
+
+    Displays:  ? Question (choice1/choice2) [default]: 
+    Falls back to *default* silently when stdin is not a TTY (e.g. in tests).
+    """
+    import sys as _sys
+
+    if not _sys.stdin.isatty():
+        return default or ""
+
+    choice_str = f" ({'/'.join(choices)})" if choices else ""
+    default_str = f" [{default}]" if default is not None else ""
+    prompt_line = f"\033[32m?\033[0m {question}{choice_str}{default_str}: "
+
+    while True:
+        try:
+            raw = input(prompt_line).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            raise SystemExit(1)
+        if not raw:
+            if default is not None:
+                return default
+            if choices:
+                print(f"  \033[33m›\033[0m Please choose one of: {', '.join(choices)}")
+                continue
+            print(f"  \033[33m›\033[0m This field is required.")
+            continue
+        if choices and raw not in choices:
+            print(f"  \033[33m›\033[0m Invalid choice. Options: {', '.join(choices)}")
+            continue
+        return raw
+
+
+# ── Skills helpers ──────────────────────────────────────────────────────────
+
+SKILL_TYPES = ["lang", "framework", "domain", "infra", "tool"]
+_SKILLS_START = "<!-- KEELI_SKILLS_START -->"
+_SKILLS_END   = "<!-- KEELI_SKILLS_END -->"
+
+
+def _read_skills() -> list[tuple[str, str]]:
+    """Return list of (type, name) tuples from docs/skills.md."""
+    path = Path("docs/skills.md")
+    if not path.exists():
+        return []
+    skills = []
+    for line in path.read_text().splitlines():
+        if line.startswith("|") and "|" in line[1:]:
+            parts = [p.strip() for p in line.strip("|").split("|")]
+            if len(parts) == 2:
+                t, n = parts
+                # skip header row, separator rows (all dashes), and empty
+                if not t or t.lower() in ("type",) or t.lstrip("-") == "":
+                    continue
+                skills.append((t, n))
+    return skills
+
+
+def _write_skills(skills: list[tuple[str, str]]) -> None:
+    """Persist skills list to docs/skills.md and regenerate the skills block
+    inside .github/copilot-instructions.md."""
+    path = Path("docs/skills.md")
+    rows = "\n".join(f"| {t} | {n} |" for t, n in skills)
+    path.write_text(SKILLS_MD.format(version=SCHEMA_VERSION) + (rows + "\n" if rows else ""))
+    _inject_skills_into_instructions(skills)
+
+
+def _inject_skills_into_instructions(skills: list[tuple[str, str]]) -> None:
+    """Regenerate the <!-- KEELI_SKILLS --> block in copilot-instructions.md."""
+    instr = Path(".github/copilot-instructions.md")
+    if not instr.exists():
+        return
+    text = instr.read_text()
+    if _SKILLS_START not in text:
+        return
+    # Build grouped block
+    grouped: dict[str, list[str]] = {}
+    for t, n in skills:
+        grouped.setdefault(t, []).append(n)
+    lines = [f"- **{t.capitalize()}**: {', '.join(names)}" for t, names in grouped.items()]
+    block = "\n".join(lines) if lines else "(no skills registered — run `keeli skill add` to populate)"
+    before = text.split(_SKILLS_START)[0]
+    after  = text.split(_SKILLS_END)[1]
+    instr.write_text(f"{before}{_SKILLS_START}\n{block}\n{_SKILLS_END}{after}")
+
+
 # ── Commands ───────────────────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -94,6 +190,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/project.md"), PROJECT_MD, force=force)
         _write_file(Path("docs/decision.md"), DECISION_MD, force=force)
         _write_file(Path("docs/ai_log.md"), AI_LOG_MD, force=force)
+        _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
 
         # .gitignore
         gitignore = Path(".gitignore")
@@ -137,19 +234,27 @@ def cmd_start(args: argparse.Namespace) -> None:
         else:
             print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
 
-    priority = getattr(args, "priority", "P1") or "P1"
+    priority = getattr(args, "priority", None) or _prompt(
+        "Task priority", default="P1", choices=["P0", "P1", "P2"]
+    )
+    persona = getattr(args, "keeli", "architect") or "architect"
+    checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
+    depends_on = getattr(args, "depends_on", None) or "None"
 
     content = TASK_TEMPLATE.format(
         title=args.task_name,
         timestamp=_now_iso(),
         context_note=context_note,
         priority=priority,
+        depends_on=depends_on,
+        persona=f"@{persona}",
+        checklist=checklist,
     )
     task_file.write_text(content)
-    print(f"✅ Created task: {task_file}")
+    print(f"✅ Created task: {task_file} [@{persona} checklist]")
 
     # Auto-log the event
-    _append_log(f"@architect | Task created: {args.task_name} → {task_file}")
+    _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}")
 
 
 def cmd_log(args: argparse.Namespace) -> None:
@@ -197,6 +302,22 @@ def _resolve_task_file(tasks_dir: Path, slug: str) -> "Path | None":
     return None
 
 
+def _is_task_completed(tasks_dir: Path, slug: str) -> bool:
+    """Check if a task is completed or archived."""
+    # Check archive first
+    archive_file = tasks_dir / "archive" / f"{slug}.md"
+    if archive_file.exists():
+        return True
+    
+    task_file = _resolve_task_file(tasks_dir, slug)
+    if not task_file:
+        return False
+    
+    text = task_file.read_text()
+    status = _parse_task_field(text, "Status")
+    return status.lower() == "completed"
+
+
 def _get_next_task() -> tuple[Path | None, str | None]:
     """Find the next task to work on based on priority and age.
 
@@ -216,9 +337,19 @@ def _get_next_task() -> tuple[Path | None, str | None]:
     # Second: Backlog tasks sorted by priority (P0 > P1 > P2) then by creation date
     backlog: list[tuple[str, str, Path]] = []
     for tf in sorted(tasks_dir.glob("*.md")):
+        if tf.name == ".gitkeep":
+            continue
         text = tf.read_text()
         status = _parse_task_field(text, "Status")
         if status.lower() == "backlog":
+            # Check dependencies
+            depends_on = _parse_task_field(text, "Depends On")
+            if depends_on and depends_on.lower() != "none":
+                deps = [d.strip() for d in depends_on.split(",")]
+                all_deps_met = all(_is_task_completed(tasks_dir, _slugify(d)) for d in deps)
+                if not all_deps_met:
+                    continue
+
             priority = _parse_task_field(text, "Priority") or "P1"
             created = _parse_task_field(text, "Created") or "9999"
             backlog.append((priority, created, tf))
@@ -256,7 +387,8 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -
     task_file.write_text(text)
     print(f"✅ Marked as {new_status}: {task_file}")
 
-    _append_log(f"@developer | Task {log_verb}: {args.task_name} → {task_file}")
+    persona = getattr(args, "keeli", "developer") or "developer"
+    _append_log(f"@{persona} | Task {log_verb}: {args.task_name} → {task_file}")
 
 
 def cmd_progress(args: argparse.Namespace) -> None:
@@ -267,6 +399,36 @@ def cmd_progress(args: argparse.Namespace) -> None:
 def cmd_block(args: argparse.Namespace) -> None:
     """Mark a task as Blocked."""
     _transition_task(args, "Blocked", "blocked")
+
+
+def cmd_review(args: argparse.Namespace) -> None:
+    """Mark a task as In Review (ready for @security sign-off)."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    text = task_file.read_text()
+    current = _parse_task_field(text, "Status")
+
+    if current.lower() == "review":
+        print(f"⚠️  {task_file} is already In Review.")
+        return
+
+    text = _update_task_field(text, "Status", "Review")
+    task_file.write_text(text)
+    print(f"✅ Marked as Review: {task_file}")
+    print("   → Awaiting @security sign-off. Run `keeli complete` when approved.")
+
+    persona = getattr(args, "keeli", "developer") or "developer"
+    _append_log(f"@{persona} | Task in review: {args.task_name} → {task_file}")
 
 
 def cmd_reopen(args: argparse.Namespace) -> None:
@@ -295,7 +457,8 @@ def cmd_reopen(args: argparse.Namespace) -> None:
     task_file.write_text(text)
     print(f"✅ Reopened: {task_file} (now In Progress)")
 
-    _append_log(f"@developer | Task reopened: {args.task_name} → {task_file}")
+    persona = getattr(args, "keeli", "developer") or "developer"
+    _append_log(f"@{persona} | Task reopened: {args.task_name} → {task_file}")
 
 
 def cmd_bug(args: argparse.Namespace) -> None:
@@ -312,9 +475,13 @@ def cmd_bug(args: argparse.Namespace) -> None:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
         return
 
-    priority = args.priority or "P0"
+    priority = args.priority or _prompt(
+        "Bug priority", default="P0", choices=["P0", "P1", "P2"]
+    )
     found_during = args.found_during or "debugging"
-    description = args.description or "<!-- Describe the bug here -->"
+    description = args.description or _prompt(
+        "Short description (or press Enter to leave blank)", default=""
+    ) or "<!-- Describe the bug here -->"
 
     content = BUG_TEMPLATE.format(
         title=args.title,
@@ -352,7 +519,9 @@ def cmd_feature(args: argparse.Namespace) -> None:
         else:
             print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
 
-    priority = args.priority or "P1"
+    priority = args.priority or _prompt(
+        "Feature priority", default="P1", choices=["P0", "P1", "P2"]
+    )
 
     content = FEATURE_TEMPLATE.format(
         title=args.title,
@@ -364,6 +533,65 @@ def cmd_feature(args: argparse.Namespace) -> None:
     print(f"✨ Created feature: {task_file}")
 
     _append_log(f"@architect | Feature created: {args.title} [{priority}] → {task_file}")
+
+
+def cmd_skill(args: argparse.Namespace) -> None:
+    """Manage project skills (add / list / remove).
+
+    Skills are stored in docs/skills.md and injected into
+    .github/copilot-instructions.md so personas use them automatically.
+    """
+    if not Path("docs").exists():
+        print("❌ docs/ not found. Run `keeli init` first.")
+        return
+
+    sub = args.skill_action
+
+    if sub == "list":
+        skills = _read_skills()
+        if not skills:
+            print("No skills registered. Use `keeli skill add <name>` to add one.")
+            return
+        print(f"\n  {'Type':<12} Skill")
+        print("  " + "-" * 38)
+        for t, n in sorted(skills):
+            print(f"  {t:<12} {n}")
+        print(f"\n  {len(skills)} skill(s) registered.")
+
+    elif sub == "add":
+        name = getattr(args, "skill_name", None) or _prompt("Skill name")
+        if not name:
+            print("⚠️  Skill name is required.")
+            return
+        skill_type = getattr(args, "type", None) or _prompt(
+            "Skill type", default="lang", choices=SKILL_TYPES
+        )
+        skills = _read_skills()
+        if (skill_type, name) in skills:
+            print(f"⚠️  '{name}' ({skill_type}) is already registered.")
+            return
+        skills.append((skill_type, name))
+        _write_skills(skills)
+        print(f"✅ Added skill: [{skill_type}] {name}")
+        print(f"   → docs/skills.md and .github/copilot-instructions.md updated")
+        _append_log(f"@architect | Skill added: [{skill_type}] {name}")
+
+    elif sub == "remove":
+        name = getattr(args, "skill_name", None) or _prompt("Skill name to remove")
+        if not name:
+            print("⚠️  Skill name is required.")
+            return
+        skills = _read_skills()
+        new_skills = [(t, n) for t, n in skills if n.lower() != name.lower()]
+        if len(new_skills) == len(skills):
+            print(f"⚠️  Skill '{name}' not found.")
+            return
+        _write_skills(new_skills)
+        print(f"✅ Removed skill: {name}")
+        _append_log(f"@architect | Skill removed: {name}")
+
+    else:
+        print("Usage: keeli skill <add|list|remove>")
 
 
 def cmd_complete(args: argparse.Namespace) -> None:
@@ -394,7 +622,8 @@ def cmd_complete(args: argparse.Namespace) -> None:
     print(f"✅ Marked as Completed: {task_file}")
 
     # Auto-log
-    _append_log(f"@developer | Task completed: {args.task_name} → {task_file}")
+    persona = getattr(args, "keeli", "developer") or "developer"
+    _append_log(f"@{persona} | Task completed: {args.task_name} → {task_file}")
 
     # Suggest next task
     next_path, next_slug = _get_next_task()
@@ -415,12 +644,147 @@ def cmd_next(args: argparse.Namespace) -> None:
         next_text = next_path.read_text()
         next_status = _parse_task_field(next_text, "Status")
         next_priority = _parse_task_field(next_text, "Priority")
+        
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps({
+                "task": next_slug,
+                "priority": next_priority,
+                "status": next_status,
+                "path": str(next_path),
+                "content": next_text
+            }, indent=2))
+            return
+
         print(f"📋 Next task: {next_slug} [{next_priority}] ({next_status})")
         print(f"   → {next_path}")
         if not args.quiet:
             print(f"\n{next_text}")
     else:
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps({"task": None}))
+            return
         print("🎉 All tasks are complete. Awaiting new instructions.")
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List all tasks with status, priority, and creation date."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    filter_status = getattr(args, "status", None)
+    STATUS_ICON = {
+        "backlog":     "⬜",
+        "in progress": "🔵",
+        "review":      "🟡",
+        "blocked":     "🔴",
+        "completed":   "✅",
+    }
+
+    rows = []
+    for tf in sorted(tasks_dir.glob("*.md")):
+        if tf.name == ".gitkeep":
+            continue
+        text = tf.read_text()
+        status   = _parse_task_field(text, "Status")
+        priority = _parse_task_field(text, "Priority") or "P1"
+        created  = (_parse_task_field(text, "Created") or "?")[:10]
+        if filter_status and status.lower() != filter_status.lower():
+            continue
+        icon = STATUS_ICON.get(status.lower(), "❓")
+        rows.append((priority, created, icon, status, tf.stem))
+
+    if not rows:
+        if getattr(args, "json", False):
+            import json
+            print(json.dumps([]))
+            return
+        msg = f"No tasks with status '{filter_status}'." if filter_status else "No tasks found."
+        print(msg)
+        return
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+    
+    if getattr(args, "json", False):
+        import json
+        out = [{"priority": r[0], "created": r[1], "status": r[3], "task": r[4]} for r in rows]
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"\n  {'Pri':<5} {'Created':<12} {'Status':<16} Task")
+    print("  " + "─" * 62)
+    for priority, created, icon, status, name in rows:
+        print(f"  {priority:<5} {created:<12} {icon} {status:<14} {name}")
+    print(f"\n  {len(rows)} task(s) shown.")
+
+
+def cmd_note(args: argparse.Namespace) -> None:
+    """Append a timestamped note to an existing task file."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    note_text = getattr(args, "message", None) or _prompt("Note message")
+    if not note_text:
+        print("⚠️  No message provided.")
+        return
+
+    persona   = getattr(args, "keeli", "developer") or "developer"
+    timestamp = _now_iso()
+    text      = task_file.read_text()
+    note_line = f"\n**[{timestamp}] @{persona}:** {note_text}"
+
+    if "## Notes" in text:
+        text = text.replace("## Notes", f"## Notes{note_line}", 1)
+    else:
+        text += f"\n## Notes{note_line}\n"
+
+    task_file.write_text(text)
+    print(f"✅ Note added to {task_file}")
+    _append_log(f"@{persona} | Note on '{args.task_name}': {note_text[:80]}")
+
+
+def cmd_archive(args: argparse.Namespace) -> None:
+    """Move a completed task to docs/tasks/archive/."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    text = task_file.read_text()
+    status = _parse_task_field(text, "Status")
+
+    if status.lower() != "completed":
+        print(f"⚠️  {task_file} is currently '{status}' — only Completed tasks can be archived.")
+        return
+
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    
+    dest_file = archive_dir / task_file.name
+    task_file.rename(dest_file)
+    print(f"✅ Archived: {task_file.name} → {dest_file}")
+
+    persona = getattr(args, "keeli", "developer") or "developer"
+    _append_log(f"@{persona} | Task archived: {args.task_name} → {dest_file}")
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
@@ -505,6 +869,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         Path("docs/project.md"),
         Path("docs/decision.md"),
         Path("docs/ai_log.md"),
+        Path("docs/skills.md"),
         Path("docs/tasks"),
         Path("docs/requirements"),
     ]
@@ -565,6 +930,12 @@ def cmd_update(args: argparse.Namespace) -> None:
     instructions.write_text(COPILOT_INSTRUCTIONS)
     print(f"✅ Updated copilot-instructions.md: v{old_version} → v{SCHEMA_VERSION}")
 
+    # Re-inject existing skills so they survive the template regeneration
+    existing_skills = _read_skills()
+    if existing_skills:
+        _inject_skills_into_instructions(existing_skills)
+        print(f"   → Re-injected {len(existing_skills)} skill(s) into updated instructions")
+
     # Ensure .gitkeep files exist
     for d in [Path("docs/tasks"), Path("docs/requirements")]:
         d.mkdir(parents=True, exist_ok=True)
@@ -596,16 +967,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = sub.add_parser("start", help="Create a new task in docs/tasks/.")
     p_start.add_argument("task_name", help="Human-readable task title.")
     p_start.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
-    p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P1", help="Task priority: P0 (critical), P1 (default), P2 (low).")
+    p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Prompted if omitted.")
+    p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
+    p_start.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="architect", metavar="PERSONA", help="Persona to attribute task creation to: architect (default), developer, security, author.")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
 
     # complete
     p_complete = sub.add_parser("complete", help="Mark a task as completed and show next task.")
     p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
+    p_complete.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona completing the task.")
+
+    # archive
+    p_archive = sub.add_parser("archive", help="Move a completed task to docs/tasks/archive/.")
+    p_archive.add_argument("task_name", help="Task title or slug to archive.")
+    p_archive.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona archiving the task.")
 
     # next
     p_next = sub.add_parser("next", help="Show the next task to work on.")
     p_next.add_argument("-q", "--quiet", action="store_true", help="Show only task name, not full content.")
+    p_next.add_argument("--json", action="store_true", help="Output as JSON.")
 
     # log
     p_log = sub.add_parser("log", help="Append a timestamped entry to the audit log.")
@@ -626,10 +1006,12 @@ def build_parser() -> argparse.ArgumentParser:
     # progress
     p_progress = sub.add_parser("progress", help="Mark a task as In Progress.")
     p_progress.add_argument("task_name", help="Task title or slug.")
+    p_progress.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona making the transition.")
 
     # block
     p_block = sub.add_parser("block", help="Mark a task as Blocked.")
     p_block.add_argument("task_name", help="Task title or slug.")
+    p_block.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona making the transition.")
 
     # update
     p_update = sub.add_parser("update", help="Update copilot-instructions.md to latest template.")
@@ -638,12 +1020,18 @@ def build_parser() -> argparse.ArgumentParser:
     # reopen
     p_reopen = sub.add_parser("reopen", help="Reopen a completed task (back to In Progress).")
     p_reopen.add_argument("task_name", help="Task title or slug to reopen.")
+    p_reopen.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona reopening the task.")
+
+    # review
+    p_review = sub.add_parser("review", help="Mark a task as In Review (ready for @security sign-off).")
+    p_review.add_argument("task_name", help="Task title or slug.")
+    p_review.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona requesting the review.")
 
     # bug
     p_bug = sub.add_parser("bug", help="Log a bug report as a tracked task.")
     p_bug.add_argument("title", help="Short bug title.")
-    p_bug.add_argument("-d", "--description", help="Bug description.")
-    p_bug.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P0", help="Bug priority (default: P0).")
+    p_bug.add_argument("-d", "--description", help="Bug description. Prompted if omitted.")
+    p_bug.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Bug priority. Prompted if omitted (default P0).")
     p_bug.add_argument("--found-during", help="What task or activity the bug was found during.")
     p_bug.add_argument("-f", "--force", action="store_true", help="Overwrite existing bug file.")
 
@@ -651,8 +1039,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_feature = sub.add_parser("feature", help="Create a feature request with user story and acceptance criteria.")
     p_feature.add_argument("title", help="Short feature title.")
     p_feature.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
-    p_feature.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default="P1", help="Feature priority (default: P1).")
+    p_feature.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Feature priority. Prompted if omitted (default P1).")
     p_feature.add_argument("-f", "--force", action="store_true", help="Overwrite existing feature file.")
+
+    # skill
+    p_skill = sub.add_parser("skill", help="Manage project skills (add / list / remove).")
+    skill_sub = p_skill.add_subparsers(dest="skill_action", help="Skill action")
+    # skill add
+    p_skill_add = skill_sub.add_parser("add", help="Register a new skill.")
+    p_skill_add.add_argument("skill_name", nargs="?", default=None, help="Skill name. Prompted if omitted.")
+    p_skill_add.add_argument("-t", "--type", choices=SKILL_TYPES, default=None, metavar="TYPE", help=f"Skill type ({'/'.join(SKILL_TYPES)}). Prompted if omitted.")
+    # skill list
+    skill_sub.add_parser("list", help="List all registered skills.")
+    # skill remove
+    p_skill_rm = skill_sub.add_parser("remove", help="Remove a registered skill.")
+    p_skill_rm.add_argument("skill_name", nargs="?", default=None, help="Skill name to remove. Prompted if omitted.")
+
+    # list
+    p_list = sub.add_parser("list", help="List all tasks with status and priority.")
+    p_list.add_argument("-s", "--status", help="Filter by status (backlog, in-progress, review, blocked, completed).")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON.")
+
+    # note
+    p_note = sub.add_parser("note", help="Append a timestamped note to a task.")
+    p_note.add_argument("task_name", help="Task title or slug.")
+    p_note.add_argument("message", nargs="?", default=None, help="Note text. Prompted if omitted.")
+    p_note.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona adding the note.")
 
     return parser
 
@@ -665,17 +1077,22 @@ def main() -> None:
         "init": cmd_init,
         "start": cmd_start,
         "complete": cmd_complete,
+        "archive": cmd_archive,
         "next": cmd_next,
+        "list": cmd_list,
+        "note": cmd_note,
         "log": cmd_log,
         "resume": cmd_resume,
         "status": cmd_status,
         "clear-log": cmd_clear_log,
         "progress": cmd_progress,
         "block": cmd_block,
+        "review": cmd_review,
         "update": cmd_update,
         "reopen": cmd_reopen,
         "bug": cmd_bug,
         "feature": cmd_feature,
+        "skill": cmd_skill,
     }
 
     handler = dispatch.get(args.command)

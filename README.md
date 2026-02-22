@@ -45,14 +45,16 @@ keeli update
 | Command | Description |
 |---------|-------------|
 | `keeli init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
-| `keeli start <name> [-c file] [-p P0\|P1\|P2] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist |
+| `keeli start <name> [-c file] [-p P0\|P1\|P2] [-d deps] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist. Use `-d` for dependencies. |
 | `keeli bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
 | `keeli feature <title> [-c file] [-p P0\|P1\|P2] [-f]` | Create a feature request (`docs/tasks/feat-<slug>.md`) with user story + acceptance criteria |
 | `keeli progress <name>` | Mark a task as **In Progress** |
 | `keeli block <name>` | Mark a task as **Blocked** |
 | `keeli complete <name>` | Mark a task as **Completed** and suggest the next task |
+| `keeli archive <name>` | Move a **Completed** task to `docs/tasks/archive/` to save context window space |
 | `keeli reopen <name>` | Reopen a **Completed** task (back to In Progress) |
-| `keeli next [-q]` | Show the next task to work on (by priority, then age) |
+| `keeli next [-q] [--json]` | Show the next task to work on (by priority, then age). Use `--json` for agentic parsing. |
+| `keeli list [-s status] [--json]` | List all tasks. Use `--json` for agentic parsing. |
 | `keeli log <message>` | Append a timestamped entry to `docs/ai_log.md` |
 | `keeli resume [--brief\|--full]` | Dump project context sized to your token budget |
 | `keeli status` | Health-check all expected Keeli files |
@@ -65,7 +67,7 @@ keeli update
 Every task follows this state machine:
 
 ```
-Backlog → In Progress → Review → Completed
+Backlog → In Progress → Review → Completed → Archived
                 ↓                     ↓
              Blocked → (unblocked)   Reopened → In Progress
 ```
@@ -107,6 +109,39 @@ The AI is instructed to mark tasks as completed **itself** — it doesn't wait f
 2. Checks off all checklist boxes.
 3. Logs the completion event.
 4. Immediately picks up the next task.
+
+## Agentic AI & Headless Usage
+
+Keeli is designed to be the perfect "disk-based memory bank" for autonomous AI agents (like LangChain, AutoGPT, or custom scripts). Because Keeli maintains perfect state on disk, you can build a headless loop that runs completely autonomously:
+
+1. **Task Dependencies**: Use `keeli start "Task B" --depends-on "task-a"`. The `keeli next` command will automatically skip "Task B" until "Task A" is marked as `Completed`.
+2. **JSON Output**: Use `keeli next --json` and `keeli list --json` to programmatically parse the task queue in your Python/Node scripts without scraping ASCII tables.
+3. **Archiving**: Use `keeli archive <task>` to move completed tasks to `docs/tasks/archive/`. This keeps the active directory clean and prevents the LLM's context window from blowing up as the project grows.
+
+**Example Agent Loop (Python):**
+```python
+import json, subprocess
+
+# 1. Get the next task programmatically
+output = subprocess.run(["keeli", "next", "--json"], capture_output=True, text=True)
+task_data = json.loads(output.stdout)
+
+if task_data.get("task"):
+    task_slug = task_data["task"]
+    
+    # 2. Mark task as In Progress
+    subprocess.run(["keeli", "progress", task_slug])
+    
+    # 3. Read project context
+    context = subprocess.run(["keeli", "resume", "--brief"], capture_output=True, text=True)
+    
+    # 4. Pass context and task to your LLM (LangChain, OpenAI API, etc.)
+    # ... LLM writes code and tests ...
+    
+    # 5. Mark task as completed and archive it
+    subprocess.run(["keeli", "complete", task_slug])
+    subprocess.run(["keeli", "archive", task_slug])
+```
 
 ## What `keeli init` Creates
 
