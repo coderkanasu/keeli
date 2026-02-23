@@ -1,0 +1,55 @@
+# AI Audit Log  (Persona Framework v0.2.0)
+
+<!-- Timestamped entries appended by the AI and by `persona log`. -->
+<!-- Format: YYYY-MM-DDTHH:MM:SS | <persona> | <message> -->
+
+2026-02-20T19:19:56Z | @architect | Task created: Build Login → docs/tasks/build-login.md
+2026-02-20T19:19:56Z | @architect | Task created: Add Dashboard → docs/tasks/add-dashboard.md
+2026-02-20T19:19:56Z | @architect | Task created: Fix Typos → docs/tasks/fix-typos.md
+2026-02-20T19:20:01Z | @developer | Task completed: Build Login → docs/tasks/build-login.md
+2026-02-20T19:30:51Z | @architect | Schema updated: v0.2.0 → v0.2.0
+2026-02-20T20:40:44Z | @architect | Schema updated: vunknown → v0.3.0
+2026-02-20T20:59:07Z | @architect | Task created: i want to create a demo mcp project using python → docs/tasks/i-want-to-create-a-demo-mcp-project-using-python.md
+2026-02-22T13:47:01Z | @architect | Skill added: [lang] Python
+2026-02-22T13:47:01Z | @architect | Skill added: [framework] MCP SDK
+2026-02-22T13:47:01Z | @architect | Skill added: [framework] FastAPI
+2026-02-22T13:48:44Z | @security | Task created: Auth audit → docs/tasks/auth-audit.md
+2026-02-22T15:38:27Z | @architect | Task created: Add task dependencies and archiving → docs/tasks/add-task-dependencies-and-archiving.md
+2026-02-22T15:38:27Z | @developer | Task started: Add task dependencies and archiving → docs/tasks/add-task-dependencies-and-archiving.md
+2026-02-22T15:38:47Z | @architect | Task created: Add dependencies, archiving, and JSON output for Agentic AI → docs/tasks/add-dependencies-archiving-and-json-output-for-agentic-ai.md
+2026-02-22T15:43:32Z | @developer | Task completed: Add dependencies, archiving, and JSON output for Agentic AI → docs/tasks/add-dependencies-archiving-and-json-output-for-agentic-ai.md
+2026-02-22T15:43:37Z | @developer | Task completed: Add task dependencies and archiving → docs/tasks/add-task-dependencies-and-archiving.md
+
+--- SESSION START ---
+2026-02-22T10:00:00Z - @architect: Created task build-mcp-server.md and updated decision.md to build Keeli MCP Server.
+
+--- SESSION START ---
+2026-02-22T10:15:00Z - @developer: Completed task build-mcp-server.md.
+2026-02-23T00:24:54Z | @architect | Task created: Add CI/CD Guardrails → docs/tasks/add-ci-cd-guardrails.md
+2026-02-23T00:25:17Z | @developer | Task started: Add CI/CD Guardrails → docs/tasks/add-ci-cd-guardrails.md
+
+--- SESSION START ---
+2026-02-23T00:25:00Z - @architect: Created task add-ci-cd-guardrails.md to enforce Keeli rules on PRs.
+2026-02-23T00:26:29Z | @developer | Task completed: Add CI/CD Guardrails → docs/tasks/add-ci-cd-guardrails.md
+2026-02-23T03:07:53Z | @architect | Task created: Add Epics and Milestones → docs/tasks/add-epics-and-milestones.md
+2026-02-23T03:10:56Z | @developer | Task started: Add Epics and Milestones → docs/tasks/add-epics-and-milestones.md
+
+--- SESSION START ---
+2026-02-23T00:35:00Z - @architect: Created task add-epics-and-milestones.md to group tasks.
+2026-02-23T03:31:49Z | @architect | Epic created: Backend Overhaul [P1] → docs/tasks/epic-backend-overhaul.md
+2026-02-23T03:31:55Z | @architect | Task created: DB Migration → docs/tasks/db-migration.md
+2026-02-23T03:32:58Z | @developer | Bug reported: Login fails [P0] → docs/tasks/bug-login-fails.md
+2026-02-23T03:38:26Z | @developer | Bug reported: Login fails test [P0] → docs/tasks/bug-login-fails-test.md
+2026-02-23T03:39:35Z | @developer | Task completed: Add Epics and Milestones → docs/tasks/add-epics-and-milestones.md
+2026-02-23T03:44:14Z | @architect | Epic created: User Auth [P0] → docs/tasks/epic-user-auth.md
+2026-02-23T03:44:14Z | @architect | Story created: Register Account [P1] epic=user-auth → docs/tasks/story-register-account.md
+2026-02-23T03:44:14Z | @developer | Task created: Build signup form → docs/tasks/build-signup-form.md
+2026-02-23T03:47:18Z | @architect | Schema updated: v0.3.0 → v0.3.0
+2026-02-23T03:49:07Z | @developer | Task created: Test dynamic persona → docs/tasks/test-dynamic-persona.md
+2026-02-23T03:49:24Z | @qa | Task created: Write smoke tests → docs/tasks/write-smoke-tests.md
+2026-02-23T04:09:22Z | @architect | Added @po persona (mindset, checklist, PERSONAS_MD, COPILOT_INSTRUCTIONS, DEFAULT_PERSONAS); per-persona skills (3-col docs/skills.md, persona-grouped injection into copilot-instructions.md); keeli skill add now prompts for persona; fixed _load_personas() legacy regex; 64 tests pass
+2026-02-23T18:56:40Z | @developer | Task completed: task-analysis-context-injection | keeli analyze command with pure-Python TF-IDF + optional sklearn, auto-hints in keeli next, idempotent block writes; 64/64 tests pass
+2026-02-23T20:44:14Z | @architect | Epic created: Semantic Search (SBERT) Enhancement [P1] → docs/tasks/epic-semantic-search-sbert-enhancement.md
+2026-02-23T20:44:14Z | @architect | Epic created: Streaming MCP Responses [P2] → docs/tasks/epic-streaming-mcp-responses.md
+2026-02-23T20:44:14Z | @architect | Epic created: Task Metrics & Analytics [P2] → docs/tasks/epic-task-metrics-analytics.md
+2026-02-23T20:51:00Z | @architect | Task created: API error handling strategy → docs/tasks/api-error-handling-strategy.md

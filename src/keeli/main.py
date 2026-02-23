@@ -18,9 +18,11 @@ Commands
   status                Health-check: verify all expected files exist.
   clear-log             Reset docs/ai_log.md to its default state.
   update                Update copilot-instructions.md to the latest template.
+  analyze <slug>        Analyze a task and inject AI context hints (TF-IDF).
 """
 
 import argparse
+import math as _math
 import re
 import textwrap
 from datetime import datetime, timezone
@@ -38,6 +40,8 @@ from keeli.templates import (
     PROJECT_MD,
     SCHEMA_VERSION,
     SKILLS_MD,
+    STACK_PRESET_ALIASES,
+    STACK_PRESETS,
     STORY_TEMPLATE,
     TASK_CHECKLISTS,
     TASK_TEMPLATE,
@@ -125,71 +129,111 @@ _SKILLS_END   = "<!-- KEELI_SKILLS_END -->"
 
 # ── Personas helpers ──────────────────────────────────────────────────────────
 
-DEFAULT_PERSONAS = ["architect", "developer", "security", "author"]
+DEFAULT_PERSONAS = ["po", "architect", "developer", "security", "author"]
 
 
 def _load_personas() -> list[str]:
     """Load persona slugs from docs/personas.md, falling back to defaults.
 
-    File format (one per line):
-        - slug: Description
-    Lines not matching that pattern are ignored.
+    Supports two formats (auto-detected):
+      Rich (new):  ## slug          — heading-based, one section per persona
+      Legacy:      - slug: Desc     — simple list format
+    Lines not matching either pattern are ignored.
     """
     path = Path("docs/personas.md")
     if not path.exists():
         return DEFAULT_PERSONAS
     personas: list[str] = []
     for line in path.read_text().splitlines():
-        line = line.strip()
-        if line.startswith("- ") and not line.startswith("- #") and not line.startswith("- -"):
-            slug = line[2:].split(":")[0].strip().lower()
+        stripped = line.strip()
+        # Rich format: ## slug
+        if stripped.startswith("## "):
+            slug = stripped[3:].strip().lower()
+            slug = re.sub(r"[^a-z0-9-]", "", slug)
+            if slug:
+                personas.append(slug)
+        # Legacy format: - slug: Description  (slug must be a simple word, no spaces)
+        elif re.match(r'^- [a-z0-9][a-z0-9-]*:', stripped):
+            slug = stripped[2:].split(":")[0].strip().lower()
             slug = re.sub(r"[^a-z0-9-]", "", slug)
             if slug:
                 personas.append(slug)
     return personas if personas else DEFAULT_PERSONAS
 
 
-def _read_skills() -> list[tuple[str, str]]:
-    """Return list of (type, name) tuples from docs/skills.md."""
+def _read_skills() -> list[tuple[str, str, str, str]]:
+    """Return list of (type, name, persona, constraint) tuples from docs/skills.md.
+
+    Supports 4-column (current), 3-column, and 2-column legacy rows.
+    Missing fields default to empty string.
+    """
     path = Path("docs/skills.md")
     if not path.exists():
         return []
-    skills = []
+    skills: list[tuple[str, str, str, str]] = []
     for line in path.read_text().splitlines():
         if line.startswith("|") and "|" in line[1:]:
             parts = [p.strip() for p in line.strip("|").split("|")]
-            if len(parts) == 2:
-                t, n = parts
-                # skip header row, separator rows (all dashes), and empty
-                if not t or t.lower() in ("type",) or t.lstrip("-") == "":
-                    continue
-                skills.append((t, n))
+            if len(parts) < 2:
+                continue
+            t    = parts[0] if len(parts) > 0 else ""
+            n    = parts[1] if len(parts) > 1 else ""
+            p    = parts[2] if len(parts) > 2 else ""
+            c    = parts[3] if len(parts) > 3 else ""
+            # skip header row and separator rows
+            if not t or t.lower() in ("type",) or set(t.lstrip("-")) <= {"-", " "}:
+                continue
+            skills.append((t, n, p, c))
     return skills
 
 
-def _write_skills(skills: list[tuple[str, str]]) -> None:
+def _write_skills(skills: list[tuple[str, str, str, str]]) -> None:
     """Persist skills list to docs/skills.md and regenerate the skills block
     inside .github/copilot-instructions.md."""
     path = Path("docs/skills.md")
-    rows = "\n".join(f"| {t} | {n} |" for t, n in skills)
+    rows = "\n".join(f"| {t} | {n} | {p} | {c} |" for t, n, p, c in skills)
     path.write_text(SKILLS_MD.format(version=SCHEMA_VERSION) + (rows + "\n" if rows else ""))
     _inject_skills_into_instructions(skills)
 
 
-def _inject_skills_into_instructions(skills: list[tuple[str, str]]) -> None:
-    """Regenerate the <!-- KEELI_SKILLS --> block in copilot-instructions.md."""
+def _inject_skills_into_instructions(skills: list[tuple[str, str, str, str]]) -> None:
+    """Regenerate the KEELI_SKILLS block grouped by persona, including constraints.
+
+    Each skill renders as:
+        - **Type** `skill name`: constraint text
+    The constraint is the actual decision — what the LLM needs to infer correctly.
+    """
     instr = Path(".github/copilot-instructions.md")
     if not instr.exists():
         return
     text = instr.read_text()
     if _SKILLS_START not in text:
         return
-    # Build grouped block
-    grouped: dict[str, list[str]] = {}
-    for t, n in skills:
-        grouped.setdefault(t, []).append(n)
-    lines = [f"- **{t.capitalize()}**: {', '.join(names)}" for t, names in grouped.items()]
-    block = "\n".join(lines) if lines else "(no skills registered — run `keeli skill add` to populate)"
+    # Group: {persona_key: {type: [(name, constraint), ...]}}
+    grouped: dict[str, dict[str, list[tuple[str, str]]]] = {}
+    for t, n, p, c in skills:
+        persona_key = p.strip() if p and p.strip() else "global"
+        grouped.setdefault(persona_key, {}).setdefault(t, []).append((n, c))
+    if not grouped:
+        block = "(no skills registered \u2014 run `keeli stack` or `keeli skill add` to populate)"
+    else:
+        persona_order = ["po", "architect", "developer", "security", "author", "global"]
+        ordered_keys = [k for k in persona_order if k in grouped] + [
+            k for k in grouped if k not in persona_order
+        ]
+        sections = []
+        for pk in ordered_keys:
+            type_map = grouped[pk]
+            label = f"@{pk}" if pk != "global" else "global"
+            lines = [f"### {label}"]
+            for t, entries in sorted(type_map.items()):
+                for name, constraint in entries:
+                    if constraint:
+                        lines.append(f"- **{t.capitalize()}** `{name}`: {constraint}")
+                    else:
+                        lines.append(f"- **{t.capitalize()}** `{name}`")
+            sections.append("\n".join(lines))
+        block = "\n\n".join(sections)
     before = text.split(_SKILLS_START)[0]
     after  = text.split(_SKILLS_END)[1]
     instr.write_text(f"{before}{_SKILLS_START}\n{block}\n{_SKILLS_END}{after}")
@@ -237,7 +281,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
         print("   Suggested first steps:")
         print("     1. Fill in docs/project.md with your project context")
-        print("     2. keeli skill add <name> -t lang     # register your tech stack")
+        print("     2. keeli stack                    # pick your tech stack preset interactively")
         print("     3. keeli epic \"<first goal>\" -p P1   # define your first epic")
         print("     4. keeli story \"<user story>\" --epic <slug>  # break it down")
     except PermissionError as exc:
@@ -269,6 +313,19 @@ def cmd_start(args: argparse.Namespace) -> None:
         else:
             print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
 
+    # Resolve optional objective text
+    objective_text = ""
+    if args.objective:
+        if args.objective.startswith("@"):
+            # Read from file
+            obj_path = Path(args.objective[1:])
+            if obj_path.exists():
+                objective_text = obj_path.read_text().strip()
+            else:
+                print(f"⚠️  Objective file {obj_path} not found. Proceeding without objective.")
+        else:
+            objective_text = args.objective.strip()
+
     priority = getattr(args, "priority", None) or _prompt(
         "Task priority", default="P1", choices=["P0", "P1", "P2"]
     )
@@ -288,9 +345,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         story=story,
         persona=f"@{persona}",
         checklist=checklist,
+        objective=objective_text,
     )
     task_file.write_text(content)
     print(f"✅ Created task: {task_file} [@{persona} checklist]")
+    if objective_text:
+        print(f"   → Objective pre-filled from {args.objective}")
 
     # Auto-log the event
     _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}")
@@ -593,48 +653,336 @@ def cmd_skill(args: argparse.Namespace) -> None:
     if sub == "list":
         skills = _read_skills()
         if not skills:
-            print("No skills registered. Use `keeli skill add <name>` to add one.")
+            print("No skills registered. Use `keeli stack` to apply a preset or `keeli skill add` to add one.")
             return
-        print(f"\n  {'Type':<12} Skill")
-        print("  " + "-" * 38)
-        for t, n in sorted(skills):
-            print(f"  {t:<12} {n}")
-        print(f"\n  {len(skills)} skill(s) registered.")
+        print(f"\n  {'Type':<12} {'Skill':<24} {'Persona':<14} Constraint")
+        print("  " + "-" * 72)
+        for t, n, p, c in sorted(skills, key=lambda x: (x[2], x[0], x[1])):
+            constraint_display = (c[:36] + "\u2026") if c and len(c) > 37 else (c or "")
+            print(f"  {t:<12} {n:<24} {p or '(global)':<14} {constraint_display}")
+        print(f"\n  {len(skills)} skill(s) registered. Use `keeli skill show <name>` for full constraint.")
+
+    elif sub == "show":
+        name = getattr(args, "skill_name", None) or _prompt("Skill name")
+        skills = _read_skills()
+        matches = [(t, n, p, c) for t, n, p, c in skills if n.lower() == name.lower()]
+        if not matches:
+            print(f"\u26a0\ufe0f  Skill '{name}' not found.")
+            return
+        for t, n, p, c in matches:
+            scope = f"@{p}" if p else "global"
+            print(f"\n  Skill:       {n}")
+            print(f"  Type:        {t}")
+            print(f"  Persona:     {scope}")
+            print(f"  Constraint:  {c or '(none \u2014 recommend adding one for LLM clarity)'}")
 
     elif sub == "add":
-        name = getattr(args, "skill_name", None) or _prompt("Skill name")
+        name = getattr(args, "skill_name", None) or _prompt("Skill name (be specific: e.g. 'FastAPI', not just 'Python')")
         if not name:
-            print("⚠️  Skill name is required.")
+            print("\u26a0\ufe0f  Skill name is required.")
             return
+        _GENERIC_NAMES = {"python", "java", "javascript", "typescript", "node", "react",
+                          "angular", "vue", "go", "rust", "ruby", "php", "swift", "kotlin"}
+        if name.strip().lower() in _GENERIC_NAMES:
+            print(f"  \u26a0\ufe0f  '{name}' is a generic language name \u2014 the LLM already knows {name}.")
+            print(f"     The constraint field is where you teach it YOUR project's dialect.")
+            print(f"     Example: '3.12+; Pydantic v2 strict; async/await throughout'")
         skill_type = getattr(args, "type", None) or _prompt(
             "Skill type", default="lang", choices=SKILL_TYPES
         )
+        personas = _load_personas()
+        persona = getattr(args, "persona", None) or _prompt(
+            "Which persona owns this skill? (blank = global)",
+            default="",
+            choices=personas + ["global"],
+        )
+        persona = "" if persona.strip().lower() in ("global", "") else persona.strip().lower()
+        constraint = getattr(args, "constraint", None)
+        if constraint is None:
+            print("  Tip: constraint = the specific VERSION + RULES your project chose.")
+            print("       Generic names alone add no value. Leave blank to add later.")
+            constraint = _prompt("Constraint / decision (blank to skip)", default="")
         skills = _read_skills()
-        if (skill_type, name) in skills:
-            print(f"⚠️  '{name}' ({skill_type}) is already registered.")
+        if any(n2.lower() == name.lower() and t2 == skill_type and p2 == persona
+               for t2, n2, p2, _ in skills):
+            scope = f"@{persona}" if persona else "global"
+            print(f"\u26a0\ufe0f  '{name}' ({skill_type}) is already registered for {scope}.")
             return
-        skills.append((skill_type, name))
+        skills.append((skill_type, name, persona, constraint or ""))
         _write_skills(skills)
-        print(f"✅ Added skill: [{skill_type}] {name}")
-        print(f"   → docs/skills.md and .github/copilot-instructions.md updated")
-        _append_log(f"@architect | Skill added: [{skill_type}] {name}")
+        scope = f"@{persona}" if persona else "global"
+        print(f"\u2705 Added skill: [{skill_type}] {name}  \u2192  {scope}")
+        if constraint:
+            print(f"   Constraint:  {constraint}")
+        print(f"   \u2192 docs/skills.md and .github/copilot-instructions.md updated")
+        _append_log(f"@architect | Skill added: [{skill_type}] {name} \u2192 {scope}")
 
     elif sub == "remove":
         name = getattr(args, "skill_name", None) or _prompt("Skill name to remove")
         if not name:
-            print("⚠️  Skill name is required.")
+            print("\u26a0\ufe0f  Skill name is required.")
             return
         skills = _read_skills()
-        new_skills = [(t, n) for t, n in skills if n.lower() != name.lower()]
+        new_skills = [(t, n, p, c) for t, n, p, c in skills if n.lower() != name.lower()]
         if len(new_skills) == len(skills):
-            print(f"⚠️  Skill '{name}' not found.")
+            print(f"\u26a0\ufe0f  Skill '{name}' not found.")
             return
         _write_skills(new_skills)
-        print(f"✅ Removed skill: {name}")
+        print(f"\u2705 Removed skill: {name}")
         _append_log(f"@architect | Skill removed: {name}")
 
     else:
-        print("Usage: keeli skill <add|list|remove>")
+        print("Usage: keeli skill <add|list|remove|show>")
+
+
+# ---------------------------------------------------------------------------
+# keeli persona  — interactive persona management
+# ---------------------------------------------------------------------------
+
+def _write_persona_block(slug: str, description: str, skills: list[str], must_not: str) -> None:
+    """Append a new persona block to docs/personas.md in the rich ## format."""
+    path = Path("docs/personas.md")
+    content = path.read_text() if path.exists() else ""
+    # Strip trailing comment block if present
+    new_block = f"\n## {slug}\n"
+    new_block += f"**Mindset:** {description}\n\n"
+    if skills:
+        new_block += "**Core Skills:**\n"
+        for s in skills:
+            new_block += f"- {s}\n"
+        new_block += "\n"
+    if must_not:
+        new_block += "**NEVER:**\n"
+        for line in must_not.split(","):
+            line = line.strip()
+            if line:
+                new_block += f"- {line}\n"
+        new_block += "\n"
+    new_block += "---\n"
+    # Insert before the trailing comment block if it exists
+    marker = "<!-- Add custom personas below"
+    if marker in content:
+        content = content.replace(marker, new_block + "\n" + marker)
+    else:
+        content = content.rstrip() + "\n" + new_block
+    path.write_text(content)
+
+
+# ---------------------------------------------------------------------------
+# keeli stack  — interactive preset picker
+# ---------------------------------------------------------------------------
+
+def cmd_stack(args: argparse.Namespace) -> None:
+    """Apply a stack preset interactively, customising each skill constraint.
+
+    Presets are opinionated starting points: each skill ships with a
+    suggested constraint / decision you can accept (Enter) or rewrite.
+    The constraint is what teaches the LLM your dialect, not just the
+    technology name.
+    """
+    if not Path("docs").exists():
+        print("\u274c docs/ not found. Run `keeli init` first.")
+        return
+
+    sub = getattr(args, "stack_action", None) or "pick"
+
+    if sub == "list":
+        print("\nAvailable stack presets:\n")
+        for key, entries in STACK_PRESETS.items():
+            skills_preview = ", ".join(n for _, n, _, _ in entries[:3])
+            extra = f" + {len(entries) - 3} more" if len(entries) > 3 else ""
+            print(f"  {key:<20} {skills_preview}{extra}")
+        aliases = ", ".join(f"{a}\u2192{t}" for a, t in STACK_PRESET_ALIASES.items())
+        print(f"\n  Aliases: {aliases}")
+        print("\nRun `keeli stack apply <name>` or just `keeli stack` to pick interactively.")
+        return
+
+    preset_name = getattr(args, "preset_name", None)
+
+    if sub == "apply" and preset_name:
+        # Resolve alias
+        resolved = STACK_PRESET_ALIASES.get(preset_name.lower(), preset_name.lower())
+        if resolved not in STACK_PRESETS:
+            print(f"\u26a0\ufe0f  Unknown preset '{preset_name}'.")
+            print(f"   Available: {', '.join(STACK_PRESETS.keys())}")
+            return
+        chosen = [resolved]
+    else:
+        # Interactive picker
+        preset_keys = list(STACK_PRESETS.keys())
+        print("\nAvailable stack presets (you can pick multiple):\n")
+        for i, key in enumerate(preset_keys, 1):
+            entries = STACK_PRESETS[key]
+            preview = ", ".join(n for _, n, _, _ in entries[:3])
+            extra = f" + {len(entries) - 3} more" if len(entries) > 3 else ""
+            print(f"  {i:>2}. {key:<20} {preview}{extra}")
+        print()
+        raw = input("Enter preset numbers or names (space/comma-separated): ").strip()
+        if not raw:
+            print("No selection made. Exiting.")
+            return
+        chosen: list[str] = []
+        for token in re.split(r"[,\s]+", raw):
+            token = token.strip()
+            if not token:
+                continue
+            if token.isdigit():
+                idx = int(token) - 1
+                if 0 <= idx < len(preset_keys):
+                    chosen.append(preset_keys[idx])
+                else:
+                    print(f"  \u26a0\ufe0f  {token} out of range, skipping.")
+            else:
+                resolved = STACK_PRESET_ALIASES.get(token.lower(), token.lower())
+                if resolved in STACK_PRESETS:
+                    chosen.append(resolved)
+                else:
+                    print(f"  \u26a0\ufe0f  Unknown preset '{token}', skipping.")
+        if not chosen:
+            print("No valid presets selected.")
+            return
+
+    # Build deduped list of skills to add from chosen presets
+    to_add: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for preset_key in chosen:
+        for t, n, p, hint in STACK_PRESETS[preset_key]:
+            key = (t, n.lower(), p)
+            if key not in seen:
+                seen.add(key)
+                to_add.append((t, n, p, hint))
+
+    no_confirm = getattr(args, "yes", False)
+    existing = _read_skills()
+    existing_keys = {(t2, n2.lower(), p2) for t2, n2, p2, _ in existing}
+
+    print(f"\n  Applying {len(to_add)} skill(s) from preset(s): {', '.join(chosen)}\n")
+    print("  y/Enter = accept suggestion  |  n = skip  |  type = custom constraint  |  q = quit\n")
+    print("  " + "-" * 68)
+
+    added = 0
+    skipped_existing = 0
+    for t, n, p, hint in to_add:
+        scope = f"@{p}" if p else "global"
+        if (t, n.lower(), p) in existing_keys:
+            print(f"  \u23ed  [{t}] {n} ({scope})  \u2014 already registered, skipping")
+            skipped_existing += 1
+            continue
+        print(f"\n  [{t}] {n}  \u2192  {scope}")
+        if no_confirm:
+            constraint = hint
+            print(f"  Constraint: {constraint}")
+        else:
+            print(f"  Suggested:  {hint}")
+            user_input = input("  Accept? [Y/n/edit/q]: ").strip()
+            if user_input.lower() == "q":
+                print("\n  Stopped. Skills added so far will be saved.")
+                break
+            if user_input.lower() == "n":
+                print("  Skipped.")
+                continue
+            constraint = hint if user_input.lower() in ("", "y", "yes", "accept") else user_input
+        existing.append((t, n, p, constraint))
+        existing_keys.add((t, n.lower(), p))
+        added += 1
+
+    if added:
+        _write_skills(existing)
+        print(f"\n\u2705 Added {added} skill(s). {skipped_existing} already existed.")
+        print(f"   \u2192 docs/skills.md and .github/copilot-instructions.md updated")
+        _append_log(f"@architect | Stack preset applied: {', '.join(chosen)} | {added} skill(s) added")
+    else:
+        print(f"\n  No new skills added ({skipped_existing} already registered).")
+
+
+def cmd_persona(args: argparse.Namespace) -> None:
+    """Manage project personas (add / list / remove)."""
+    if not Path("docs").exists():
+        print("\u274c docs/ not found. Run `keeli init` first.")
+        return
+
+    sub = args.persona_action
+
+    if sub == "list":
+        personas = _load_personas()
+        print(f"\n  {'Slug':<16} Source")
+        print("  " + "-" * 40)
+        path = Path("docs/personas.md")
+        for p in personas:
+            src = "built-in" if p in DEFAULT_PERSONAS else "custom"
+            if path.exists() and f"## {p}" in path.read_text():
+                src = "docs/personas.md"
+            print(f"  {p:<16} {src}")
+        print(f"\n  {len(personas)} persona(s) registered.")
+
+    elif sub == "add":
+        slug = getattr(args, "persona_slug", None) or _prompt("Persona slug (e.g. qa, devops)")
+        if not slug:
+            print("\u26a0\ufe0f  Persona slug is required.")
+            return
+        slug = re.sub(r"[^a-z0-9-]", "", slug.strip().lower())
+        existing = _load_personas()
+        if slug in existing:
+            print(f"\u26a0\ufe0f  Persona '{slug}' already exists.")
+            return
+
+        description = _prompt(
+            f"Describe @{slug}'s mindset in one sentence",
+            default=f"{slug.title()} specialist",
+        )
+
+        print(f"\nWhat skills does @{slug} need?")
+        print("  Enter one skill per prompt, or paste a comma-separated list.")
+        print("  Press Enter with no input to finish.\n")
+        skills: list[str] = []
+        while True:
+            entry = input("  Skill (or comma list, blank to finish): ").strip()
+            if not entry:
+                break
+            for item in entry.split(","):
+                item = item.strip()
+                if item:
+                    skills.append(item)
+        if not skills:
+            print("  (no skills added — you can edit docs/personas.md to add them later)")
+
+        must_not = _prompt(
+            f"What should @{slug} NEVER do? (comma-separated, blank to skip)",
+            default="",
+        )
+
+        _write_persona_block(slug, description, skills, must_not)
+        print(f"\n\u2705 Persona '@{slug}' added to docs/personas.md")
+        _append_log(f"@architect | Persona added: {slug} | skills: {', '.join(skills) or 'none'}")
+
+    elif sub == "remove":
+        slug = getattr(args, "persona_slug", None) or _prompt("Persona slug to remove")
+        if not slug:
+            print("\u26a0\ufe0f  Persona slug is required.")
+            return
+        if slug in DEFAULT_PERSONAS:
+            confirm = _prompt(f"'{slug}' is a built-in persona. Remove anyway? (yes/no)", default="no")
+            if confirm.lower() not in ("yes", "y"):
+                print("Aborted.")
+                return
+        path = Path("docs/personas.md")
+        if not path.exists():
+            print("\u26a0\ufe0f  docs/personas.md not found.")
+            return
+        content = path.read_text()
+        # Remove the ## slug block up to the next ## or end of file
+        pattern = rf"\n## {re.escape(slug)}\n.*?(?=\n## |\Z)"
+        new_content = re.sub(pattern, "", content, flags=re.DOTALL).rstrip() + "\n"
+        if new_content == content:
+            print(f"\u26a0\ufe0f  Persona '{slug}' not found in docs/personas.md.")
+            return
+        path.write_text(new_content)
+        print(f"\u2705 Persona '@{slug}' removed from docs/personas.md.")
+        _append_log(f"@architect | Persona removed: {slug}")
+
+    else:
+        print("Usage: keeli persona <add|list|remove>")
+
 
 def cmd_story(args: argparse.Namespace) -> None:
     """Create a user story under an epic (@architect responsibility)."""
@@ -776,6 +1124,22 @@ def cmd_next(args: argparse.Namespace) -> None:
         print(f"   → {next_path}")
         if not args.quiet:
             print(f"\n{next_text}")
+            # Auto context hints in terminal output (never written to disk)
+            try:
+                hints = _score_task(next_text)
+                if hints["skills"] or hints["adrs"]:
+                    print("\n\u2500\u2500\u2500 AI Context Hints \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+                    if hints["skills"]:
+                        skill_str = ", ".join(f'`{m["name"]}`' for _, m in hints["skills"])
+                        print(f"  Skills:  {skill_str}")
+                    if hints["adrs"]:
+                        adr_str = ", ".join(m["ref"] for _, m in hints["adrs"])
+                        print(f"  ADRs:    {adr_str}")
+                    if hints["persona"]:
+                        print(f"  Persona: @{hints['persona']}")
+                    print("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+            except Exception:
+                pass  # never let analysis errors break `keeli next`
     else:
         if getattr(args, "json", False):
             import json
@@ -1060,6 +1424,241 @@ def cmd_clear_log(args: argparse.Namespace) -> None:
         print("⚠️  docs/ai_log.md not found. Run `keeli init` first.")
 
 
+# ── TF-IDF Context Analysis ──────────────────────────────────────────────────
+
+def _tokenize_analyze(text: str) -> list[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", text.lower()) if len(w) > 1]
+
+
+def _build_corpus() -> list[tuple[str, str, dict]]:
+    """Return (label, text, meta) pairs from skills.md and decision.md ADRs."""
+    corpus: list[tuple[str, str, dict]] = []
+    for t, n, p, c in _read_skills():
+        corpus.append((f"skill:{n}", f"{t} {n} {c}", {"type": "skill", "name": n, "persona": p, "constraint": c}))
+    dec_path = Path("docs/decision.md")
+    if dec_path.exists():
+        current_title: str | None = None
+        current_body: list[str] = []
+        for line in dec_path.read_text().splitlines():
+            if line.startswith("### "):
+                if current_title and current_body:
+                    corpus.append((
+                        current_title,
+                        current_title + " " + " ".join(current_body),
+                        {"type": "adr", "ref": current_title},
+                    ))
+                current_title = line.lstrip("# ").strip()
+                current_body = []
+            elif current_title:
+                current_body.append(line)
+        if current_title and current_body:
+            corpus.append((
+                current_title,
+                current_title + " " + " ".join(current_body),
+                {"type": "adr", "ref": current_title},
+            ))
+    return corpus
+
+
+def _cosine_sim(a: dict[str, float], b: dict[str, float]) -> float:
+    dot = sum(a.get(k, 0.0) * v for k, v in b.items())
+    mag_a = _math.sqrt(sum(v * v for v in a.values()))
+    mag_b = _math.sqrt(sum(v * v for v in b.values()))
+    return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
+
+def _tfidf_scores_pure(query: str, corpus: list[tuple[str, str, dict]]) -> list[tuple[float, dict]]:
+    """Pure-Python TF-IDF cosine similarity — zero extra dependencies."""
+    all_docs = [text for _, text, _ in corpus] + [query]
+    tokenized = [_tokenize_analyze(d) for d in all_docs]
+    N = len(all_docs)
+    df: dict[str, int] = {}
+    for tokens in tokenized:
+        for term in set(tokens):
+            df[term] = df.get(term, 0) + 1
+    idf = {term: _math.log((N + 1) / (cnt + 1)) + 1.0 for term, cnt in df.items()}
+
+    def vectorize(tokens: list[str]) -> dict[str, float]:
+        tf: dict[str, float] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0.0) + 1.0
+        total = len(tokens) or 1
+        return {t: (c / total) * idf.get(t, 1.0) for t, c in tf.items()}
+
+    vecs = [vectorize(t) for t in tokenized]
+    query_vec = vecs[-1]
+    results = [(_cosine_sim(vecs[i], query_vec), meta) for i, (_, _, meta) in enumerate(corpus)]
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results
+
+
+def _tfidf_scores_sklearn(query: str, corpus: list[tuple[str, str, dict]]) -> list[tuple[float, dict]]:
+    """sklearn TfidfVectorizer + cosine similarity — richer IDF, bigrams."""
+    from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
+    from sklearn.metrics.pairwise import cosine_similarity as _cos  # type: ignore
+
+    texts = [text for _, text, _ in corpus] + [query]
+    mat = TfidfVectorizer(stop_words="english", ngram_range=(1, 2)).fit_transform(texts)
+    scores = _cos(mat[-1], mat[:-1]).flatten()
+    results = [(float(scores[i]), meta) for i, (_, _, meta) in enumerate(corpus)]
+    results.sort(key=lambda x: x[0], reverse=True)
+    return results
+
+
+_SKLEARN_AVAILABLE: bool | None = None
+
+
+def _sklearn_available() -> bool:
+    global _SKLEARN_AVAILABLE
+    if _SKLEARN_AVAILABLE is not None:
+        return _SKLEARN_AVAILABLE
+    try:
+        import io, sys as _sys
+        _old_err = _sys.stderr
+        _sys.stderr = io.StringIO()  # suppress numpy/scipy compat noise
+        try:
+            import sklearn  # noqa: F401
+            from sklearn.feature_extraction.text import TfidfVectorizer  # noqa: F401
+            _SKLEARN_AVAILABLE = True
+        finally:
+            _sys.stderr = _old_err
+    except Exception:
+        _SKLEARN_AVAILABLE = False
+    return _SKLEARN_AVAILABLE
+
+
+def _score_task(task_text: str, use_sklearn: bool = False) -> dict:
+    """Score task text against project corpus; return top skills, ADRs, persona."""
+    corpus = _build_corpus()
+    if not corpus:
+        return {"skills": [], "adrs": [], "persona": None}
+
+    query_lines: list[str] = []
+    # Always lead with the task title (strips the "# Task:" prefix)
+    for line in task_text.splitlines()[:3]:
+        stripped = line.strip()
+        if stripped.startswith("# Task:"):
+            query_lines.append(stripped[7:].strip())
+            break
+        if stripped.startswith("# "):
+            query_lines.append(stripped[2:].strip())
+            break
+    for line in task_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("**") or stripped.startswith("#"):
+            continue
+        stripped = re.sub(r"^- \[[ x]\] ", "", stripped)
+        query_lines.append(stripped)
+    query = " ".join(query_lines[:30])
+
+    if use_sklearn:
+        if not _sklearn_available():
+            raise SystemExit("\u274c scikit-learn not installed. Run: pip install scikit-learn")
+        engine_fn = _tfidf_scores_sklearn
+    elif _sklearn_available():
+        engine_fn = _tfidf_scores_sklearn
+    else:
+        engine_fn = _tfidf_scores_pure
+
+    try:
+        scored = engine_fn(query, corpus)
+    except Exception:
+        scored = _tfidf_scores_pure(query, corpus)
+
+    top_skills = [(s, m) for s, m in scored if m["type"] == "skill" and s > 0][:3]
+    top_adrs   = [(s, m) for s, m in scored if m["type"] == "adr"   and s > 0.01][:2]
+
+    task_lower = task_text.lower()
+    persona: str | None = None
+    if any(k in task_lower for k in ("secure", "auth", "injection", "vulnerab")):
+        persona = "security"
+    elif any(k in task_lower for k in ("document", "readme", "content", "blog")):
+        persona = "author"
+    elif any(k in task_lower for k in ("design", "architect", "system", "interface", "epic")):
+        persona = "architect"
+    elif any(k in task_lower for k in ("implement", "build", "add", "fix", "test", "write")):
+        persona = "developer"
+
+    return {"skills": top_skills, "adrs": top_adrs, "persona": persona}
+
+
+_HINTS_MARKER_START = "<!-- KEELI_HINTS_START -->"
+_HINTS_MARKER_END   = "<!-- KEELI_HINTS_END -->"
+
+
+def _format_hints_block(hints: dict) -> str:
+    """Render hints dict as a Markdown block wrapped in KEELI_HINTS markers."""
+    lines: list[str] = [
+        "",
+        "---",
+        "",
+        "## AI Context Hints  (auto-generated \u2014 do not edit manually)",
+        "",
+        _HINTS_MARKER_START,
+    ]
+    if hints["skills"]:
+        lines.append("### Relevant Skills")
+        for _s, meta in hints["skills"]:
+            c_text = f": {meta['constraint']}" if meta.get("constraint") else ""
+            p_tag  = f" (@{meta['persona']})"  if meta.get("persona")    else ""
+            lines.append(f'- **`{meta["name"]}`**{p_tag}{c_text}')
+    else:
+        lines.append("_No skill matches \u2014 run `keeli stack` to populate skills._")
+    lines.append("")
+    if hints["adrs"]:
+        lines.append("### Relevant Decisions")
+        for _s, meta in hints["adrs"]:
+            lines.append(f"- {meta['ref']}")
+    else:
+        lines.append("_No ADR matches found._")
+    if hints["persona"]:
+        lines.append("")
+        lines.append("### Suggested Persona")
+        lines.append(f"- @{hints['persona']}")
+    lines.append(_HINTS_MARKER_END)
+    return "\n".join(lines)
+
+
+def cmd_analyze(args: argparse.Namespace) -> None:
+    """Analyze a task and inject AI context hints (skill/ADR relevance)."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("\u274c docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = args.slug
+    candidates = sorted(tasks_dir.glob(f"{slug}*.md"))
+    if not candidates:
+        print(f"\u274c No task matching '{slug}' in docs/tasks/")
+        return
+    task_path = candidates[0]
+    task_text = task_path.read_text()
+
+    use_sklearn = getattr(args, "use_sklearn", False)
+    dry_run     = getattr(args, "dry_run", False)
+    hints       = _score_task(task_text, use_sklearn=use_sklearn)
+    hints_block = _format_hints_block(hints)
+    engine      = "sklearn" if (use_sklearn or _sklearn_available()) else "pure Python"
+
+    if dry_run:
+        print(f"\U0001f50d Analysis (dry-run): {task_path.name}  [engine: {engine}]\n")
+        print(hints_block)
+        return
+
+    if _HINTS_MARKER_START in task_text:
+        pat = r"\n---\n\n## AI Context Hints.*?" + re.escape(_HINTS_MARKER_END)
+        new_text = re.sub(pat, hints_block, task_text, flags=re.DOTALL)
+    else:
+        new_text = task_text.rstrip() + "\n" + hints_block + "\n"
+
+    task_path.write_text(new_text)
+    print(f"\u2705 Hints injected \u2192 {task_path}  [engine: {engine}]")
+    summary = f"   Skills: {len(hints['skills'])}  ADRs: {len(hints['adrs'])}"
+    if hints["persona"]:
+        summary += f"  Persona: @{hints['persona']}"
+    print(summary)
+
+
 def cmd_update(args: argparse.Namespace) -> None:
     """Update copilot-instructions.md to the latest template version.
 
@@ -1089,11 +1688,13 @@ def cmd_update(args: argparse.Namespace) -> None:
     instructions.write_text(COPILOT_INSTRUCTIONS)
     print(f"✅ Updated copilot-instructions.md: v{old_version} → v{SCHEMA_VERSION}")
 
-    # Re-inject existing skills so they survive the template regeneration
+    # Migrate skills.md to 4-column format and re-inject into instructions
     existing_skills = _read_skills()
     if existing_skills:
+        _write_skills(existing_skills)  # rewrites skills.md in current 4-column format
+        print(f"   → Migrated skills.md to 4-column format ({len(existing_skills)} skill(s))")
+    else:
         _inject_skills_into_instructions(existing_skills)
-        print(f"   → Re-injected {len(existing_skills)} skill(s) into updated instructions")
 
     # Ensure .gitkeep files exist
     for d in [Path("docs/tasks"), Path("docs/requirements")]:
@@ -1128,6 +1729,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = sub.add_parser("start", help="Create a new task in docs/tasks/.")
     p_start.add_argument("task_name", help="Human-readable task title.")
     p_start.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
+    p_start.add_argument("-o", "--objective", help="Rich objective/requirements text (supports @file for file input).")
     p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Prompted if omitted.")
     p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
     p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
@@ -1224,17 +1826,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_epic.add_argument("-f", "--force", action="store_true", help="Overwrite existing epic file.")
 
     # skill
-    p_skill = sub.add_parser("skill", help="Manage project skills (add / list / remove).")
+    p_skill = sub.add_parser("skill", help="Manage project skills (add / list / remove / show).")
     skill_sub = p_skill.add_subparsers(dest="skill_action", help="Skill action")
     # skill add
-    p_skill_add = skill_sub.add_parser("add", help="Register a new skill.")
+    p_skill_add = skill_sub.add_parser("add", help="Register a new skill with an optional constraint.")
     p_skill_add.add_argument("skill_name", nargs="?", default=None, help="Skill name. Prompted if omitted.")
     p_skill_add.add_argument("-t", "--type", choices=SKILL_TYPES, default=None, metavar="TYPE", help=f"Skill type ({'/'.join(SKILL_TYPES)}). Prompted if omitted.")
+    p_skill_add.add_argument("-k", "--persona", default=None, metavar="PERSONA", help="Persona this skill belongs to. Prompted if omitted. Blank = global.")
+    p_skill_add.add_argument("-c", "--constraint", default=None, metavar="CONSTRAINT", help="Decision/constraint text. What your project chose and how. Prompted if omitted.")
     # skill list
-    skill_sub.add_parser("list", help="List all registered skills.")
+    skill_sub.add_parser("list", help="List all registered skills (truncated constraint).")
+    # skill show
+    p_skill_show = skill_sub.add_parser("show", help="Show full constraint for a skill.")
+    p_skill_show.add_argument("skill_name", nargs="?", default=None, help="Skill name. Prompted if omitted.")
     # skill remove
     p_skill_rm = skill_sub.add_parser("remove", help="Remove a registered skill.")
     p_skill_rm.add_argument("skill_name", nargs="?", default=None, help="Skill name to remove. Prompted if omitted.")
+
+    # stack
+    p_stack = sub.add_parser("stack", help="Apply an opinionated stack preset interactively.")
+    stack_sub = p_stack.add_subparsers(dest="stack_action", help="Stack action")
+    # stack list
+    stack_sub.add_parser("list", help="List all available stack presets.")
+    # stack apply
+    p_stack_apply = stack_sub.add_parser("apply", help="Apply a named preset directly.")
+    p_stack_apply.add_argument("preset_name", help="Preset name or alias (e.g. python-fastapi, java, react).")
+    p_stack_apply.add_argument("-y", "--yes", action="store_true", help="Accept all suggested constraints without prompting.")
+
+    # persona
+    p_persona = sub.add_parser("persona", help="Manage personas (add / list / remove).")
+    persona_sub = p_persona.add_subparsers(dest="persona_action", help="Persona action")
+    # persona add
+    p_persona_add = persona_sub.add_parser("add", help="Add a new persona interactively.")
+    p_persona_add.add_argument("persona_slug", nargs="?", default=None, help="Persona slug. Prompted if omitted.")
+    # persona list
+    persona_sub.add_parser("list", help="List all registered personas.")
+    # persona remove
+    p_persona_rm = persona_sub.add_parser("remove", help="Remove a persona.")
+    p_persona_rm.add_argument("persona_slug", nargs="?", default=None, help="Persona slug to remove. Prompted if omitted.")
 
     # list
     p_list = sub.add_parser("list", help="List all tasks with status and priority.")
@@ -1247,6 +1876,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_note.add_argument("task_name", help="Task title or slug.")
     p_note.add_argument("message", nargs="?", default=None, help="Note text. Prompted if omitted.")
     p_note.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona adding the note.")
+
+    # analyze
+    p_analyze = sub.add_parser("analyze", help="Analyze a task and inject AI context hints.")
+    p_analyze.add_argument("slug", help="Task slug (or prefix) to analyze.")
+    p_analyze.add_argument("--use-sklearn", action="store_true", dest="use_sklearn",
+                           help="Force scikit-learn TfidfVectorizer (must be installed).")
+    p_analyze.add_argument("--dry-run", action="store_true", dest="dry_run",
+                           help="Print hints to terminal without writing to file.")
 
     # mcp
     p_mcp = sub.add_parser("mcp", help="Start the Keeli MCP server.")
@@ -1293,6 +1930,9 @@ def main() -> None:
         "epic": cmd_epic,
         "story": cmd_story,
         "skill": cmd_skill,
+        "stack": cmd_stack,
+        "persona": cmd_persona,
+        "analyze": cmd_analyze,
         "mcp": cmd_mcp,
     }
 

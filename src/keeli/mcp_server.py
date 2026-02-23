@@ -18,7 +18,10 @@ from mcp.types import (
     TextContent,
 )
 
-from keeli.main import _get_next_task, _slugify, _now_iso, _write_file
+from keeli.main import (
+    _get_next_task, _slugify, _now_iso, _write_file,
+    _score_task, _format_hints_block, _build_corpus,
+)
 from keeli.templates import TASK_TEMPLATE, TASK_CHECKLISTS
 
 # Initialize the MCP server
@@ -135,6 +138,29 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="keeli_analyze",
+            description=(
+                "Analyze a task using TF-IDF to find relevant skills and ADRs from the "
+                "project corpus, then inject an AI Context Hints block into the task file. "
+                "Uses scikit-learn if available, otherwise pure-Python TF-IDF."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_slug": {
+                        "type": "string",
+                        "description": "The slug (or prefix) of the task to analyze."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, return hints without writing to the task file.",
+                        "default": False
+                    },
+                },
+                "required": ["task_slug"],
+            },
+        ),
+        Tool(
             name="keeli_log",
             description="Append a message to the AI log.",
             inputSchema={
@@ -237,6 +263,45 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 f.write(f"{_now_iso()} | @architect | Created task: {slug}\n")
                 
         return [TextContent(type="text", text=f"Successfully created task {slug}.")]
+
+    elif name == "keeli_analyze":
+        slug = arguments.get("task_slug")
+        dry_run = arguments.get("dry_run", False)
+        if not slug:
+            return [TextContent(type="text", text="Error: task_slug is required.")]
+
+        candidates = sorted(tasks_dir.glob(f"{slug}*.md"))
+        if not candidates:
+            return [TextContent(type="text", text=f"Error: No task matching '{slug}' in docs/tasks/")]
+        task_path = candidates[0]
+        task_text = task_path.read_text()
+
+        try:
+            hints = _score_task(task_text)
+            hints_block = _format_hints_block(hints)
+        except Exception as exc:
+            return [TextContent(type="text", text=f"Error during analysis: {exc}")]
+
+        if dry_run:
+            return [TextContent(type="text", text=f"Analysis for {task_path.name}:\n{hints_block}")]
+
+        import re
+        _START = "<!-- KEELI_HINTS_START -->"
+        if _START in task_text:
+            pat = r"\n---\n\n## AI Context Hints.*?" + re.escape("<!-- KEELI_HINTS_END -->")
+            new_text = re.sub(pat, hints_block, task_text, flags=re.DOTALL)
+        else:
+            new_text = task_text.rstrip() + "\n" + hints_block + "\n"
+        task_path.write_text(new_text)
+
+        summary_parts = [f"Hints injected into {task_path.name}"]
+        if hints["skills"]:
+            summary_parts.append(f"Skills: {', '.join(m['name'] for _, m in hints['skills'])}")
+        if hints["adrs"]:
+            summary_parts.append(f"ADRs: {', '.join(m['ref'] for _, m in hints['adrs'])}")
+        if hints["persona"]:
+            summary_parts.append(f"Suggested persona: @{hints['persona']}")
+        return [TextContent(type="text", text="\n".join(summary_parts))]
 
     elif name == "keeli_log":
         message = arguments.get("message")

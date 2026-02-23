@@ -28,7 +28,7 @@ class TestStart:
         content = task.read_text()
         assert "Implement Auth" in content
         # default persona is @architect
-        assert "- [ ] Define objective and scope clearly" in content
+        assert "- [ ] Define the interfaces and contracts first" in content
         assert "**Persona:** @architect" in content
         assert "**Priority:** P1" in content  # default priority
 
@@ -39,7 +39,7 @@ class TestStart:
         task = initialized_dir / "docs" / "tasks" / "build-route.md"
         content = task.read_text()
         assert "**Persona:** @developer" in content
-        assert "- [ ] Write tests first (TDD)" in content
+        assert "- [ ] Write the failing test first (red), then implement (green), then refactor" in content
 
     def test_persona_security_checklist(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Audit Login", "-k", "security"]):
@@ -48,7 +48,7 @@ class TestStart:
         task = initialized_dir / "docs" / "tasks" / "audit-login.md"
         content = task.read_text()
         assert "**Persona:** @security" in content
-        assert "- [ ] Threat model: identify attack surfaces" in content
+        assert "- [ ] Threat model: enumerate attack surfaces for this change" in content
 
     def test_persona_author_checklist(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Write Docs", "-k", "author"]):
@@ -57,7 +57,7 @@ class TestStart:
         task = initialized_dir / "docs" / "tasks" / "write-docs.md"
         content = task.read_text()
         assert "**Persona:** @author" in content
-        assert "- [ ] Write or update README / user-facing docs" in content
+        assert "- [ ] Write from the user's perspective, not the implementer's" in content
 
     def test_slugifies_name(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Fix Bug #42!!"]):
