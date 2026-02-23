@@ -34,6 +34,7 @@ from keeli.templates import (
     EPIC_TEMPLATE,
     FEATURE_TEMPLATE,
     GITIGNORE_CONTENT,
+    PERSONAS_MD,
     PROJECT_MD,
     SCHEMA_VERSION,
     SKILLS_MD,
@@ -122,6 +123,31 @@ SKILL_TYPES = ["lang", "framework", "domain", "infra", "tool"]
 _SKILLS_START = "<!-- KEELI_SKILLS_START -->"
 _SKILLS_END   = "<!-- KEELI_SKILLS_END -->"
 
+# ── Personas helpers ──────────────────────────────────────────────────────────
+
+DEFAULT_PERSONAS = ["architect", "developer", "security", "author"]
+
+
+def _load_personas() -> list[str]:
+    """Load persona slugs from docs/personas.md, falling back to defaults.
+
+    File format (one per line):
+        - slug: Description
+    Lines not matching that pattern are ignored.
+    """
+    path = Path("docs/personas.md")
+    if not path.exists():
+        return DEFAULT_PERSONAS
+    personas: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("- ") and not line.startswith("- #") and not line.startswith("- -"):
+            slug = line[2:].split(":")[0].strip().lower()
+            slug = re.sub(r"[^a-z0-9-]", "", slug)
+            if slug:
+                personas.append(slug)
+    return personas if personas else DEFAULT_PERSONAS
+
 
 def _read_skills() -> list[tuple[str, str]]:
     """Return list of (type, name) tuples from docs/skills.md."""
@@ -193,6 +219,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/decision.md"), DECISION_MD, force=force)
         _write_file(Path("docs/ai_log.md"), AI_LOG_MD, force=force)
         _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
+        _write_file(Path("docs/personas.md"), PERSONAS_MD, force=force)
 
         # .gitignore
         gitignore = Path(".gitignore")
@@ -987,6 +1014,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         Path("docs/decision.md"),
         Path("docs/ai_log.md"),
         Path("docs/skills.md"),
+        Path("docs/personas.md"),
         Path("docs/tasks"),
         Path("docs/requirements"),
     ]
@@ -1094,6 +1122,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="Scaffold the Keeli framework.")
     p_init.add_argument("-f", "--force", action="store_true", help="Overwrite existing files.")
 
+    personas = _load_personas()
+
     # start
     p_start = sub.add_parser("start", help="Create a new task in docs/tasks/.")
     p_start.add_argument("task_name", help="Human-readable task title.")
@@ -1102,18 +1132,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
     p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
     p_start.add_argument("--story", help="Associate this task with a story slug.")
-    p_start.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="architect", metavar="PERSONA", help="Persona to attribute task creation to: architect (default), developer, security, author.")
+    p_start.add_argument("-k", "--keeli", choices=personas, default="architect", metavar="PERSONA", help=f"Persona to attribute task creation to ({'/'.join(personas)}). Default: architect.")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
 
     # complete
     p_complete = sub.add_parser("complete", help="Mark a task as completed and show next task.")
     p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
-    p_complete.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona completing the task.")
+    p_complete.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona completing the task.")
 
     # archive
     p_archive = sub.add_parser("archive", help="Move a completed task to docs/tasks/archive/.")
     p_archive.add_argument("task_name", help="Task title or slug to archive.")
-    p_archive.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona archiving the task.")
+    p_archive.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona archiving the task.")
 
     # next
     p_next = sub.add_parser("next", help="Show the next task to work on.")
@@ -1139,12 +1169,12 @@ def build_parser() -> argparse.ArgumentParser:
     # progress
     p_progress = sub.add_parser("progress", help="Mark a task as In Progress.")
     p_progress.add_argument("task_name", help="Task title or slug.")
-    p_progress.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona making the transition.")
+    p_progress.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona making the transition.")
 
     # block
     p_block = sub.add_parser("block", help="Mark a task as Blocked.")
     p_block.add_argument("task_name", help="Task title or slug.")
-    p_block.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona making the transition.")
+    p_block.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona making the transition.")
 
     # update
     p_update = sub.add_parser("update", help="Update copilot-instructions.md to latest template.")
@@ -1153,12 +1183,12 @@ def build_parser() -> argparse.ArgumentParser:
     # reopen
     p_reopen = sub.add_parser("reopen", help="Reopen a completed task (back to In Progress).")
     p_reopen.add_argument("task_name", help="Task title or slug to reopen.")
-    p_reopen.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona reopening the task.")
+    p_reopen.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona reopening the task.")
 
     # review
     p_review = sub.add_parser("review", help="Mark a task as In Review (ready for @security sign-off).")
     p_review.add_argument("task_name", help="Task title or slug.")
-    p_review.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona requesting the review.")
+    p_review.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona requesting the review.")
 
     # bug
     p_bug = sub.add_parser("bug", help="Log a bug report as a tracked task.")
@@ -1216,7 +1246,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_note = sub.add_parser("note", help="Append a timestamped note to a task.")
     p_note.add_argument("task_name", help="Task title or slug.")
     p_note.add_argument("message", nargs="?", default=None, help="Note text. Prompted if omitted.")
-    p_note.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="developer", metavar="PERSONA", help="Persona adding the note.")
+    p_note.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona adding the note.")
 
     # mcp
     p_mcp = sub.add_parser("mcp", help="Start the Keeli MCP server.")
