@@ -250,6 +250,7 @@ TASK_TEMPLATE = """# Task: {title}
 **Priority:** {priority}
 **Created:** {timestamp}
 **Completed:** —
+**Epic:** {epic}
 **Depends On:** {depends_on}
 **Context:** {context_note}
 **Persona:** {persona}
@@ -340,6 +341,7 @@ BUG_TEMPLATE = """# Bug: {title}
 **Priority:** {priority}
 **Created:** {timestamp}
 **Completed:** —
+**Epic:** {epic}
 **Found During:** {found_during}
 
 ## Description
@@ -374,6 +376,7 @@ FEATURE_TEMPLATE = """# Feature: {title}
 **Priority:** {priority}
 **Created:** {timestamp}
 **Completed:** —
+**Epic:** {epic}
 **Context:** {context_note}
 
 ## User Story
@@ -398,4 +401,27 @@ FEATURE_TEMPLATE = """# Feature: {title}
 
 ## Notes
 <!-- @developer: implementation notes, questions, edge cases -->
+"""
+
+# ---------------------------------------------------------------------------
+# docs/tasks/epic-*.md — epic template
+# ---------------------------------------------------------------------------
+EPIC_TEMPLATE = """# Epic: {title}
+
+**Status:** Backlog
+**Priority:** {priority}
+**Created:** {timestamp}
+**Completed:** —
+
+## Objective
+<!-- High-level goal of this epic -->
+
+## Scope
+<!-- What is in and out of scope -->
+
+## Checklist
+- [ ] Define objective and scope clearly
+- [ ] Break epic into tasks and link them using `--epic {slug}`
+- [ ] All associated tasks completed
+- [ ] Log completion in docs/ai_log.md
 """

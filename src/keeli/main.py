@@ -240,6 +240,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     persona = getattr(args, "keeli", "architect") or "architect"
     checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
     depends_on = getattr(args, "depends_on", None) or "None"
+    epic = getattr(args, "epic", None) or "None"
 
     content = TASK_TEMPLATE.format(
         title=args.task_name,
@@ -247,6 +248,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         context_note=context_note,
         priority=priority,
         depends_on=depends_on,
+        epic=epic,
         persona=f"@{persona}",
         checklist=checklist,
     )
@@ -482,11 +484,13 @@ def cmd_bug(args: argparse.Namespace) -> None:
     description = args.description or _prompt(
         "Short description (or press Enter to leave blank)", default=""
     ) or "<!-- Describe the bug here -->"
+    epic = getattr(args, "epic", None) or "None"
 
     content = BUG_TEMPLATE.format(
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
+        epic=epic,
         found_during=found_during,
         description=description,
     )
@@ -522,11 +526,13 @@ def cmd_feature(args: argparse.Namespace) -> None:
     priority = args.priority or _prompt(
         "Feature priority", default="P1", choices=["P0", "P1", "P2"]
     )
+    epic = getattr(args, "epic", None) or "None"
 
     content = FEATURE_TEMPLATE.format(
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
+        epic=epic,
         context_note=context_note,
     )
     task_file.write_text(content)
@@ -592,6 +598,36 @@ def cmd_skill(args: argparse.Namespace) -> None:
 
     else:
         print("Usage: keeli skill <add|list|remove>")
+
+def cmd_epic(args: argparse.Namespace) -> None:
+    """Create a new epic file in docs/tasks/."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.title)
+    task_file = tasks_dir / f"epic-{slug}.md"
+
+    if task_file.exists() and not args.force:
+        print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
+        return
+
+    priority = args.priority or _prompt(
+        "Epic priority", default="P1", choices=["P0", "P1", "P2"]
+    )
+
+    from keeli.templates import EPIC_TEMPLATE
+    content = EPIC_TEMPLATE.format(
+        title=args.title,
+        priority=priority,
+        timestamp=_now_iso(),
+        slug=slug,
+    )
+    task_file.write_text(content)
+    print(f"🚀 Created epic: {task_file}")
+
+    _append_log(f"@architect | Epic created: {args.title} [{priority}] → {task_file}")
 
 
 def cmd_complete(args: argparse.Namespace) -> None:
@@ -676,6 +712,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         return
 
     filter_status = getattr(args, "status", None)
+    filter_epic = getattr(args, "epic", None)
     STATUS_ICON = {
         "backlog":     "⬜",
         "in progress": "🔵",
@@ -692,17 +729,22 @@ def cmd_list(args: argparse.Namespace) -> None:
         status   = _parse_task_field(text, "Status")
         priority = _parse_task_field(text, "Priority") or "P1"
         created  = (_parse_task_field(text, "Created") or "?")[:10]
+        epic     = _parse_task_field(text, "Epic") or "None"
+        
         if filter_status and status.lower() != filter_status.lower():
             continue
+        if filter_epic and epic.lower() != filter_epic.lower():
+            continue
+            
         icon = STATUS_ICON.get(status.lower(), "❓")
-        rows.append((priority, created, icon, status, tf.stem))
+        rows.append((priority, created, icon, status, tf.stem, epic))
 
     if not rows:
         if getattr(args, "json", False):
             import json
             print(json.dumps([]))
             return
-        msg = f"No tasks with status '{filter_status}'." if filter_status else "No tasks found."
+        msg = "No tasks found matching criteria."
         print(msg)
         return
 
@@ -710,15 +752,16 @@ def cmd_list(args: argparse.Namespace) -> None:
     
     if getattr(args, "json", False):
         import json
-        out = [{"priority": r[0], "created": r[1], "status": r[3], "task": r[4]} for r in rows]
+        out = [{"priority": r[0], "created": r[1], "status": r[3], "task": r[4], "epic": r[5]} for r in rows]
         print(json.dumps(out, indent=2))
         return
 
-    print(f"\n  {'Pri':<5} {'Created':<12} {'Status':<16} Task")
-    print("  " + "─" * 62)
-    for priority, created, icon, status, name in rows:
-        print(f"  {priority:<5} {created:<12} {icon} {status:<14} {name}")
-    print(f"\n  {len(rows)} task(s) shown.")
+    print(f"\n  {'Pri':<4} {'Created':<12} {'Status':<14} {'Epic':<15} Task")
+    print("  " + "-" * 70)
+    for pri, cr, icon, st, name, ep in rows:
+        ep_disp = ep[:13] + ".." if len(ep) > 15 else ep
+        print(f"  {pri:<4} {cr:<12} {icon} {st:<11} {ep_disp:<15} {name}")
+    print(f"\n  {len(rows)} task(s) found.")
 
 
 def cmd_note(args: argparse.Namespace) -> None:
@@ -969,6 +1012,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
     p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Prompted if omitted.")
     p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
+    p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
     p_start.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="architect", metavar="PERSONA", help="Persona to attribute task creation to: architect (default), developer, security, author.")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
 
@@ -1032,6 +1076,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_bug.add_argument("title", help="Short bug title.")
     p_bug.add_argument("-d", "--description", help="Bug description. Prompted if omitted.")
     p_bug.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Bug priority. Prompted if omitted (default P0).")
+    p_bug.add_argument("-e", "--epic", help="Associate this bug with an epic slug.")
     p_bug.add_argument("--found-during", help="What task or activity the bug was found during.")
     p_bug.add_argument("-f", "--force", action="store_true", help="Overwrite existing bug file.")
 
@@ -1040,7 +1085,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_feature.add_argument("title", help="Short feature title.")
     p_feature.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
     p_feature.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Feature priority. Prompted if omitted (default P1).")
+    p_feature.add_argument("-e", "--epic", help="Associate this feature with an epic slug.")
     p_feature.add_argument("-f", "--force", action="store_true", help="Overwrite existing feature file.")
+
+    # epic
+    p_epic = sub.add_parser("epic", help="Create a new epic to group tasks.")
+    p_epic.add_argument("title", help="Short epic title.")
+    p_epic.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Epic priority. Prompted if omitted (default P1).")
+    p_epic.add_argument("-f", "--force", action="store_true", help="Overwrite existing epic file.")
 
     # skill
     p_skill = sub.add_parser("skill", help="Manage project skills (add / list / remove).")
@@ -1058,6 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
     # list
     p_list = sub.add_parser("list", help="List all tasks with status and priority.")
     p_list.add_argument("-s", "--status", help="Filter by status (backlog, in-progress, review, blocked, completed).")
+    p_list.add_argument("-e", "--epic", help="Filter by epic slug.")
     p_list.add_argument("--json", action="store_true", help="Output as JSON.")
 
     # note
@@ -1108,6 +1161,7 @@ def main() -> None:
         "reopen": cmd_reopen,
         "bug": cmd_bug,
         "feature": cmd_feature,
+        "epic": cmd_epic,
         "skill": cmd_skill,
         "mcp": cmd_mcp,
     }
