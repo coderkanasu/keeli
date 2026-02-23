@@ -917,7 +917,28 @@ def cmd_resume(args: argparse.Namespace) -> None:
         else:
             sections.append("## Active Tasks\nNo active tasks found.")
 
-    # 3. Recent log (skip in brief mode)
+    # 3. Recently completed tasks (always included — key for handshake)
+    if tasks_dir.exists():
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+        recent_done: list[str] = []
+        for tf in sorted(tasks_dir.glob("*.md"), reverse=True):
+            text = tf.read_text()
+            status = _parse_task_field(text, "Status")
+            if status.lower() == "completed":
+                completed_ts = _parse_task_field(text, "Completed")
+                if completed_ts and completed_ts[:10] >= cutoff:
+                    recent_done.append(f"- [{tf.stem}] completed {completed_ts[:10]}")
+        if recent_done:
+            label = "Recently Completed (last 7 days)"
+            if brief:
+                sections.append(f"## {label}\n" + "\n".join(recent_done[:5]))
+            else:
+                sections.append(f"## {label}\n" + "\n".join(recent_done))
+        else:
+            sections.append("## Recently Completed (last 7 days)\nNone.")
+
+    # 4. Recent log (skip in brief mode)
     if not brief:
         log_file = Path("docs/ai_log.md")
         tail_lines = 50 if full else 20
@@ -925,7 +946,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
         if tail.strip():
             sections.append(f"## Recent AI Log (last {tail_lines} lines)\n```\n{tail}\n```")
 
-    # 4. Decisions (full only unless default)
+    # 5. Decisions (full only unless default)
     decision = Path("docs/decision.md")
     if decision.exists():
         dec_text = decision.read_text().strip()
@@ -937,7 +958,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
             recent = blocks[-3:] if len(blocks) > 3 else blocks
             sections.append("## Recent Decisions (summary)\n" + "\n---\n".join(recent))
 
-    # 5. Schema version footer
+    # 6. Schema version footer
     sections.append(f"\n> Keeli Framework v{SCHEMA_VERSION}")
 
     output = "\n\n---\n\n".join(sections)
@@ -972,11 +993,25 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"  ❌ {p}")
             all_ok = False
 
-    # Count tasks
+    # Count tasks by status
     tasks_dir = Path("docs/tasks")
     if tasks_dir.exists():
-        task_count = len(list(tasks_dir.glob("*.md")))
-        print(f"\n  📋 Tasks: {task_count} file(s) in docs/tasks/")
+        from collections import Counter
+        status_counts: Counter = Counter()
+        for tf in tasks_dir.glob("*.md"):
+            if tf.name == ".gitkeep":
+                continue
+            text = tf.read_text()
+            s = _parse_task_field(text, "Status").lower() or "unknown"
+            status_counts[s] += 1
+        total = sum(status_counts.values())
+        print(f"\n  📋 Tasks ({total} total):")
+        order = ["in progress", "blocked", "review", "backlog", "completed", "unknown"]
+        icons = {"in progress": "🔵", "blocked": "🔴", "review": "🟡",
+                 "backlog": "⬜", "completed": "✅", "unknown": "❓"}
+        for s in order:
+            if s in status_counts:
+                print(f"     {icons.get(s, '❓')} {s.capitalize():<14} {status_counts[s]}")
 
     print("\n" + ("🟢 Healthy" if all_ok else "🔴 Incomplete — run `keeli init` to fix"))
 

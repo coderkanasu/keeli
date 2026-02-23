@@ -306,7 +306,8 @@ TASK_CHECKLISTS = {
 # .gitignore additions
 # ---------------------------------------------------------------------------
 GITIGNORE_CONTENT = """# Keeli
-docs/ai_log.md
+# Note: docs/ai_log.md is intentionally NOT ignored so AI sessions
+#       can resume with full context. Commit it regularly.
 
 # Python
 __pycache__/
