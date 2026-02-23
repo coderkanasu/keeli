@@ -31,11 +31,13 @@ from keeli.templates import (
     BUG_TEMPLATE,
     COPILOT_INSTRUCTIONS,
     DECISION_MD,
+    EPIC_TEMPLATE,
     FEATURE_TEMPLATE,
     GITIGNORE_CONTENT,
     PROJECT_MD,
     SCHEMA_VERSION,
     SKILLS_MD,
+    STORY_TEMPLATE,
     TASK_CHECKLISTS,
     TASK_TEMPLATE,
 )
@@ -241,6 +243,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
     depends_on = getattr(args, "depends_on", None) or "None"
     epic = getattr(args, "epic", None) or "None"
+    story = getattr(args, "story", None) or "None"
 
     content = TASK_TEMPLATE.format(
         title=args.task_name,
@@ -249,6 +252,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         priority=priority,
         depends_on=depends_on,
         epic=epic,
+        story=story,
         persona=f"@{persona}",
         checklist=checklist,
     )
@@ -599,6 +603,49 @@ def cmd_skill(args: argparse.Namespace) -> None:
     else:
         print("Usage: keeli skill <add|list|remove>")
 
+def cmd_story(args: argparse.Namespace) -> None:
+    """Create a user story under an epic (@architect responsibility)."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.title)
+    task_file = tasks_dir / f"story-{slug}.md"
+
+    if task_file.exists() and not args.force:
+        print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
+        return
+
+    epic = getattr(args, "epic", None) or _prompt(
+        "Epic slug this story belongs to", default="None"
+    )
+    priority = args.priority or _prompt(
+        "Story priority", default="P1", choices=["P0", "P1", "P2"]
+    )
+    role   = getattr(args, "role", None)   or _prompt("Role (e.g. 'developer')", default="user")
+    goal   = getattr(args, "goal", None)   or _prompt("Goal (e.g. 'create a task')"        )
+    reason = getattr(args, "reason", None) or _prompt("Reason (e.g. 'track my work')", default="...")
+
+    content = STORY_TEMPLATE.format(
+        title=args.title,
+        priority=priority,
+        timestamp=_now_iso(),
+        epic=epic,
+        slug=slug,
+        role=role,
+        goal=goal,
+        reason=reason,
+    )
+    task_file.write_text(content)
+    print(f"📖 Created story: {task_file}")
+    if epic != "None":
+        print(f"   → Linked to epic: {epic}")
+    print(f"   → Add tasks with: keeli start \"<title>\" --story {slug} --epic {epic}")
+
+    _append_log(f"@architect | Story created: {args.title} [{priority}] epic={epic} → {task_file}")
+
+
 def cmd_epic(args: argparse.Namespace) -> None:
     """Create a new epic file in docs/tasks/."""
     tasks_dir = Path("docs/tasks")
@@ -617,7 +664,6 @@ def cmd_epic(args: argparse.Namespace) -> None:
         "Epic priority", default="P1", choices=["P0", "P1", "P2"]
     )
 
-    from keeli.templates import EPIC_TEMPLATE
     content = EPIC_TEMPLATE.format(
         title=args.title,
         priority=priority,
@@ -626,6 +672,7 @@ def cmd_epic(args: argparse.Namespace) -> None:
     )
     task_file.write_text(content)
     print(f"🚀 Created epic: {task_file}")
+    print(f"   → @architect: define objective/scope, then run: keeli story \"<title>\" --epic {slug}")
 
     _append_log(f"@architect | Epic created: {args.title} [{priority}] → {task_file}")
 
@@ -1013,6 +1060,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Prompted if omitted.")
     p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
     p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
+    p_start.add_argument("--story", help="Associate this task with a story slug.")
     p_start.add_argument("-k", "--keeli", choices=["architect", "developer", "security", "author"], default="architect", metavar="PERSONA", help="Persona to attribute task creation to: architect (default), developer, security, author.")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
 
@@ -1088,8 +1136,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_feature.add_argument("-e", "--epic", help="Associate this feature with an epic slug.")
     p_feature.add_argument("-f", "--force", action="store_true", help="Overwrite existing feature file.")
 
+    # story
+    p_story = sub.add_parser("story", help="Create a user story under an epic (@architect).")
+    p_story.add_argument("title", help="Short story title.")
+    p_story.add_argument("--epic", help="Epic slug this story belongs to. Prompted if omitted.")
+    p_story.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Story priority. Prompted if omitted (default P1).")
+    p_story.add_argument("--role", help="The user role (e.g. 'developer', 'admin'). Prompted if omitted.")
+    p_story.add_argument("--goal", help="What the user wants to do. Prompted if omitted.")
+    p_story.add_argument("--reason", help="Why the user wants it. Prompted if omitted.")
+    p_story.add_argument("-f", "--force", action="store_true", help="Overwrite existing story file.")
+
     # epic
-    p_epic = sub.add_parser("epic", help="Create a new epic to group tasks.")
+    p_epic = sub.add_parser("epic", help="Create a new epic to group stories and tasks.")
     p_epic.add_argument("title", help="Short epic title.")
     p_epic.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Epic priority. Prompted if omitted (default P1).")
     p_epic.add_argument("-f", "--force", action="store_true", help="Overwrite existing epic file.")
@@ -1162,6 +1220,7 @@ def main() -> None:
         "bug": cmd_bug,
         "feature": cmd_feature,
         "epic": cmd_epic,
+        "story": cmd_story,
         "skill": cmd_skill,
         "mcp": cmd_mcp,
     }

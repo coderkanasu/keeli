@@ -251,6 +251,7 @@ TASK_TEMPLATE = """# Task: {title}
 **Created:** {timestamp}
 **Completed:** —
 **Epic:** {epic}
+**Story:** {story}
 **Depends On:** {depends_on}
 **Context:** {context_note}
 **Persona:** {persona}
@@ -333,6 +334,42 @@ SKILLS_MD = """# Keeli Skills Registry  (Keeli Framework v{version})
 """
 
 # ---------------------------------------------------------------------------
+# docs/tasks/story-*.md — user story template (owned by @architect)
+# ---------------------------------------------------------------------------
+STORY_TEMPLATE = """# Story: {title}
+
+**Status:** Backlog
+**Priority:** {priority}
+**Created:** {timestamp}
+**Completed:** —
+**Epic:** {epic}
+**Persona:** @architect
+
+## User Story
+As a {role}, I want {goal}, so that {reason}.
+
+## Acceptance Criteria
+- [ ] <!-- Criterion 1 -->
+- [ ] <!-- Criterion 2 -->
+- [ ] <!-- Criterion 3 -->
+
+## Tasks
+<!-- @architect creates tasks via: keeli start "<task title>" --story {slug} --epic {epic} -->
+
+## Checklist
+- [ ] User story written with role / goal / reason
+- [ ] Acceptance criteria defined (at least 2)
+- [ ] Tasks broken down and linked with --story {slug}
+- [ ] @developer has reviewed scope
+- [ ] All linked tasks completed
+- [ ] @security sign-off
+- [ ] Log completion in docs/ai_log.md
+
+## Notes
+<!-- @architect: design notes, constraints, open questions -->
+"""
+
+# ---------------------------------------------------------------------------
 # docs/tasks/bug-*.md — bug report template
 # ---------------------------------------------------------------------------
 BUG_TEMPLATE = """# Bug: {title}
@@ -343,6 +380,8 @@ BUG_TEMPLATE = """# Bug: {title}
 **Completed:** —
 **Epic:** {epic}
 **Found During:** {found_during}
+**Identified By:** Human / QA
+**Assigned To:** @developer
 
 ## Description
 {description}
@@ -404,7 +443,7 @@ FEATURE_TEMPLATE = """# Feature: {title}
 """
 
 # ---------------------------------------------------------------------------
-# docs/tasks/epic-*.md — epic template
+# docs/tasks/epic-*.md — epic template (owned by @architect)
 # ---------------------------------------------------------------------------
 EPIC_TEMPLATE = """# Epic: {title}
 
@@ -412,16 +451,29 @@ EPIC_TEMPLATE = """# Epic: {title}
 **Priority:** {priority}
 **Created:** {timestamp}
 **Completed:** —
+**Persona:** @architect
 
 ## Objective
-<!-- High-level goal of this epic -->
+<!-- @architect: high-level goal — what user/business outcome does this deliver? -->
 
 ## Scope
-<!-- What is in and out of scope -->
+<!-- In scope: -->
+<!-- Out of scope: -->
+
+## Stories
+<!-- @architect breaks this epic into user stories:
+     keeli story "<story title>" --epic {slug}
+-->
 
 ## Checklist
-- [ ] Define objective and scope clearly
-- [ ] Break epic into tasks and link them using `--epic {slug}`
-- [ ] All associated tasks completed
+- [ ] Objective and scope defined
+- [ ] User stories created (`keeli story --epic {slug}`)
+- [ ] Each story has acceptance criteria
+- [ ] All linked stories completed
+- [ ] @security sign-off
+- [ ] @author docs updated
 - [ ] Log completion in docs/ai_log.md
+
+## Notes
+<!-- @architect: strategic context, dependencies, risks -->
 """
