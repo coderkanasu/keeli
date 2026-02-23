@@ -207,6 +207,12 @@ def cmd_init(args: argparse.Namespace) -> None:
             print(f"  ✅ Created {gitignore}")
 
         print("\n🎉 Initialization complete!")
+        print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
+        print("   Suggested first steps:")
+        print("     1. Fill in docs/project.md with your project context")
+        print("     2. keeli skill add <name> -t lang     # register your tech stack")
+        print("     3. keeli epic \"<first goal>\" -p P1   # define your first epic")
+        print("     4. keeli story \"<user story>\" --epic <slug>  # break it down")
     except PermissionError as exc:
         print(f"\n❌ Permission Error: {exc}")
     except Exception as exc:

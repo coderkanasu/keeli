@@ -145,3 +145,14 @@ You must maintain a continuous audit trail and project state:
 - Every log entry **MUST** include an ISO-8601 timestamp.
 - At the start of each session, append a `--- SESSION START ---` marker.
 - Keep individual log entries to **one line** when possible to save tokens.
+
+---
+
+## Bundled Skills
+These are the specialization skills registered for this project.
+Personas **MUST** apply this expertise when writing or reviewing code.
+
+<!-- KEELI_SKILLS_START -->
+- **Lang**: Python
+- **Framework**: MCP SDK, FastAPI
+<!-- KEELI_SKILLS_END -->
