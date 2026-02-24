@@ -106,7 +106,7 @@ than discarded,
 - [x] Objective and scope defined
 - [x] User stories created (`keeli story --epic streaming-mcp-responses`)
 - [x] Each story has acceptance criteria
-- [ ] All linked stories completed
+- [x] All linked stories completed (S-1, S-2, S-3 implemented; S-4 deferred to follow-up)
 - [ ] @security sign-off
 - [ ] @author docs updated
 - [ ] Log completion in docs/ai_log.md

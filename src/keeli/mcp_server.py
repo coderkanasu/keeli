@@ -252,10 +252,33 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a Keeli tool."""
+    # ── S-3: acquire session for notifications (safe — no-ops outside request) ──
+    try:
+        _session = app.request_context.session
+        _progress_token = (arguments or {}).get("_meta", {}).get("progressToken")
+    except LookupError:
+        _session = None
+        _progress_token = None
+
+    async def _mcp_log(level: str, data: str) -> None:
+        """Emit a LoggingMessageNotification if a session is active."""
+        if _session is not None:
+            await _session.send_log_message(level=level, data=data)
+
+    async def _emit_progress(progress: float, total: float, message: str = "") -> None:
+        """Emit a ProgressNotification if a progress token was supplied."""
+        if _session is not None and _progress_token is not None:
+            await _session.send_progress_notification(
+                progress_token=_progress_token,
+                progress=progress,
+                total=total,
+                message=message,
+            )
+
     root = get_workspace_root()
     docs_dir = root / "docs"
     tasks_dir = docs_dir / "tasks"
-    
+
     if not docs_dir.exists():
         return [TextContent(type="text", text="Error: Not a Keeli project. Run 'keeli init' first.")]
 
@@ -294,6 +317,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         _index_update_status(task_id, status="Completed", completed=now, archived=True)
         _append_log(f"Task completed: {slug}", task_id=task_id)
 
+        await _mcp_log("info", f"Task completed and archived: {slug} [{task_id}]")
         return [TextContent(type="text", text=f"Marked {slug} as Completed and archived → archive/{task_path.name}.")]
 
     elif name == "keeli_start":
@@ -325,6 +349,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         task_path.write_text(content)
         _append_log(f"Created task: {slug}", task_id=task_id)
 
+        await _mcp_log("info", f"Task created: {slug} [{task_id}] priority={priority}")
         return [TextContent(type="text", text=f"Successfully created task {slug} [{task_id}].")]
 
     elif name == "keeli_analyze":
@@ -339,17 +364,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         task_path = candidates[0]
         task_text = task_path.read_text()
 
+        # S-1: coarse-grained progress (4 steps: load → corpus → score → format/inject)
+        await _emit_progress(0, 4, f"Loading task: {task_path.name}")
         try:
+            await _emit_progress(1, 4, "Building corpus (skills, ADRs, tasks)…")
             hints = _score_task(task_text)
+            await _emit_progress(2, 4, f"Scored {len(hints.get('skills', []))} skill(s), {len(hints.get('adrs', []))} ADR(s)")
             hints_block = _format_hints_block(hints)
+            await _emit_progress(3, 4, "Hints formatted")
         except Exception as exc:
             return [TextContent(type="text", text=f"Error during analysis: {exc}")]
 
         if dry_run:
+            await _emit_progress(4, 4, "Done (dry-run)")
             return [TextContent(type="text", text=f"Analysis for {task_path.name}:\n{hints_block}")]
-
-        import re
-        _START = "<!-- KEELI_HINTS_START -->"
         if _START in task_text:
             pat = r"\n---\n\n## AI Context Hints.*?" + re.escape("<!-- KEELI_HINTS_END -->")
             new_text = re.sub(pat, hints_block, task_text, flags=re.DOTALL)
@@ -444,6 +472,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 sec = "## Active\n" + "\n".join(active_lines)
                 sections.append(sec)
                 used += _tokens(sec)
+                await _mcp_log("info", f"[digest] Active tasks: {len(active_lines)} item(s) (~{_tokens(sec)} tokens)")
 
         # Project overview
         project = docs_dir / "project.md"
@@ -453,6 +482,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if _fits(sec):
                 sections.append(sec)
                 used += _tokens(sec)
+                await _mcp_log("info", f"[digest] Project section added (~{_tokens(sec)} tokens)")
 
         # Backlog from index
         if _INDEX_PATH.exists():
@@ -477,7 +507,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if _fits(sec):
                 sections.append(sec)
                 used += _tokens(sec)
+                await _mcp_log("info", f"[digest] Log section added (~{_tokens(sec)} tokens)")
 
+        await _mcp_log("info", f"[digest] Complete: {len(sections)} section(s), ~{used}/{budget} tokens used")
         output = "\n\n".join(sections) if sections else "No Keeli context found."
         return [TextContent(type="text", text=f"{output}\n\n~{used} tokens (budget: {budget})")]
 
@@ -503,6 +535,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         _index_update_status(task_id, archived=True)
         _append_log(f"Archived task: {slug}", task_id=task_id)
 
+        await _mcp_log("info", f"Task archived: {slug}")
         return [TextContent(type="text", text=f"Archived '{slug}' → archive/{task_path.name}")]
 
     else:
