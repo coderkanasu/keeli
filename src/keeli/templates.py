@@ -372,16 +372,22 @@ TASK_CHECKLISTS = {
 - [ ] Prioritise by user/business value, not technical convenience
 - [ ] Link wireframes, mockups, or research docs if available
 - [ ] ACs understandable and verifiable by @developer and @security
+- [ ] NFRs defined: performance targets, availability, scalability, and data retention noted
+- [ ] STOP if any NFR is unknown -- do not allow @architect to start design until answered
 - [ ] Log completion in docs/ai_log.md""",
 
     "architect": """\
 - [ ] STOP: is the tech stack recorded in docs/skills.md? If not, ask before designing anything
+- [ ] STOP: are NFRs defined in the story/epic? If not, ask @po before designing interfaces
+- [ ] STOP: if any requirement is ambiguous, raise it with @po or the human before proceeding
 - [ ] Define the interfaces and contracts first — no implementation decisions yet
 - [ ] Identify every seam: what could change? wrap those behind an abstraction
 - [ ] Check: is there a Repository, Adapter, or Strategy pattern needed here?
 - [ ] Verify layering: domain / service / repository / controller boundaries respected
 - [ ] Flag any hardcoded value, magic number, or config that belongs in environment/config
 - [ ] Record the design decision and rejected alternatives in docs/decision.md
+- [ ] Fill ## Test Strategy in the story before handing any tasks to @developer
+- [ ] Scalability check: does the interface hold at 10× current load? If not, record an ADR
 - [ ] Break into stories (keeli story) and tasks — hand off to @developer, do not implement
 - [ ] Confirm blast radius: what else breaks if this interface changes?
 - [ ] Log completion in docs/ai_log.md""",
@@ -547,6 +553,7 @@ Acceptance criteria are the product owner's primary deliverable.
 **Core Skills:**
 - User story authoring ("As a [role], I want [feature] so that [benefit]")
 - Acceptance criteria definition (BDD: Given/When/Then)
+- Non-functional requirements definition (performance targets, availability SLA, scalability horizon, data retention — defined before @architect begins design)
 - Backlog grooming and prioritisation (MoSCoW, WSJF, RICE)
 - Epic decomposition (splitting epics into stories with @architect)
 - Stakeholder communication and requirements translation
@@ -555,6 +562,7 @@ Acceptance criteria are the product owner's primary deliverable.
 
 **Flags immediately:**
 - A story with no acceptance criteria -- blocks refinement until ACs are written
+- A story with no NFRs -- blocks @architect from starting design until targets are defined
 - A story containing implementation details ("shall use PostgreSQL")
 - An epic where the actual user problem is unclear
 - Scope being added to a story without creating a new story
@@ -578,10 +586,15 @@ Never writes code; writes decisions and hands them to @developer.
 - Architectural patterns: Repository, Adapter, Strategy, CQRS, Event Sourcing
 - API contract design (REST, gRPC, event schemas)
 - Data modelling and schema evolution
+- NFR translation (converting @po's performance/scalability targets into interface constraints and ADRs before any design begins)
+- Scalability analysis (10× load question: does the interface remain valid at 10× load and 10× data volume? if not, record a scaling ADR before stories are written)
 - Blast-radius analysis: what breaks when this interface changes?
 - ADR authoring (docs/decision.md)
 
 **Flags immediately:**
+- A story or epic with no NFR section — blocks design; asks @po before proceeding
+- Test strategy section missing from a story — blocks task decomposition until filled
+- Any requirement that is ambiguous — STOP and ask @po or the human before designing
 - Hardcoded values, magic numbers, or credentials anywhere in code
 - Business logic bleeding into controllers or persistence layers
 - Missing repository/adapter abstraction around an external dependency
@@ -700,6 +713,22 @@ As a {role}, I want {goal}, so that {reason}.
 - [ ] <!-- Criterion 2 -->
 - [ ] <!-- Criterion 3 -->
 
+## Non-Functional Requirements
+<!-- Define BEFORE @architect begins design. If any target is unknown, STOP — ask @po or the human before proceeding. -->
+- **Performance:** <!-- e.g. p95 latency < 200 ms at N req/s -->
+- **Availability:** <!-- e.g. 99.9 % uptime; graceful degradation strategy -->
+- **Scalability:** <!-- e.g. interface must hold at 10× current load without change -->
+- **Security:** <!-- e.g. all inputs validated at boundary; no PII in logs -->
+- **Data retention:** <!-- e.g. records purged after 90 days -->
+
+## Test Strategy
+<!-- @architect fills this BEFORE handing any tasks to @developer. If scope is unclear, STOP and ask before decomposing tasks. -->
+- **Unit:** <!-- which units need isolated tests? -->
+- **Integration:** <!-- which boundaries need integration tests? -->
+- **E2E / contract:** <!-- which flows need end-to-end or contract tests? -->
+- **Load / soak:** <!-- required only if an NFR mandates it; state target and tooling -->
+- **Out of scope:** <!-- explicitly list what will NOT be tested in this story -->
+
 ## Tasks
 <!-- @architect creates tasks via: keeli start "<task title>" --story {slug} --epic {epic} -->
 
@@ -809,6 +838,18 @@ EPIC_TEMPLATE = """# Epic: {title}
 ## Scope
 <!-- In scope: -->
 <!-- Out of scope: -->
+
+## Non-Functional Requirements
+<!-- Required before @architect breaks this epic into stories. If any target is unknown, STOP and ask before writing stories. -->
+- **Performance targets:** <!-- e.g. peak req/s, p99 latency budget -->
+- **Availability / reliability:** <!-- e.g. SLA, degradation strategy -->
+- **Scalability horizon:** <!-- volume this must handle; state the order of magnitude -->
+- **Security posture:** <!-- auth model, data classification -->
+- **Compliance / data retention:** <!-- regulatory or policy requirements -->
+
+## Scalability & Growth
+<!-- @architect: will the chosen interfaces remain valid at 10× load and 10× data volume? -->
+<!-- If the answer is NO or UNKNOWN, record the scaling boundary as an ADR before writing stories. -->
 
 ## Stories
 <!-- @architect breaks this epic into user stories:

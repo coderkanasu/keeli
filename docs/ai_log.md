@@ -61,3 +61,4 @@
 2026-02-24T17:27:49Z | @architect | Updated skills.md: removed orphan rows; added pytest-asyncio, json, pathlib.Path, Immutable ID Ledger, MCP Streaming Notifications, Project Root Detection; upgraded Four→Five-Persona entry.
 2026-02-24T18:45:39Z | @architect | Schema updated: v0.3.0 → v0.4.0
 2026-02-24T18:46:24Z | @architect | Sync v0.4.0 docs: Five-Persona template, 112-test count, decision.md v0.4.0 + ADR-003, regenerated copilot-instructions.md.
+2026-02-24T18:53:42Z | @architect | Closed NFR/test-strategy/scalability governance gaps: STORY_TEMPLATE NFR+TestStrategy sections; EPIC_TEMPLATE NFR+Scalability sections; po+architect checklists hardened with STOP gates; PERSONAS_MD po+architect updated.

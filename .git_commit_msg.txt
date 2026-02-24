@@ -1,10 +1,32 @@
-chore(docs): sync all stale v0.3.0/Four-Persona references to v0.4.0
+feat(templates): close NFR, test-strategy, and scalability governance gaps
 
-- templates.py: Four-Persona -> Five-Persona Architecture (fixes keeli init)
-- main.py build_parser description: Four-Persona -> Five-Persona
-- .github/copilot-instructions.md: regenerated via keeli update --force
-  (v0.3.0 -> v0.4.0, Four Personas -> Five Personas, @po added)
-- docs/project.md: 64 tests -> 112 tests, pytest-asyncio noted
-- docs/decision.md: header v0.2.0 -> v0.4.0, add ADR-003 (MCP Streaming)
-- tests: update Four-Persona assertions -> Five-Persona (2 tests)
-- 112/112 tests green
+STORY_TEMPLATE:
+- Add ## Non-Functional Requirements section (performance, availability,
+  scalability, security, data retention) with explicit STOP/ask gate
+- Add ## Test Strategy section (unit/integration/E2E/load/out-of-scope)
+  required before @architect hands tasks to @developer
+
+EPIC_TEMPLATE:
+- Add ## Non-Functional Requirements section with same targets
+- Add ## Scalability & Growth section (10x load/data ADR gate)
+
+TASK_CHECKLISTS[@po]:
+- Add NFRs defined checklist item
+- Add STOP gate: blocks @architect start until NFRs answered
+
+TASK_CHECKLISTS[@architect]:
+- Add two new STOP gates: NFRs missing + ambiguous requirements
+- Add: fill Test Strategy before decomposing tasks
+- Add: scalability check (10x load) with ADR gate
+
+PERSONAS_MD[@po]:
+- Add NFR definition to Core Skills
+- Add "story with no NFRs" to Flags immediately
+
+PERSONAS_MD[@architect]:
+- Add NFR translation + scalability analysis to Core Skills
+- Add story/epic with no NFR to Flags immediately
+- Add test strategy missing to Flags immediately
+- Add ambiguous requirement STOP to Flags immediately
+
+112/112 tests green
