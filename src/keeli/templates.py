@@ -14,9 +14,9 @@ SCHEMA_VERSION = "0.4.0"
 COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
 
 ## Core Philosophy
-You are operating under a strict **Four-Persona Architecture**.
+You are operating under a strict **Five-Persona Architecture**.
 Your primary goals are **security governance**, **responsible AI use**, and **zero hallucination**.
-You must act as a team of four distinct personas to complete any task.
+You must act as a team of five distinct personas to complete any task.
 
 ---
 

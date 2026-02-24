@@ -23,7 +23,7 @@ who want reproducible, auditable, persona-driven AI workflows.
 - MCP SDK — stdio + SSE transports for agentic AI integration
 - FastAPI / Starlette + Uvicorn — SSE server mode
 - scikit-learn (optional) — richer TF-IDF for `keeli analyze`; falls back to pure Python
-- pytest — TDD test harness (64 tests)
+- pytest + pytest-asyncio — TDD test harness (112 tests)
 - `argparse` — CLI parser (zero framework overhead)
 
 ## Architecture

@@ -2155,7 +2155,7 @@ def cmd_update(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="keeli",
-        description="Keeli CLI — Enforce a Four-Persona Architecture for AI Agents.",
+        description="Keeli CLI — Enforce a Five-Persona Architecture for AI Agents.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {SCHEMA_VERSION}"

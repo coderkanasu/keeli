@@ -345,7 +345,7 @@ class TestUpdate:
         output = capsys.readouterr().out
         assert "Updated" in output
         content = instructions.read_text()
-        assert "Four-Persona Architecture" in content
+        assert "Five-Persona Architecture" in content
 
     def test_skip_if_same_version(self, initialized_dir, capsys):
         with patch("sys.argv", ["keeli", "update"]):

@@ -1,4 +1,4 @@
-# Decision Log  (Persona Framework v0.2.0)
+# Decision Log  (Keeli Framework v0.4.0)
 
 Record every significant decision using the template below.
 
@@ -32,6 +32,21 @@ Record every significant decision using the template below.
 - `keeli digest --budget N` provides a token-budgeted context snapshot for LLM session starts.
 - `keeli resume --nano` returns ~200 tokens (current in-progress task ID + title only) for tight-context editors.
 - All MCP tools updated: `keeli_start` stamps IDs, `keeli_complete` auto-archives, new tools `keeli_find`, `keeli_history`, `keeli_digest`, `keeli_archive_task` added.
+
+---
+
+### ADR-003 — MCP Streaming Notifications (S-1/S-2/S-3)
+**Date:** 2026-02-24
+**Decision:** Emit three structured MCP notifications per tool call: S-1 (session-start log), S-2 (progress during work), S-3 (completion log). Implemented via `_mcp_log` and `_emit_progress` async closures inside each `call_tool` handler. Guard every notification with a `try/except LookupError` to tolerate missing request context (e.g. unit tests).
+**Context:** Agentic AI clients (Claude Desktop, Copilot) benefit from real-time feedback during long-running tasks. Without notifications, calls appear to hang and there is no audit trail in the session.
+**Alternatives Considered:**
+1. Return all output in the final `TextContent` only — rejected: no real-time visibility for the agent.
+2. WebSocket-based streaming — rejected: MCP SDK already provides `send_log_message` and `send_progress_notification` on the session object; no new transport needed.
+3. S-4 (cancellation) — deferred: requires `anyio` cancel-scope integration; not needed for v0.4.0.
+**Consequences:**
+- All nine `call_tool` handlers emit S-1/S-2/S-3.
+- `tests/test_mcp_server.py` uses `AsyncMock` on `session.send_log_message` / `session.send_progress_notification` via `PropertyMock` on `app.request_context` to assert notifications.
+- S-4 (cancellation support) is tracked in `epic-streaming-mcp-responses.md`.
 
 ---
 

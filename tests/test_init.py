@@ -50,7 +50,7 @@ class TestInit:
 
         content = (clean_dir / ".github" / "copilot-instructions.md").read_text()
         assert content != marker
-        assert "Four-Persona Architecture" in content
+        assert "Five-Persona Architecture" in content
 
     def test_gitignore_appends_if_exists(self, clean_dir):
         (clean_dir / ".gitignore").write_text("node_modules/\n")
