@@ -54,3 +54,4 @@
 2026-02-23T20:44:14Z | @architect | Epic created: Task Metrics & Analytics [P2] → docs/tasks/epic-task-metrics-analytics.md
 2026-02-23T20:51:00Z | @architect | Task created: API error handling strategy → docs/tasks/api-error-handling-strategy.md
 2026-02-24T00:37:36Z | @developer | Completed Phase 1+2: immutable IDs (T/E/S/BUG/FEAT), .keeli_index.json ledger, auto-archive on complete, keeli find/history/digest/resume --nano, mcp_server new tools (keeli_find/history/digest/archive_task). 64/64 tests green. ADR-002 recorded.
+2026-02-24T16:24:18Z | @po | Groomed epic: Streaming MCP Responses — 4 user stories with ACs, scope defined, SDK types verified
