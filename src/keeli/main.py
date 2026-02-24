@@ -23,6 +23,7 @@ Commands
 
 import argparse
 import json
+import os
 import math as _math
 import re
 import textwrap
@@ -79,6 +80,20 @@ def _tail(path: Path, n: int = 30) -> str:
         return ""
     lines = path.read_text().splitlines()
     return "\n".join(lines[-n:])
+
+
+def _find_project_root() -> Path:
+    """Walk up from cwd to find the directory containing docs/project.md.
+
+    This lets CLI commands and the MCP server work correctly even when run
+    from a subdirectory or when the server process starts in a parent directory.
+    Falls back to cwd when no project root is found (e.g. during init).
+    """
+    here = Path.cwd()
+    for candidate in [here, *here.parents]:
+        if (candidate / "docs" / "project.md").exists():
+            return candidate
+    return here
 
 
 # ── Index / Ledger helpers ─────────────────────────────────────────────────
@@ -2296,6 +2311,13 @@ def cmd_mcp(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    # Resolve project root so commands work from any subdirectory and the MCP
+    # server works even when launched from a parent of the project directory.
+    if getattr(args, "command", None) != "init":
+        project_root = _find_project_root()
+        if project_root != Path.cwd():
+            os.chdir(project_root)
 
     dispatch = {
         "init": cmd_init,

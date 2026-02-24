@@ -23,7 +23,7 @@ from keeli.main import (
     _score_task, _format_hints_block, _build_corpus,
     _load_index, _allocate_id, _index_update_status,
     _parse_task_field, _resolve_task_file, _append_log,
-    _INDEX_PATH, _tail,
+    _INDEX_PATH, _tail, _find_project_root,
 )
 from keeli.templates import TASK_TEMPLATE, TASK_CHECKLISTS
 
@@ -32,7 +32,8 @@ app = Server("keeli-mcp")
 
 # Helper to get the workspace root
 def get_workspace_root() -> Path:
-    return Path.cwd()
+    """Return the project root by walking up from cwd to find docs/project.md."""
+    return _find_project_root()
 
 @app.list_resources()
 async def list_resources() -> list[Resource]:
@@ -271,7 +272,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not slug:
             return [TextContent(type="text", text="Error: task_slug is required.")]
 
-        task_path = _resolve_task_file(slug, root)
+        task_path = _resolve_task_file(tasks_dir, slug)
         if not task_path:
             return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
 
@@ -485,7 +486,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not slug:
             return [TextContent(type="text", text="Error: task_slug is required.")]
 
-        task_path = _resolve_task_file(slug, root)
+        task_path = _resolve_task_file(tasks_dir, slug)
         if not task_path:
             return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
 
