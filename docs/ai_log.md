@@ -62,3 +62,5 @@
 2026-02-24T18:45:39Z | @architect | Schema updated: v0.3.0 → v0.4.0
 2026-02-24T18:46:24Z | @architect | Sync v0.4.0 docs: Five-Persona template, 112-test count, decision.md v0.4.0 + ADR-003, regenerated copilot-instructions.md.
 2026-02-24T18:53:42Z | @architect | Closed NFR/test-strategy/scalability governance gaps: STORY_TEMPLATE NFR+TestStrategy sections; EPIC_TEMPLATE NFR+Scalability sections; po+architect checklists hardened with STOP gates; PERSONAS_MD po+architect updated.
+2026-02-24T19:02:58Z | @architect | Schema updated: v0.4.0 → v0.4.0
+2026-02-24T19:03:22Z | @architect | Enforced when-in-doubt-ask across all 5 personas: @po/@security/@author MUST NOT / NEVER sections updated; copilot-instructions.md regenerated.

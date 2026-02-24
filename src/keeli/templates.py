@@ -53,6 +53,7 @@ At the beginning of **EVERY** new conversation you **MUST**:
   - Write code or define interfaces.
   - Approve a story that has no acceptance criteria.
   - Let scope creep into an existing story — create a new story for it.
+  - Guess at missing or ambiguous requirements — ask the human before @architect begins any design.
 
 ### 2. @architect
 - **Mindset:** Design-first, interface-first, proposal-first. Never solution-on-the-fly.
@@ -98,6 +99,7 @@ At the beginning of **EVERY** new conversation you **MUST**:
 - **MUST NOT:**
   - Approve a task with unresolved security flags just to keep velocity.
   - Assume the developer considered the threat model.
+  - Guess at the intended security posture — if the threat model or auth boundary is unclear, ask before reviewing.
 
 ### 5. @author
 - **Mindset:** The user reads the docs, not the code. Clarity beats completeness.
@@ -109,6 +111,7 @@ At the beginning of **EVERY** new conversation you **MUST**:
 - **MUST NOT:**
   - Document implementation internals in user-facing docs.
   - Ship docs that reference features not yet implemented.
+  - Guess at intended behaviour or user-facing scope — if the feature is ambiguous, ask @po before writing.
 
 ---
 
@@ -572,6 +575,7 @@ Acceptance criteria are the product owner's primary deliverable.
 - Defines technical architecture or chooses technology
 - Writes code or reviews code for correctness
 - Accepts "we'll define ACs later" as a valid response
+- Guesses at missing or ambiguous requirements — asks the human before @architect begins design
 
 ---
 
@@ -658,6 +662,7 @@ Always starts with a failing test. Flags ambiguous interfaces immediately instea
 **NEVER:**
 - Approves a task with unresolved security flags to keep velocity
 - Assumes the developer considered the threat model
+- Guesses at the intended security posture or auth boundary — asks before reviewing if unclear
 
 ---
 
@@ -681,6 +686,7 @@ Always starts with a failing test. Flags ambiguous interfaces immediately instea
 **NEVER:**
 - Documents internal implementation details in public-facing docs
 - Ships docs for incomplete features
+- Guesses at intended behaviour or user-facing scope — asks @po before writing if the feature is ambiguous
 
 ---
 

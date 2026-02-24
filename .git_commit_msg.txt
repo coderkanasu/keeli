@@ -1,32 +1,18 @@
-feat(templates): close NFR, test-strategy, and scalability governance gaps
+feat(templates): enforce when-in-doubt-ask across all 5 personas
 
-STORY_TEMPLATE:
-- Add ## Non-Functional Requirements section (performance, availability,
-  scalability, security, data retention) with explicit STOP/ask gate
-- Add ## Test Strategy section (unit/integration/E2E/load/out-of-scope)
-  required before @architect hands tasks to @developer
+@po (COPILOT_INSTRUCTIONS + PERSONAS_MD):
+- MUST NOT: guess at missing/ambiguous requirements; ask the human
+  before @architect begins any design
 
-EPIC_TEMPLATE:
-- Add ## Non-Functional Requirements section with same targets
-- Add ## Scalability & Growth section (10x load/data ADR gate)
+@security (COPILOT_INSTRUCTIONS + PERSONAS_MD):
+- MUST NOT: guess at intended security posture or auth boundary;
+  ask before reviewing if unclear
 
-TASK_CHECKLISTS[@po]:
-- Add NFRs defined checklist item
-- Add STOP gate: blocks @architect start until NFRs answered
+@author (COPILOT_INSTRUCTIONS + PERSONAS_MD):
+- MUST NOT: guess at intended behaviour or user-facing scope;
+  ask @po before writing if the feature is ambiguous
 
-TASK_CHECKLISTS[@architect]:
-- Add two new STOP gates: NFRs missing + ambiguous requirements
-- Add: fill Test Strategy before decomposing tasks
-- Add: scalability check (10x load) with ADR gate
+@architect + @developer already had explicit ask gates; unchanged.
 
-PERSONAS_MD[@po]:
-- Add NFR definition to Core Skills
-- Add "story with no NFRs" to Flags immediately
-
-PERSONAS_MD[@architect]:
-- Add NFR translation + scalability analysis to Core Skills
-- Add story/epic with no NFR to Flags immediately
-- Add test strategy missing to Flags immediately
-- Add ambiguous requirement STOP to Flags immediately
-
-112/112 tests green
+Regenerated .github/copilot-instructions.md via keeli update --force.
+112/112 tests green.
