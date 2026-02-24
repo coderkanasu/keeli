@@ -1,0 +1,27 @@
+test(mcp): add 48 tests for mcp_server call_tool handlers
+
+Covers all 9 tool handlers: keeli_next, keeli_start, keeli_complete,
+keeli_analyze, keeli_log, keeli_find, keeli_history, keeli_digest,
+keeli_archive_task — including error paths (missing args, not-found,
+not-a-project, already-archived, unknown tool).
+
+Streaming notification tests (S-1/S-2/S-3):
+- _mcp_log: silent no-op without session; calls send_log_message with
+  level=info and correct data when mock session is active
+- _emit_progress: no-op without token; calls send_progress_notification
+  with correct progress_token + monotonic progress values when session
+  + progressToken are both present
+
+Bugs found and fixed in production code (mcp_server.py):
+1. _allocate_id("task", slug, root) — root (PosixPath) passed as slug
+   arg, breaking JSON serialization; fixed to _allocate_id("task",
+   title, slug, priority=priority, epic=..., story=...)
+2. TASK_TEMPLATE.format() missing epic/story/objective keys
+3. _START undefined in keeli_analyze inject path — fixed to
+   _HINTS_MARKER_START (imported from keeli.main)
+4. import re was inside keeli_complete branch only — moved to module
+   level so keeli_analyze inject path can use re.sub / re.escape
+
+Added pytest.ini with asyncio_mode = auto (pytest-asyncio 1.3.0).
+
+112/112 tests pass (64 original + 48 new).

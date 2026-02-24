@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,7 @@ from keeli.main import (
     _load_index, _allocate_id, _index_update_status,
     _parse_task_field, _resolve_task_file, _append_log,
     _INDEX_PATH, _tail, _find_project_root,
+    _HINTS_MARKER_START,
 )
 from keeli.templates import TASK_TEMPLATE, TASK_CHECKLISTS
 
@@ -299,7 +301,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not task_path:
             return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
 
-        import re
         content = task_path.read_text()
         for old_status in ("In Progress", "Backlog", "Review", "Blocked"):
             content = content.replace(f"**Status:** {old_status}", "**Status:** Completed")
@@ -325,15 +326,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         priority = arguments.get("priority", "P1")
         persona = arguments.get("persona", "developer")
         depends_on = arguments.get("depends_on", "")
-        
+        epic = arguments.get("epic", "")
+        story = arguments.get("story", "")
+        objective = arguments.get("objective", "")
+
         slug = _slugify(title)
         task_path = tasks_dir / f"{slug}.md"
-        
+
         if task_path.exists():
             return [TextContent(type="text", text=f"Error: Task {slug} already exists.")]
-            
+
         checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
-        task_id = _allocate_id("task", slug, root)
+        task_id = _allocate_id("task", title, slug, priority=priority, epic=epic or None, story=story or None)
 
         content = TASK_TEMPLATE.format(
             title=title,
@@ -344,6 +348,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             context_note="",
             persona=f"@{persona}",
             checklist=checklist,
+            epic=epic,
+            story=story,
+            objective=objective,
         )
 
         task_path.write_text(content)
@@ -378,7 +385,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if dry_run:
             await _emit_progress(4, 4, "Done (dry-run)")
             return [TextContent(type="text", text=f"Analysis for {task_path.name}:\n{hints_block}")]
-        if _START in task_text:
+        if _HINTS_MARKER_START in task_text:
             pat = r"\n---\n\n## AI Context Hints.*?" + re.escape("<!-- KEELI_HINTS_END -->")
             new_text = re.sub(pat, hints_block, task_text, flags=re.DOTALL)
         else:
