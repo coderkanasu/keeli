@@ -768,7 +768,7 @@ FEATURE_TEMPLATE = """# Feature: {title}
 **Context:** {context_note}
 
 ## User Story
-<!-- As a <user>, I want <goal>, so that <reason>. -->
+{user_story}
 
 ## Acceptance Criteria
 - [ ] <!-- Criterion 1 -->
@@ -804,7 +804,7 @@ EPIC_TEMPLATE = """# Epic: {title}
 **Persona:** @architect
 
 ## Objective
-<!-- @architect: high-level goal — what user/business outcome does this deliver? -->
+{objective}
 
 ## Scope
 <!-- In scope: -->

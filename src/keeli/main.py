@@ -96,6 +96,63 @@ def _find_project_root() -> Path:
     return here
 
 
+_OBJECTIVE_HINT = (
+    "⚠️  No objective — add one with -o 'text', -o '@file.md', or JSON:\n"
+    "       -o '{\"goal\":\"...\",\"why\":\"...\",\"criteria\":[\"...\"],\"out_of_scope\":[\"...\"]}'"
+)
+
+
+def _resolve_objective(raw: "str | None") -> str:
+    """Resolve -o/--objective input to plain markdown text.
+
+    Accepts three formats:
+    - Plain text       → returned as-is
+    - "@path/to/file"  → content of the file is used
+    - JSON dict        → formatted into structured markdown, e.g.:
+
+        {"goal": "Add login", "why": "Users need auth",
+         "criteria": ["OAuth works", "Token expires"],
+         "out_of_scope": ["Admin panel"]}
+
+        becomes:
+
+        **Goal:** Add login
+        **Why:** Users need auth
+        **Success Criteria:**
+        - OAuth works
+        - Token expires
+        **Out of Scope:**
+        - Admin panel
+    """
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if raw.startswith("@"):
+        obj_path = Path(raw[1:])
+        if obj_path.exists():
+            return obj_path.read_text().strip()
+        print(f"⚠️  Objective file '{obj_path}' not found. Using empty placeholder.")
+        return ""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            lines: list[str] = []
+            if "goal" in data:
+                lines.append(f"**Goal:** {data['goal']}")
+            if "why" in data:
+                lines.append(f"**Why:** {data['why']}")
+            if isinstance(data.get("criteria"), list):
+                lines.append("**Success Criteria:**")
+                lines.extend(f"- {c}" for c in data["criteria"])
+            if isinstance(data.get("out_of_scope"), list):
+                lines.append("**Out of Scope:**")
+                lines.extend(f"- {x}" for x in data["out_of_scope"])
+            return "\n".join(lines) if lines else raw
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return raw
+
+
 # ── Index / Ledger helpers ─────────────────────────────────────────────────
 
 _INDEX_PATH = Path("docs/.keeli_index.json")
@@ -426,17 +483,9 @@ def cmd_start(args: argparse.Namespace) -> None:
             print(f"⚠️  Context file {ctx_path} not found. Proceeding without link.")
 
     # Resolve optional objective text
-    objective_text = ""
-    if args.objective:
-        if args.objective.startswith("@"):
-            # Read from file
-            obj_path = Path(args.objective[1:])
-            if obj_path.exists():
-                objective_text = obj_path.read_text().strip()
-            else:
-                print(f"⚠️  Objective file {obj_path} not found. Proceeding without objective.")
-        else:
-            objective_text = args.objective.strip()
+    objective_text = _resolve_objective(getattr(args, "objective", None))
+    if not objective_text:
+        print(_OBJECTIVE_HINT)
 
     priority = getattr(args, "priority", None) or _prompt(
         "Task priority", default="P1", choices=["P0", "P1", "P2"]
@@ -468,7 +517,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     task_file.write_text(content)
     print(f"✅ Created task: {task_file} [{task_id}] [@{persona} checklist]")
     if objective_text:
-        print(f"   → Objective pre-filled from {args.objective}")
+        print(f"   → Objective set ({len(objective_text.splitlines())} line(s))")
 
     # Auto-log the event
     _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}", task_id=task_id)
@@ -776,6 +825,9 @@ def cmd_feature(args: argparse.Namespace) -> None:
         "feat", args.title, f"feat-{slug}", priority=priority,
         epic=epic if epic != "None" else None,
     )
+    user_story_text = _resolve_objective(getattr(args, "objective", None))
+    if not user_story_text:
+        print(_OBJECTIVE_HINT)
     content = FEATURE_TEMPLATE.format(
         task_id=feat_id,
         title=args.title,
@@ -783,6 +835,7 @@ def cmd_feature(args: argparse.Namespace) -> None:
         timestamp=_now_iso(),
         epic=epic,
         context_note=context_note,
+        user_story=user_story_text or "<!-- As a <user>, I want <goal>, so that <reason>. -->",
     )
     task_file.write_text(content)
     print(f"✨ Created feature: {task_file} [{feat_id}]")
@@ -1203,12 +1256,16 @@ def cmd_epic(args: argparse.Namespace) -> None:
     )
 
     epic_id = _allocate_id("epic", args.title, f"epic-{slug}", priority=priority)
+    objective_text = _resolve_objective(getattr(args, "objective", None))
+    if not objective_text:
+        print(_OBJECTIVE_HINT)
     content = EPIC_TEMPLATE.format(
         task_id=epic_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
         slug=slug,
+        objective=objective_text or "<!-- @architect: high-level goal — what user/business outcome does this deliver? -->",
     )
     task_file.write_text(content)
     print(f"🚀 Created epic: {task_file} [{epic_id}]")
@@ -2194,6 +2251,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_feature = sub.add_parser("feature", help="Create a feature request with user story and acceptance criteria.")
     p_feature.add_argument("title", help="Short feature title.")
     p_feature.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
+    p_feature.add_argument("-o", "--objective", help="User story / objective text. Accepts plain text, @file.md, or JSON: '{\"goal\":\"...\",\"why\":\"...\",\"criteria\":[\"...\"]}'. Prompted via warning if omitted.")
     p_feature.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Feature priority. Prompted if omitted (default P1).")
     p_feature.add_argument("-e", "--epic", help="Associate this feature with an epic slug.")
     p_feature.add_argument("-f", "--force", action="store_true", help="Overwrite existing feature file.")
@@ -2212,6 +2270,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_epic = sub.add_parser("epic", help="Create a new epic to group stories and tasks.")
     p_epic.add_argument("title", help="Short epic title.")
     p_epic.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Epic priority. Prompted if omitted (default P1).")
+    p_epic.add_argument("-o", "--objective", help="Epic objective. Accepts plain text, @file.md, or JSON: '{\"goal\":\"...\",\"why\":\"...\",\"criteria\":[\"...\"]}'. Warned if omitted.")
     p_epic.add_argument("-f", "--force", action="store_true", help="Overwrite existing epic file.")
 
     # skill
