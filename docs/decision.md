@@ -35,6 +35,28 @@ Record every significant decision using the template below.
 
 ---
 
+### ADR-004 — Hard Enforcement at CLI State Transitions vs. Soft LLM Governance
+**Date:** 2026-02-24
+**Decision:** Split enforcement into two distinct layers that must never be conflated:
+1. **CLI hard enforcement** — structural completeness guards at state-transition commands (`keeli start`, `keeli progress`, `keeli review`, `keeli complete`, `keeli story`). The CLI validates field presence and checklist completion before mutating state, and exits with a clear error if the guard fails.
+2. **LLM soft governance** — conversational rules (when in doubt ask, no guessing) live in `copilot-instructions.md` and `PERSONAS_MD`. These govern agent behaviour between commands; the CLI cannot enforce them because they require a human exchange.
+**Context:** The project goal is zero hallucination and an auditable AI ledger. Markdown-only enforcement depends on the LLM self-governing — that is hope, not a guarantee. State transitions are command boundaries the CLI already owns; validation there is deterministic and testable.
+**Alternatives Considered:**
+1. Enforce everything in markdown/personas only — rejected: soft enforcement at every layer means a sufficiently confident LLM can skip gates silently.
+2. Enforce everything in the CLI — rejected: "when in doubt ask" requires a human response; the CLI cannot generate that exchange and should not try.
+3. Separate enforcement daemon / linter — rejected: adds runtime complexity. The CLI dispatch loop is the right boundary; no new process needed.
+**Consequences:**
+- `keeli start` (task linked to story): fails if parent story is missing `## Non-Functional Requirements` content or `## Test Strategy` content.
+- `keeli progress`: fails if task Objective field is unfilled.
+- `keeli review`: fails if @developer checklist has unchecked items.
+- `keeli complete`: fails if @security checklist has unchecked items.
+- `keeli story`: fails if parent epic is missing `## Non-Functional Requirements` content.
+- All guards use the same `_validate_transition(path, rules)` helper — no guard logic duplicated across commands.
+- Guards are tested with TDD before implementation. Each guard has a "missing field" test and a "passes when filled" test.
+- Conversational governance (ask gates, STOP rules) stays in templates/personas — untouched.
+
+---
+
 ### ADR-003 — MCP Streaming Notifications (S-1/S-2/S-3)
 **Date:** 2026-02-24
 **Decision:** Emit three structured MCP notifications per tool call: S-1 (session-start log), S-2 (progress during work), S-3 (completion log). Implemented via `_mcp_log` and `_emit_progress` async closures inside each `call_tool` handler. Guard every notification with a `try/except LookupError` to tolerate missing request context (e.g. unit tests).

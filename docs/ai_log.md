@@ -64,3 +64,9 @@
 2026-02-24T18:53:42Z | @architect | Closed NFR/test-strategy/scalability governance gaps: STORY_TEMPLATE NFR+TestStrategy sections; EPIC_TEMPLATE NFR+Scalability sections; po+architect checklists hardened with STOP gates; PERSONAS_MD po+architect updated.
 2026-02-24T19:02:58Z | @architect | Schema updated: v0.4.0 → v0.4.0
 2026-02-24T19:03:22Z | @architect | Enforced when-in-doubt-ask across all 5 personas: @po/@security/@author MUST NOT / NEVER sections updated; copilot-instructions.md regenerated.
+2026-02-24T19:06:14Z | T-0001 | @architect | Task created: CLI hard enforcement at state transitions → docs/tasks/cli-hard-enforcement-at-state-transitions.md
+2026-02-24T19:06:56Z | T-0002 | @developer | Task created: Implement _validate_transition guard helper and section predicates → docs/tasks/implement-validate-transition-guard-helper-and-section-predicates.md
+2026-02-24T19:06:56Z | T-0003 | @developer | Task created: Wire transition guards into cmd_start, cmd_story, cmd_progress, cmd_review, cmd_complete → docs/tasks/wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete.md
+2026-02-24T19:07:36Z | @architect | T-0001 Completed: ADR-004 written; _validate_transition interface designed; blast-radius confirmed; T-0002 + T-0003 created for @developer.
+2026-02-24T19:07:36Z | @architect | T-0002 created: implement _validate_transition helper + predicates.
+2026-02-24T19:07:36Z | @architect | T-0003 created: wire guards into cmd_start/story/progress/review/complete.

@@ -1,0 +1,51 @@
+{
+  "schema": "1.0",
+  "counters": {
+    "T": 3,
+    "E": 0,
+    "S": 0,
+    "BUG": 0,
+    "FEAT": 0
+  },
+  "items": [
+    {
+      "id": "T-0001",
+      "type": "task",
+      "title": "CLI hard enforcement at state transitions",
+      "slug": "cli-hard-enforcement-at-state-transitions",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-02-24T19:06:14Z",
+      "completed": null,
+      "archived": false
+    },
+    {
+      "id": "T-0002",
+      "type": "task",
+      "title": "Implement _validate_transition guard helper and section predicates",
+      "slug": "implement-validate-transition-guard-helper-and-section-predicates",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-02-24T19:06:56Z",
+      "completed": null,
+      "archived": false
+    },
+    {
+      "id": "T-0003",
+      "type": "task",
+      "title": "Wire transition guards into cmd_start, cmd_story, cmd_progress, cmd_review, cmd_complete",
+      "slug": "wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-02-24T19:06:56Z",
+      "completed": null,
+      "archived": false
+    }
+  ]
+}

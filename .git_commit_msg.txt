@@ -1,18 +1,18 @@
-feat(templates): enforce when-in-doubt-ask across all 5 personas
+feat(architecture): ADR-004 + design for CLI hard enforcement at state transitions
 
-@po (COPILOT_INSTRUCTIONS + PERSONAS_MD):
-- MUST NOT: guess at missing/ambiguous requirements; ask the human
-  before @architect begins any design
+docs/decision.md:
+- ADR-004: split enforcement into CLI hard guards (structural completeness
+  at state transitions) vs. LLM soft governance (conversational ask gates).
+  Records two rejected alternatives and full consequences per command.
 
-@security (COPILOT_INSTRUCTIONS + PERSONAS_MD):
-- MUST NOT: guess at intended security posture or auth boundary;
-  ask before reviewing if unclear
+docs/tasks/cli-hard-enforcement-at-state-transitions.md [T-0001]:
+- @architect task: interface design for _validate_transition helper,
+  _section_is_filled predicate factory, _SEC_NFR/_SEC_TEST_STRATEGY
+  constants, guard injection points per command, blast-radius analysis.
+  Status: Completed.
 
-@author (COPILOT_INSTRUCTIONS + PERSONAS_MD):
-- MUST NOT: guess at intended behaviour or user-facing scope;
-  ask @po before writing if the feature is ambiguous
+docs/tasks/implement-validate-transition-guard-helper-and-section-predicates.md [T-0002]:
+- @developer task: implement helper + predicates (TDD).
 
-@architect + @developer already had explicit ask gates; unchanged.
-
-Regenerated .github/copilot-instructions.md via keeli update --force.
-112/112 tests green.
+docs/tasks/wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete.md [T-0003]:
+- @developer task: wire guards into 5 CLI commands (TDD).
