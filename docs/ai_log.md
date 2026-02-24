@@ -57,3 +57,4 @@
 2026-02-24T16:24:18Z | @po | Groomed epic: Streaming MCP Responses — 4 user stories with ACs, scope defined, SDK types verified
 2026-02-24T16:30:32Z | @developer | Session resumed; committed 087d946 (S-1/S-2/S-3 streaming notifications). Repo clean. All 64 tests green.
 2026-02-24T16:44:58Z | @developer | Added 48 MCP server tests + fixed 4 production bugs in mcp_server.py. 112/112 tests pass.
+2026-02-24T16:58:21Z | @author | Rewrote README.md: v0.4.0 capabilities, all commands, MCP tools, streaming, IDs, skills/stack/persona sections.

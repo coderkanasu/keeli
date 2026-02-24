@@ -1,8 +1,33 @@
-# Keeli
+# Keeli — AI Governance Framework  `v0.4.0`
 
-A command-line tool to enforce a strict **Four-Persona Architecture** for GitHub Copilot and other AI agents. Designed to help **stateless LLMs regain context fast** and make steady progress across sessions.
+A Python CLI and MCP server that enforces a **Five-Persona Architecture** for GitHub Copilot and
+other AI agents. Designed to help **stateless LLMs regain context fast** and make steady, auditable
+progress across sessions — with zero hallucination.
 
-This ensures security governance, responsible AI use, and zero hallucination by forcing the AI to act as a team of four distinct personas: `@architect`, `@developer`, `@security`, and `@author`.
+Every AI action runs under one of five named personas (`@po`, `@architect`, `@developer`,
+`@security`, `@author`), follows a tracked task lifecycle, and leaves a timestamped audit trail.
+
+---
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Command Reference](#command-reference)
+  - [Project Setup](#project-setup)
+  - [Work Items](#work-items)
+  - [Task Lifecycle](#task-lifecycle)
+  - [Context & Intelligence](#context--intelligence)
+  - [Skills & Stack Registry](#skills--stack-registry)
+  - [Persona Management](#persona-management)
+  - [Utilities](#utilities)
+- [Task Types & File Layout](#task-types--file-layout)
+- [Immutable IDs & Index](#immutable-ids--index)
+- [MCP Server](#mcp-server)
+- [Agentic / Headless Usage](#agentic--headless-usage)
+- [License](#license)
+
+---
 
 ## Installation
 
@@ -10,130 +35,281 @@ This ensures security governance, responsible AI use, and zero hallucination by 
 pip install -e .
 ```
 
+Requires Python 3.12+. Optional: `scikit-learn` for richer TF-IDF in `keeli analyze`.
+
+---
+
 ## Quick Start
 
 ```bash
-# 1. Scaffold the framework in any project
+# 1. Scaffold the Keeli framework in any project directory
 keeli init
 
-# 2. Create a task (team of personas kicks in)
-keeli start "Implement Auth" --context docs/requirements/auth-spec.md -p P0
+# 2. Define your tech stack (interactive presets)
+keeli stack                        # choose from python-fastapi, react, java, etc.
+keeli stack list                   # see all available presets
+keeli stack apply python-fastapi   # apply a preset non-interactively
 
-# 3. Transition task status as work progresses
-keeli progress "Implement Auth"   # Backlog → In Progress
-keeli block "Implement Auth"      # In Progress → Blocked
-keeli complete "Implement Auth"   # → Completed (suggests next task)
-keeli reopen "Implement Auth"     # Completed → In Progress (rework needed)
+# 3. Register project skills (what your project uses and *how*)
+keeli skill add "FastAPI" -t framework -c "All routes use async def; Pydantic v2 models only"
 
-# 4. Found a bug while debugging? Log it as a tracked task
-keeli bug "NullPointer in OrderService" -d "Happens when qty is null" --found-during "implement-auth"
+# 4. Create work items at every level of the hierarchy
+keeli epic "User Authentication" -p P0 -o "Allow users to sign in securely via OAuth 2.0"
+keeli story "Register Account" --epic user-authentication
+keeli feature "Forgot Password Flow" -p P1 -e user-authentication
+keeli start "Implement /auth/register endpoint" -p P0 -k developer
+keeli bug "JWT expiry not validated" -p P0 --found-during implement-auth-register-endpoint
 
-# 5. Log an event for audit
-keeli log "Unit tests passed for auth module"
+# 5. Drive the task lifecycle
+keeli next                            # what should I work on?
+keeli progress "implement-auth"       # → In Progress
+keeli note "implement-auth" "Using bcrypt for password hashing"
+keeli review "implement-auth"         # → Review (awaiting @security sign-off)
+keeli complete "implement-auth"       # → Completed + auto-archived
 
-# 6. New session? Catch up fast (token-aware!)
-keeli resume            # default ~1500 tokens
-keeli resume --brief    # minimal ~500 tokens
-keeli resume --full     # everything ~3000 tokens
+# 6. Context injection for AI assistants
+keeli analyze implement-auth          # TF-IDF: inject relevant skills/ADRs into task file
+keeli resume --brief                  # ~500-token context dump for a new session
+keeli resume --nano                   # ~200-token nano dump: current task ID+title only
+keeli digest --budget 2000            # machine-optimised context snapshot
 
-# 7. Upgrade instructions after a Keeli update
-keeli update
+# 7. Audit trail
+keeli log "Deployed to staging — all auth tests passing"
+keeli find T-0012                     # look up any item by ID
+keeli history T-0012                  # all ai_log entries for that ID
+keeli list -s in-progress             # filter task board by status
 ```
 
-## Commands
+---
+
+## Command Reference
+
+### Project Setup
+
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `keeli init` | `-f` force | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
+| `keeli update` | `-f` force | Upgrade `copilot-instructions.md` to the latest Keeli template (preserves all your files) |
+| `keeli status` | | Health-check every expected Keeli file |
+
+---
+
+### Work Items
+
+#### Epics
+```bash
+keeli epic "<title>" [-p P0|P1|P2] [-o objective] [-f]
+```
+Creates `docs/tasks/epic-<slug>.md`. Groups related stories and tasks. Receives an immutable ID (`E-NNNN`). `-o` accepts plain text, `@file.md`, or a JSON dict with `goal`, `why`, `criteria`, `out_of_scope` keys.
+
+#### Stories
+```bash
+keeli story "<title>" --epic <epic-slug> [-p P0|P1|P2] [--role <role>] [--goal <goal>] [--reason <reason>] [-f]
+```
+Creates `docs/tasks/story-<slug>.md` (ID: `S-NNNN`). Linked to a parent epic. As-a / I-want / So-that template.
+
+#### Features
+```bash
+keeli feature "<title>" [-c context-file] [-o objective] [-p P0|P1|P2] [-e epic-slug] [-f]
+```
+Creates `docs/tasks/feat-<slug>.md` (ID: `FEAT-NNNN`). User Story + Acceptance Criteria + Design Notes checklist.
+
+#### Tasks
+```bash
+keeli start "<title>" [-c context-file] [-o objective] [-p P0|P1|P2] [-k persona] [-d dep-slug,...] [-f]
+```
+Creates `docs/tasks/<slug>.md` (ID: `T-NNNN`). Generates a persona-appropriate TDD checklist. `-d` marks dependencies — `keeli next` skips this task until all deps are Completed.
+
+#### Bugs
+```bash
+keeli bug "<title>" [-d description] [-p P0|P1|P2] [-e epic-slug] [--found-during task-slug] [-f]
+```
+Creates `docs/tasks/bug-<slug>.md` (ID: `BUG-NNNN`). Includes reproduction steps, expected/actual behaviour, and a regression-test checklist.
+
+---
+
+### Task Lifecycle
+
+Every work item follows this state machine:
+
+```
+Backlog → In Progress → Review → Completed
+              ↓                      ↓
+           Blocked → (unblocked)   Reopened → In Progress
+```
 
 | Command | Description |
 |---------|-------------|
-| `keeli init [-f]` | Scaffold `.github/copilot-instructions.md`, `docs/` structure, `.gitignore` |
-| `keeli start <name> [-c file] [-p P0\|P1\|P2] [-d deps] [-f]` | Create a task in `docs/tasks/<slug>.md` with TDD checklist. Use `-d` for dependencies. |
-| `keeli bug <title> [-d desc] [-p P0\|P1\|P2] [--found-during task] [-f]` | Log a bug as a tracked task (`docs/tasks/bug-<slug>.md`) |
-| `keeli feature <title> [-c file] [-p P0\|P1\|P2] [-f]` | Create a feature request (`docs/tasks/feat-<slug>.md`) with user story + acceptance criteria |
-| `keeli progress <name>` | Mark a task as **In Progress** |
-| `keeli block <name>` | Mark a task as **Blocked** |
-| `keeli complete <name>` | Mark a task as **Completed** and suggest the next task |
-| `keeli archive <name>` | Move a **Completed** task to `docs/tasks/archive/` to save context window space |
-| `keeli reopen <name>` | Reopen a **Completed** task (back to In Progress) |
-| `keeli next [-q] [--json]` | Show the next task to work on (by priority, then age). Use `--json` for agentic parsing. |
-| `keeli list [-s status] [--json]` | List all tasks. Use `--json` for agentic parsing. |
-| `keeli log <message>` | Append a timestamped entry to `docs/ai_log.md` |
-| `keeli resume [--brief\|--full]` | Dump project context sized to your token budget |
-| `keeli status` | Health-check all expected Keeli files |
-| `keeli clear-log` | Reset `docs/ai_log.md` to its default state |
-| `keeli update [-f]` | Update `copilot-instructions.md` to latest template (preserves user files) |
-| `keeli mcp [--sse] [--port 8000]` | Start the Keeli Model Context Protocol (MCP) server |
-| `keeli --version` | Print the current Keeli Framework version |
+| `keeli progress <name>` | Backlog → **In Progress** |
+| `keeli block <name>` | In Progress → **Blocked** |
+| `keeli review <name>` | In Progress → **Review** (awaiting `@security` sign-off) |
+| `keeli complete <name>` | → **Completed** + auto-archived to `docs/tasks/archive/` |
+| `keeli archive <name>` | Explicit archive without status change |
+| `keeli reopen <name>` | Completed → **In Progress** (rework needed) |
+| `keeli next [-q] [--json]` | Show the next task (priority P0→P2, then oldest). `--json` for scripting. |
+| `keeli list [-s status] [-e epic] [--json]` | List all tasks, optionally filtered |
+| `keeli note <task> [message] [-k persona]` | Append a timestamped note to a task file |
 
-## Task Lifecycle
+All transition commands accept `-k <persona>` to record which persona made the change.
 
-Every task follows this state machine:
+**Priority:** P0 (critical) → P1 (default) → P2 (low). `keeli next` always surfaces the highest-priority, oldest task first.
 
+**Auto-archiving:** `keeli complete` automatically moves the task file to `docs/tasks/archive/`, keeping the active directory lean and the LLM's context window healthy.
+
+**Auto-completion:** The AI is instructed to call `keeli complete` itself — it doesn't wait for you. On completion it also immediately picks the next task.
+
+---
+
+### Context & Intelligence
+
+#### Session Resume
+```bash
+keeli resume              # default ~1 500 tokens
+keeli resume --brief      # ~500 tokens
+keeli resume --full       # ~3 000 tokens
+keeli resume --nano       # ~200 tokens — current task ID+title only (ideal for Copilot in-editor)
+keeli resume --budget N   # custom token budget
 ```
-Backlog → In Progress → Review → Completed → Archived
-                ↓                     ↓
-             Blocked → (unblocked)   Reopened → In Progress
+Dumps active tasks, project context, recent decisions, and recent log lines — sized to fit your token budget.
+
+#### Machine-Optimised Digest
+```bash
+keeli digest [--budget 2000]
+```
+Produces a structured context snapshot for agentic AI loops: active tasks → project overview → top-10 backlog → recent log. Respects the token budget strictly using word-count heuristics.
+
+#### AI Context Hints (TF-IDF Injection)
+```bash
+keeli analyze <slug> [--dry-run] [--use-sklearn]
+```
+Scores the task text against the project's skills and ADRs using TF-IDF (pure-Python fallback or `scikit-learn`). Injects a `## AI Context Hints` block directly into the task file with the most relevant skills, ADR references, and suggested persona. `--dry-run` returns the hints without writing. `keeli next` auto-runs analysis and appends hints inline.
+
+#### Audit Trail
+```bash
+keeli log "<message>"                   # append timestamped entry to docs/ai_log.md
+keeli find <query> [-s status] [--json] # search index by ID (T-0012) or keyword
+keeli history <task-id>                 # all ai_log lines mentioning a task ID
+keeli clear-log                         # reset docs/ai_log.md to blank state
 ```
 
-### Priority System
+---
 
-Tasks have a priority level: **P0** (critical), **P1** (default), **P2** (low).
+### Skills & Stack Registry
 
-When picking the next task:
-1. Resume any **In Progress** task first.
-2. Otherwise pick the highest-priority **Backlog** task (P0 > P1 > P2).
-3. Break ties by age (oldest first).
-
-### Bug Tracking
-
-Use `keeli bug` to quickly log issues found during debugging:
+Skills are project-specific technology choices with *how* constraints — not generic labels. They fuel `keeli analyze`'s TF-IDF corpus and are injected into `copilot-instructions.md` so every new AI session inherits your project's conventions automatically.
 
 ```bash
-keeli bug "Login crash on empty password" -p P0 --found-during "implement-auth"
+keeli skill add [name] [-t lang|framework|domain|infra|tool] [-k persona] [-c "constraint text"]
+keeli skill list                  # table view (truncated constraint)
+keeli skill show [name]           # full constraint text
+keeli skill remove [name]
 ```
 
-Bug reports are saved as `docs/tasks/bug-<slug>.md` with their own template including reproduction steps, expected/actual behavior, and a regression test checklist. They participate in the same lifecycle and priority queue as regular tasks.
+**Stack Presets** — apply a curated set of skills in one command:
+```bash
+keeli stack                          # interactive menu
+keeli stack list                     # show all available presets
+keeli stack apply python-fastapi     # apply a named preset (prompts for each skill)
+keeli stack apply python-fastapi -y  # accept all constraints non-interactively
+```
+Available presets include: `python-fastapi`, `python-django`, `react`, `vue`, `node`, `java`, `go`, `nextjs`, and more.
 
-### Feature Requests
+---
 
-Use `keeli feature` to capture product ideas and requirements:
+### Persona Management
+
+Keeli ships with five built-in personas. You can add project-specific personas (e.g., `@qa`, `@devops`):
 
 ```bash
-keeli feature "Dark Mode Support" -p P2
-keeli feature "Payment Gateway" -p P0 -c docs/requirements/payment-spec.md
+keeli persona add [slug]     # interactive: name, mindset, checklist items
+keeli persona list           # show all registered personas
+keeli persona remove [slug]  # remove a custom persona
 ```
 
-Feature files are saved as `docs/tasks/feat-<slug>.md` with a template covering User Story, Acceptance Criteria, Design Notes, and a full checklist (including @architect approval, TDD, @security review, and @author documentation). They participate in the same lifecycle and priority queue as tasks and bugs.
+Each persona has its own TDD checklist template injected into task files, and its own skills section in `copilot-instructions.md`.
 
-### Auto-Completion Rule
+**Built-in personas:**
 
-The AI is instructed to mark tasks as completed **itself** — it doesn't wait for you to run `keeli complete`. When the AI finishes work, it:
-1. Sets `**Status:** Completed` and adds a timestamp.
-2. Checks off all checklist boxes.
-3. Logs the completion event.
-4. Immediately picks up the next task.
+| Persona | Focus |
+|---------|-------|
+| `@po` | Product ownership, grooming, acceptance criteria |
+| `@architect` | System design, ADRs, task breakdown |
+| `@developer` | Implementation, TDD (red → green → refactor) |
+| `@security` | Threat modelling, vulnerability review, sign-off |
+| `@author` | Documentation, README, WCAG-compliant copy |
 
-## Model Context Protocol (MCP) Server
+---
 
-Keeli includes a built-in Model Context Protocol (MCP) server. This allows AI assistants like Claude Desktop, Cursor, and GitHub Copilot to natively interact with your Keeli task board and project context without needing custom LangChain scripts.
+### Utilities
+
+```bash
+keeli --version             # print framework version
+keeli mcp [--sse] [--port]  # start the MCP server (see below)
+```
+
+---
+
+## Task Types & File Layout
+
+```
+docs/
+  project.md                 # Project context, tech stack, goals, architecture
+  decision.md                # ADR log — decisions with rationale + rejected alternatives
+  ai_log.md                  # Timestamped audit log; never deleted by the AI
+  skills.md                  # Skills registry (language, framework, domain, infra, tool)
+  personas.md                # Custom persona definitions
+  tasks/
+    <slug>.md                # Task           T-NNNN
+    bug-<slug>.md            # Bug report     BUG-NNNN
+    feat-<slug>.md           # Feature        FEAT-NNNN
+    story-<slug>.md          # User story     S-NNNN
+    epic-<slug>.md           # Epic           E-NNNN
+    archive/                 # Completed items moved here automatically
+    .keeli_index.json        # Immutable ID ledger (never edit by hand)
+.github/
+  copilot-instructions.md    # Session-Start Protocol + persona rules (auto-updated)
+```
+
+---
+
+## Immutable IDs & Index
+
+Every work item receives a permanent, collision-proof ID at creation time:
+
+| Prefix | Type |
+|--------|------|
+| `T-NNNN` | Task |
+| `E-NNNN` | Epic |
+| `S-NNNN` | Story |
+| `BUG-NNNN` | Bug |
+| `FEAT-NNNN` | Feature |
+
+IDs are stored in `docs/tasks/.keeli_index.json`. The index also powers `keeli find`, `keeli history`, and the `keeli_find`/`keeli_history` MCP tools. IDs survive renaming, archiving, and reopening.
+
+```bash
+keeli find T-0012              # resolve by ID
+keeli find "auth"              # keyword search across title + slug
+keeli find "auth" -s backlog   # filter by status
+keeli history T-0012           # every ai_log.md line that mentions T-0012
+```
+
+---
+
+## MCP Server
+
+Keeli exposes all core operations as a **Model Context Protocol** server. AI assistants that support MCP (Claude Desktop, Cursor, GitHub Copilot, etc.) can call Keeli tools natively — no custom scripts needed.
 
 ### Starting the Server
 
-You can run the MCP server in two modes:
-
-**1. Standard I/O (stdio) Mode**
-This is the default mode used by most desktop AI assistants.
 ```bash
-keeli mcp
-```
-
-**2. HTTP/SSE Mode**
-If you need to connect to Keeli over a network or from a web-based AI tool, you can run it as an HTTP Server-Sent Events (SSE) server.
-```bash
-keeli mcp --sse --port 8000
+keeli mcp              # stdio mode (default — for desktop AI assistants)
+keeli mcp --sse        # HTTP/SSE mode (for web-based or remote AI tools)
+keeli mcp --sse --port 9000
 ```
 
 ### Configuring Claude Desktop
 
-To use Keeli with Claude Desktop, add the following to your `claude_desktop_config.json` file (usually located at `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -145,123 +321,100 @@ To use Keeli with Claude Desktop, add the following to your `claude_desktop_conf
   }
 }
 ```
-*Note: Ensure the `keeli` command is available in your system PATH, or provide the absolute path to the executable.*
 
-Once configured, Claude will be able to read your `project.md`, `decision.md`, and task files as MCP Resources, and it will be able to call Keeli commands (`keeli_next`, `keeli_start`, `keeli_complete`, `keeli_log`) as MCP Tools.
+### MCP Tools
 
-## Agentic AI & Headless Usage
+| Tool | Description |
+|------|-------------|
+| `keeli_next` | Return the highest-priority next task |
+| `keeli_start` | Create a new task (`title`, `priority`, `persona`, `depends_on`) |
+| `keeli_complete` | Mark a task completed + auto-archive it |
+| `keeli_archive_task` | Move a task to archive without completing it |
+| `keeli_analyze` | TF-IDF context injection into a task file (`dry_run` flag) |
+| `keeli_log` | Append a message to `ai_log.md` |
+| `keeli_find` | Search the index by ID or keyword (optional `status` filter) |
+| `keeli_history` | Return all `ai_log.md` entries for a task ID |
+| `keeli_digest` | Token-budgeted context snapshot (`budget` param, default 2 000) |
 
-Keeli is designed to be the perfect "disk-based memory bank" for autonomous AI agents (like LangChain, AutoGPT, or custom scripts). Because Keeli maintains perfect state on disk, you can build a headless loop that runs completely autonomously:
+### Streaming Notifications (S-1/S-2/S-3)
 
-1. **Task Dependencies**: Use `keeli start "Task B" --depends-on "task-a"`. The `keeli next` command will automatically skip "Task B" until "Task A" is marked as `Completed`.
-2. **JSON Output**: Use `keeli next --json` and `keeli list --json` to programmatically parse the task queue in your Python/Node scripts without scraping ASCII tables.
-3. **Archiving**: Use `keeli archive <task>` to move completed tasks to `docs/tasks/archive/`. This keeps the active directory clean and prevents the LLM's context window from blowing up as the project grows.
+When a `_meta.progressToken` is supplied in the tool call, `keeli_analyze` emits
+**ProgressNotifications** at four stages (load → corpus → score → format).
 
-**Example Agent Loop (Python):**
+`keeli_digest` emits **LoggingMessageNotifications** after each section is built.
+
+`keeli_start`, `keeli_complete`, and `keeli_archive_task` emit an INFO log message
+on success so the AI assistant can provide live feedback without polling.
+
+### MCP Resources
+
+The server also exposes read-only resources that AI assistants can fetch directly:
+
+| URI pattern | Content |
+|-------------|---------|
+| `keeli://project` | `docs/project.md` |
+| `keeli://decisions` | `docs/decision.md` |
+| `keeli://tasks/<slug>` | Any task file in `docs/tasks/` |
+
+---
+
+## Agentic / Headless Usage
+
+Keeli is designed to be a **persistent disk-based memory bank** for autonomous agents
+(LangChain, AutoGPT, custom scripts). Because all state lives on disk, you can build a headless
+loop that runs completely autonomously:
+
 ```python
 import json, subprocess
 
-# 1. Get the next task programmatically
-output = subprocess.run(["keeli", "next", "--json"], capture_output=True, text=True)
-task_data = json.loads(output.stdout)
+def run(cmd): return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
 
-if task_data.get("task"):
-    task_slug = task_data["task"]
-    
-    # 2. Mark task as In Progress
-    subprocess.run(["keeli", "progress", task_slug])
-    
-    # 3. Read project context
-    context = subprocess.run(["keeli", "resume", "--brief"], capture_output=True, text=True)
-    
-    # 4. Pass context and task to your LLM (LangChain, OpenAI API, etc.)
-    # ... LLM writes code and tests ...
-    
-    # 5. Mark task as completed and archive it
-    subprocess.run(["keeli", "complete", task_slug])
-    subprocess.run(["keeli", "archive", task_slug])
+while True:
+    # 1. Get the next task as JSON
+    task_data = json.loads(run(["keeli", "next", "--json"]))
+    if not task_data.get("task"):
+        print("All done!"); break
+
+    slug = task_data["task"]
+
+    # 2. Mark in progress + grab a token-budgeted context snapshot
+    run(["keeli", "progress", slug])
+    context = run(["keeli", "digest", "--budget", "2000"])
+
+    # 3. Inject relevant skills/ADRs into the task file
+    run(["keeli", "analyze", slug])
+
+    # 4. Feed context + task to your LLM, implement, test …
+
+    # 5. Complete → auto-archived; next iteration picks next task
+    run(["keeli", "complete", slug])
 ```
+
+**Key agentic features:**
+- **Task dependencies** — `--depends-on` makes `keeli next` skip blocked tasks automatically.
+- **JSON output** — `keeli next --json` and `keeli list --json` for machine parsing.
+- **Token budgets** — `keeli resume --budget N` and `keeli digest --budget N` keep prompts predictable.
+- **Auto-archive** — completed tasks leave the active directory, preventing context overflow as projects grow.
+- **Immutable IDs** — `T-0012` is stable across renames, archives, and reopens; use it in commit messages and log entries for a full audit trail.
+
+---
+
+## Running Tests
+
+```bash
+pip install pytest pytest-asyncio
+pytest tests/ -v
+```
+
+112 tests covering CLI commands and all MCP server tool handlers.
+
+---
 
 ## License
 
 This project is proprietary and closed-source. See the [LICENSE](LICENSE) file for details.
 
-**Key Restrictions:**
+**Key restrictions:**
 - You may not copy, distribute, or modify this software without explicit permission.
 - **No AI Training:** You are strictly prohibited from using this repository's code or documentation to train, fine-tune, or improve any AI model, LLM, or machine learning algorithm.
-- **No Liability:** The author of Keeli is not responsible for any code, architecture, or outputs generated by AI agents or users utilizing this framework. You are solely responsible for securing and testing your own software.
-
-```
-.github/
-  copilot-instructions.md   # Four-Persona rules + Session Start Protocol
-docs/
-  project.md                # Project context, tech stack, skills, architecture
-  decision.md               # Decision log with rationale + rejected alternatives
-  ai_log.md                 # Timestamped audit log with session markers
-  tasks/                    # Per-task files with TDD checklists
-    .gitkeep
-  requirements/             # Requirements & specs linked via --context
-    .gitkeep
-.gitignore                  # Ignores ai_log.md + Python build artifacts
-```
-
-## The Four Personas
-
-1. **`@architect`**: Dissects tasks, creates strategy, records decisions in `docs/decision.md`, and breaks work into `docs/tasks/`.
-2. **`@developer`**: Executes tasks with TDD, asks clarifying questions, and engages the human-in-the-loop if scope is large or ambiguous.
-3. **`@security`**: Reviews all architecture and code for vulnerabilities, compliance, PII leaks, and responsible AI practices.
-4. **`@author`**: Writes clear, SEO-friendly documentation, README files, blog posts, and web copy. Ensures accessibility (WCAG) and proper API/component docs.
-
-## Bundled Skills
-
-The generated `docs/project.md` comes pre-populated with your tech stack:
-
-- **Languages & Frameworks**: Java, Spring Framework (Boot, Security, Data JPA), Python, JavaScript/TypeScript, React, React Native, AngularJS, CSS/SCSS
-- **Domain Expertise**: Trading systems, financial data pipelines
-
-## Scope Guardrails
-
-The AI must pause and ask for confirmation when:
-- The change touches **more than 5 files**.
-- The change involves **authentication, authorisation, or data deletion**.
-- The change **removes or renames a public API**.
-- There is **ambiguity** that could lead to two valid implementations.
-- The estimated effort exceeds **30 minutes of coding**.
-
-## Context-Window Awareness
-
-Since LLMs are stateless with limited context windows, the framework is designed to **expand or shrink** based on available tokens:
-
-- **`keeli resume --brief`** (~500 tokens): Project overview + active task names only.
-- **`keeli resume`** (~1500 tokens): Above + recent log entries + decision summary.
-- **`keeli resume --full`** (~3000 tokens): Everything including full decision log.
-
-Each invocation prints an approximate token estimate so you can verify the output fits your context window.
-
-The `copilot-instructions.md` also tells the AI to **summarise instead of quoting** when context is constrained, and to **skip non-essential reads** when the window is very small (<8k tokens remaining).
-
-## Session Start Protocol
-
-Every new AI session is instructed to:
-1. Read `docs/project.md`
-2. Scan `docs/tasks/` for active/blocked tasks
-3. Read the last 30 lines of `docs/ai_log.md`
-4. Read `docs/decision.md` to avoid re-litigating settled decisions
-5. Only then proceed with the user's request
-
-## Schema Versioning
-
-The framework embeds a version number (`v0.3.0`) in all generated files. When you upgrade the CLI, run:
-
-```bash
-keeli update
-```
-
-This regenerates `copilot-instructions.md` with the latest template while preserving your `project.md`, `decision.md`, tasks, and logs.
-
-## Running Tests
-
-```bash
-pip install pytest
-pytest tests/ -v
-```
+- **No Liability:** The author of Keeli is not responsible for any code, architecture, or outputs generated by AI agents or users utilising this framework. You are solely responsible for securing and testing your own software.
