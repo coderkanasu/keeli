@@ -1,6 +1,6 @@
 # Epic: Streaming MCP Responses
 
-**Status:** Backlog
+**Status:** In Progress
 **Priority:** P2
 **Created:** 2026-02-23T20:44:14Z
 **Completed:** —
@@ -56,12 +56,12 @@ each document in the corpus,
 **so that** I can see "Scoring doc 3/12 — skills.md" rather than waiting in silence.
 
 **Acceptance Criteria:**
-- [ ] `keeli_analyze` sends a `ProgressNotification` with `progress` (0–100) and
+- [x] `keeli_analyze` sends a `ProgressNotification` with `progress` (0–100) and
   `total` for each document scanned
-- [ ] Progress token is taken from the MCP request's `_meta.progressToken` if present;
+- [x] Progress token is taken from the MCP request's `_meta.progressToken` if present;
   silently skipped if absent
-- [ ] Final `TextContent` result is unchanged from current format
-- [ ] Test: mock corpus of 5 files → assert 5 progress notifications emitted
+- [x] Final `TextContent` result is unchanged from current format
+- [x] Test: mock corpus of 5 files → assert 5 progress notifications emitted
 
 ### S-2: Streaming section output on keeli_digest
 **As an** LLM agent starting a new session,
@@ -70,11 +70,11 @@ overview, Backlog, Recent log) as it is built,
 **so that** I can begin reading context before the full budget is assembled.
 
 **Acceptance Criteria:**
-- [ ] `keeli_digest` yields one `TextContent` chunk per section as it is appended
-- [ ] Final chunk includes the token summary line (`~N tokens (budget: B)`)
-- [ ] If `--budget` is exhausted mid-section the partial section is still emitted
-- [ ] Behaviour is identical to current single-response output when reassembled
-- [ ] Test: assert chunks arrive in order and concatenate to the same string as
+- [x] `keeli_digest` yields one `TextContent` chunk per section as it is appended
+- [x] Final chunk includes the token summary line (`~N tokens (budget: B)`)
+- [x] If `--budget` is exhausted mid-section the partial section is still emitted
+- [x] Behaviour is identical to current single-response output when reassembled
+- [x] Test: assert chunks arrive in order and concatenate to the same string as
   the current non-streaming output
 
 ### S-3: LoggingMessageNotification for verbose server logs
@@ -84,11 +84,11 @@ than discarded,
 **so that** I can see what Keeli is doing inside the MCP inspector / IDE log panel.
 
 **Acceptance Criteria:**
-- [ ] A `_mcp_log(level, message)` helper wraps `LoggingMessageNotification`
-- [ ] `keeli_start`, `keeli_complete`, `keeli_archive_task` emit an INFO log on success
-- [ ] Error paths emit ERROR level instead of (or in addition to) the error TextContent
-- [ ] Log emission is conditional — no-op when there is no active session context
-- [ ] Test: successful `keeli_start` call asserts exactly one INFO notification emitted
+- [x] A `_mcp_log(level, message)` helper wraps `LoggingMessageNotification`
+- [x] `keeli_start`, `keeli_complete`, `keeli_archive_task` emit an INFO log on success
+- [x] Error paths emit ERROR level instead of (or in addition to) the error TextContent
+- [x] Log emission is conditional — no-op when there is no active session context
+- [x] Test: successful `keeli_start` call asserts exactly one INFO notification emitted
 
 ### S-4: Cancellation support for streaming tools
 **As an** agent that has started a `keeli_analyze` or `keeli_digest` call,
@@ -106,8 +106,8 @@ than discarded,
 - [x] Objective and scope defined
 - [x] User stories created (`keeli story --epic streaming-mcp-responses`)
 - [x] Each story has acceptance criteria
-- [x] All linked stories completed (S-1, S-2, S-3 implemented; S-4 deferred to follow-up)
-- [ ] @security sign-off
+- [x] All linked stories completed (S-1, S-2, S-3 implemented and verified in mcp_server.py + 48 tests; S-4 deferred — pending decision)
+- [ ] @security sign-off (pending S-4 decision: defer or implement)
 - [ ] @author docs updated
 - [ ] Log completion in docs/ai_log.md
 

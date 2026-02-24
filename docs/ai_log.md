@@ -70,3 +70,4 @@
 2026-02-24T19:07:36Z | @architect | T-0001 Completed: ADR-004 written; _validate_transition interface designed; blast-radius confirmed; T-0002 + T-0003 created for @developer.
 2026-02-24T19:07:36Z | @architect | T-0002 created: implement _validate_transition helper + predicates.
 2026-02-24T19:07:36Z | @architect | T-0003 created: wire guards into cmd_start/story/progress/review/complete.
+2026-02-24T21:33:00Z | @architect | Task audit: archived T-0001 (cli-hard-enforcement) + fix-typos (no-action); epic-streaming In Progress with S-1/S-2/S-3 ACs verified; add-dashboard flagged for @po grooming.

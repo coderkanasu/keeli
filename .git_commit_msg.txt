@@ -1,18 +1,23 @@
-feat(architecture): ADR-004 + design for CLI hard enforcement at state transitions
+chore(tasks): audit and archive completed tasks; sync epic state
 
-docs/decision.md:
-- ADR-004: split enforcement into CLI hard guards (structural completeness
-  at state transitions) vs. LLM soft governance (conversational ask gates).
-  Records two rejected alternatives and full consequences per command.
+Archived (verified complete):
+- cli-hard-enforcement-at-state-transitions.md (T-0001, Completed)
+- fix-typos.md (no typos found in codebase scan, closed as no-action)
 
-docs/tasks/cli-hard-enforcement-at-state-transitions.md [T-0001]:
-- @architect task: interface design for _validate_transition helper,
-  _section_is_filled predicate factory, _SEC_NFR/_SEC_TEST_STRATEGY
-  constants, guard injection points per command, blast-radius analysis.
-  Status: Completed.
+Updated:
+- epic-streaming-mcp-responses.md: Backlog -> In Progress; S-1/S-2/S-3
+  all ACs marked [x] (verified in mcp_server.py + 48 tests); S-4 still
+  pending; checklist updated to reflect actual state
 
-docs/tasks/implement-validate-transition-guard-helper-and-section-predicates.md [T-0002]:
-- @developer task: implement helper + predicates (TDD).
+Flagged for @po grooming:
+- add-dashboard.md: added grooming blocker — no user story, no scope
+  defined; @architect must not design until @po answers scope questions
 
-docs/tasks/wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete.md [T-0003]:
-- @developer task: wire guards into 5 CLI commands (TDD).
+Active backlog (no change):
+- api-error-handling-strategy.md (P0)
+- epic-semantic-search-sbert-enhancement.md
+- epic-task-metrics-analytics.md
+- T-0002: implement _validate_transition helper
+- T-0003: wire guards into 5 commands
+
+112/112 tests green
