@@ -114,7 +114,7 @@ class TestComplete:
         with patch("sys.argv", ["keeli", "complete", "My Task"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "my-task.md"
+        task = initialized_dir / "docs" / "tasks" / "archive" / "my-task.md"
         content = task.read_text()
         assert "**Status:** Completed" in content
         assert "**Completed:** 20" in content  # timestamp starts with year
@@ -603,7 +603,7 @@ class TestPrefixResolution:
         with patch("sys.argv", ["keeli", "complete", "Some Bug"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "bug-some-bug.md"
+        task = initialized_dir / "docs" / "tasks" / "archive" / "bug-some-bug.md"
         from keeli.main import _parse_task_field
         assert _parse_task_field(task.read_text(), "Status") == "Completed"
 
@@ -613,7 +613,7 @@ class TestPrefixResolution:
         with patch("sys.argv", ["keeli", "complete", "Cool Feature"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "feat-cool-feature.md"
+        task = initialized_dir / "docs" / "tasks" / "archive" / "feat-cool-feature.md"
         from keeli.main import _parse_task_field
         assert _parse_task_field(task.read_text(), "Status") == "Completed"
 

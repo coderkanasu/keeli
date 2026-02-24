@@ -339,6 +339,7 @@ AI_LOG_MD = f"""# AI Audit Log  (Keeli Framework v{SCHEMA_VERSION})
 # ---------------------------------------------------------------------------
 TASK_TEMPLATE = """# Task: {title}
 
+**ID:** {task_id}
 **Status:** Backlog
 **Priority:** {priority}
 **Created:** {timestamp}
@@ -683,6 +684,7 @@ Always starts with a failing test. Flags ambiguous interfaces immediately instea
 # ---------------------------------------------------------------------------
 STORY_TEMPLATE = """# Story: {title}
 
+**ID:** {task_id}
 **Status:** Backlog
 **Priority:** {priority}
 **Created:** {timestamp}
@@ -719,6 +721,7 @@ As a {role}, I want {goal}, so that {reason}.
 # ---------------------------------------------------------------------------
 BUG_TEMPLATE = """# Bug: {title}
 
+**ID:** {task_id}
 **Status:** Backlog
 **Priority:** {priority}
 **Created:** {timestamp}
@@ -756,6 +759,7 @@ BUG_TEMPLATE = """# Bug: {title}
 # ---------------------------------------------------------------------------
 FEATURE_TEMPLATE = """# Feature: {title}
 
+**ID:** {task_id}
 **Status:** Backlog
 **Priority:** {priority}
 **Created:** {timestamp}
@@ -792,6 +796,7 @@ FEATURE_TEMPLATE = """# Feature: {title}
 # ---------------------------------------------------------------------------
 EPIC_TEMPLATE = """# Epic: {title}
 
+**ID:** {task_id}
 **Status:** Backlog
 **Priority:** {priority}
 **Created:** {timestamp}

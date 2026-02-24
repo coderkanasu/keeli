@@ -21,6 +21,9 @@ from mcp.types import (
 from keeli.main import (
     _get_next_task, _slugify, _now_iso, _write_file,
     _score_task, _format_hints_block, _build_corpus,
+    _load_index, _allocate_id, _index_update_status,
+    _parse_task_field, _resolve_task_file, _append_log,
+    _INDEX_PATH, _tail,
 )
 from keeli.templates import TASK_TEMPLATE, TASK_CHECKLISTS
 
@@ -179,7 +182,70 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["message"],
             },
-        )
+        ),
+        Tool(
+            name="keeli_find",
+            description="Search the task index by exact ID (e.g. T-0003) or keyword across title/slug.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Exact task ID (T-0001) or keyword to search."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Optional status filter (e.g. 'Backlog', 'In Progress', 'Completed')."
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="keeli_history",
+            description="Return all ai_log entries that mention a specific task ID or keyword.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID (e.g. T-0003) or keyword to filter log entries."
+                    }
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="keeli_digest",
+            description=(
+                "Return a token-budgeted context snapshot: active tasks, project overview, "
+                "backlog, recent completions, and recent log lines."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "budget": {
+                        "type": "integer",
+                        "description": "Target token budget (default 2000).",
+                        "default": 2000
+                    }
+                },
+            },
+        ),
+        Tool(
+            name="keeli_archive_task",
+            description="Move a task file to docs/tasks/archive/ without marking it as completed.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_slug": {
+                        "type": "string",
+                        "description": "The slug of the task to archive."
+                    }
+                },
+                "required": ["task_slug"],
+            },
+        ),
     ]
 
 @app.call_tool()
@@ -193,42 +259,41 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text="Error: Not a Keeli project. Run 'keeli init' first.")]
 
     if name == "keeli_next":
-        task = _get_next_task(tasks_dir)
-        if not task:
+        task_path, task_slug = _get_next_task()
+        if not task_path:
             return [TextContent(type="text", text="No tasks available. All tasks are complete or blocked.")]
-        
-        task_path = tasks_dir / task
+
         content = task_path.read_text()
-        return [TextContent(type="text", text=f"Next task: {task}\n\n{content}")]
+        return [TextContent(type="text", text=f"Next task: {task_slug}\n\n{content}")]
 
     elif name == "keeli_complete":
         slug = arguments.get("task_slug")
         if not slug:
             return [TextContent(type="text", text="Error: task_slug is required.")]
-            
-        task_path = tasks_dir / f"{slug}.md"
-        if not task_path.exists():
-            return [TextContent(type="text", text=f"Error: Task {slug} not found.")]
-            
+
+        task_path = _resolve_task_file(slug, root)
+        if not task_path:
+            return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
+
+        import re
         content = task_path.read_text()
-        content = content.replace("**Status:** In Progress", "**Status:** Completed")
-        content = content.replace("**Status:** Backlog", "**Status:** Completed")
-        content = content.replace("**Status:** Review", "**Status:** Completed")
-        
-        # Update completion time if not already set
-        if "**Completed:** —" in content or "**Completed:** \n" in content or "**Completed:**\n" in content:
-            import re
-            content = re.sub(r"\*\*Completed:\*\*.*", f"**Completed:** {_now_iso()}", content)
-            
+        for old_status in ("In Progress", "Backlog", "Review", "Blocked"):
+            content = content.replace(f"**Status:** {old_status}", "**Status:** Completed")
+        now = _now_iso()
+        content = re.sub(r"\*\*Completed:\*\*.*", f"**Completed:** {now}", content)
         task_path.write_text(content)
-        
-        # Log it
-        log_path = docs_dir / "ai_log.md"
-        if log_path.exists():
-            with open(log_path, "a") as f:
-                f.write(f"{_now_iso()} | @developer | Completed task: {slug}\n")
-                
-        return [TextContent(type="text", text=f"Successfully marked {slug} as Completed.")]
+
+        # Auto-archive
+        archive_dir = tasks_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        dest = archive_dir / task_path.name
+        task_path.rename(dest)
+
+        task_id = _parse_task_field(content, "ID") or None
+        _index_update_status(task_id, status="Completed", completed=now, archived=True)
+        _append_log(f"Task completed: {slug}", task_id=task_id)
+
+        return [TextContent(type="text", text=f"Marked {slug} as Completed and archived → archive/{task_path.name}.")]
 
     elif name == "keeli_start":
         title = arguments.get("title")
@@ -243,9 +308,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Error: Task {slug} already exists.")]
             
         checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
-        
+        task_id = _allocate_id("task", slug, root)
+
         content = TASK_TEMPLATE.format(
             title=title,
+            task_id=task_id,
             priority=priority,
             timestamp=_now_iso(),
             depends_on=depends_on,
@@ -253,16 +320,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             persona=f"@{persona}",
             checklist=checklist,
         )
-        
+
         task_path.write_text(content)
-        
-        # Log it
-        log_path = docs_dir / "ai_log.md"
-        if log_path.exists():
-            with open(log_path, "a") as f:
-                f.write(f"{_now_iso()} | @architect | Created task: {slug}\n")
-                
-        return [TextContent(type="text", text=f"Successfully created task {slug}.")]
+        _append_log(f"Created task: {slug}", task_id=task_id)
+
+        return [TextContent(type="text", text=f"Successfully created task {slug} [{task_id}].")]
 
     elif name == "keeli_analyze":
         slug = arguments.get("task_slug")
@@ -306,15 +368,141 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "keeli_log":
         message = arguments.get("message")
         persona = arguments.get("persona", "system")
-        
+
         log_path = docs_dir / "ai_log.md"
         if not log_path.exists():
             return [TextContent(type="text", text="Error: ai_log.md not found.")]
-            
-        with open(log_path, "a") as f:
-            f.write(f"{_now_iso()} | @{persona} | {message}\n")
-            
+
+        _append_log(message)
         return [TextContent(type="text", text="Successfully appended to ai_log.md.")]
+
+    elif name == "keeli_find":
+        query = arguments.get("query", "").strip()
+        status_filter = arguments.get("status")
+
+        if not _INDEX_PATH.exists():
+            return [TextContent(type="text", text="Index not found. Create tasks first.")]
+
+        index = _load_index()
+        items = index.get("items", [])
+        query_upper = query.upper()
+
+        id_matches = [i for i in items if i.get("id", "").upper() == query_upper]
+        if id_matches:
+            result = json.dumps(id_matches, indent=2)
+            return [TextContent(type="text", text=f"ID match for {query_upper}:\n{result}")]
+
+        q_lower = query.lower()
+        kw_matches = [
+            i for i in items
+            if q_lower in i.get("title", "").lower() or q_lower in i.get("slug", "").lower()
+        ]
+        if status_filter:
+            kw_matches = [i for i in kw_matches if i.get("status", "").lower() == status_filter.lower()]
+
+        if not kw_matches:
+            return [TextContent(type="text", text=f"No results for '{query}'.")]
+        return [TextContent(type="text", text=f"Keyword results for '{query}':\n{json.dumps(kw_matches, indent=2)}")]
+
+    elif name == "keeli_history":
+        task_id = arguments.get("task_id", "").strip().upper()
+        log_file = docs_dir / "ai_log.md"
+        if not log_file.exists():
+            return [TextContent(type="text", text="Error: ai_log.md not found.")]
+
+        lines = log_file.read_text().splitlines()
+        matches = [line for line in lines if task_id in line.upper()]
+        if not matches:
+            return [TextContent(type="text", text=f"No log entries found for '{task_id}'.")]
+        return [TextContent(type="text", text=f"History for {task_id} ({len(matches)} entries):\n" + "\n".join(matches))]
+
+    elif name == "keeli_digest":
+        budget: int = arguments.get("budget", 2000)
+        sections: list[str] = []
+        used = 0
+
+        def _tokens(text: str) -> int:
+            return int(len(text.split()) * 1.35)
+
+        def _fits(text: str) -> bool:
+            return used + _tokens(text) <= budget
+
+        # Active tasks
+        if tasks_dir.exists():
+            active_lines: list[str] = []
+            for tf in sorted(tasks_dir.glob("*.md")):
+                if tf.name == ".gitkeep":
+                    continue
+                text = tf.read_text()
+                status = _parse_task_field(text, "Status").lower()
+                if status in ("in progress", "blocked"):
+                    tid = _parse_task_field(text, "ID") or "—"
+                    title = text.splitlines()[0].lstrip("# ").strip()
+                    active_lines.append(f"- [{tid}] {title} ({status})")
+            if active_lines:
+                sec = "## Active\n" + "\n".join(active_lines)
+                sections.append(sec)
+                used += _tokens(sec)
+
+        # Project overview
+        project = docs_dir / "project.md"
+        if project.exists():
+            first5 = "\n".join(project.read_text().splitlines()[:5])
+            sec = f"## Project\n{first5}"
+            if _fits(sec):
+                sections.append(sec)
+                used += _tokens(sec)
+
+        # Backlog from index
+        if _INDEX_PATH.exists():
+            index = _load_index()
+            backlog = [
+                i for i in index.get("items", [])
+                if i.get("status", "").lower() == "backlog" and not i.get("archived")
+            ]
+            backlog.sort(key=lambda i: (i.get("priority", "P2"), i.get("created", "")))
+            lines = [f"- [{i['id']}] [{i['priority']}] {i['title']}" for i in backlog[:10]]
+            if lines:
+                sec = "## Backlog (top 10)\n" + "\n".join(lines)
+                if _fits(sec):
+                    sections.append(sec)
+                    used += _tokens(sec)
+
+        # Recent log
+        log_file = docs_dir / "ai_log.md"
+        if log_file.exists():
+            tail = _tail(log_file, n=10)
+            sec = f"## Recent Log\n```\n{tail}\n```"
+            if _fits(sec):
+                sections.append(sec)
+                used += _tokens(sec)
+
+        output = "\n\n".join(sections) if sections else "No Keeli context found."
+        return [TextContent(type="text", text=f"{output}\n\n~{used} tokens (budget: {budget})")]
+
+    elif name == "keeli_archive_task":
+        slug = arguments.get("task_slug")
+        if not slug:
+            return [TextContent(type="text", text="Error: task_slug is required.")]
+
+        task_path = _resolve_task_file(slug, root)
+        if not task_path:
+            return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
+
+        if task_path.parent.name == "archive":
+            return [TextContent(type="text", text=f"Task '{slug}' is already archived.")]
+
+        archive_dir = tasks_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        dest = archive_dir / task_path.name
+        task_path.rename(dest)
+
+        content = dest.read_text()
+        task_id = _parse_task_field(content, "ID") or None
+        _index_update_status(task_id, archived=True)
+        _append_log(f"Archived task: {slug}", task_id=task_id)
+
+        return [TextContent(type="text", text=f"Archived '{slug}' → archive/{task_path.name}")]
 
     else:
         return [TextContent(type="text", text=f"Error: Unknown tool {name}")]

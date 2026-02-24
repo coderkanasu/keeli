@@ -22,6 +22,7 @@ Commands
 """
 
 import argparse
+import json
 import math as _math
 import re
 import textwrap
@@ -78,6 +79,102 @@ def _tail(path: Path, n: int = 30) -> str:
         return ""
     lines = path.read_text().splitlines()
     return "\n".join(lines[-n:])
+
+
+# ── Index / Ledger helpers ─────────────────────────────────────────────────
+
+_INDEX_PATH = Path("docs/.keeli_index.json")
+_INDEX_PREFIXES: dict[str, str] = {
+    "task": "T",
+    "epic": "E",
+    "story": "S",
+    "bug": "BUG",
+    "feat": "FEAT",
+}
+
+
+def _load_index() -> dict:
+    """Load docs/.keeli_index.json, returning a fresh blank index if missing/corrupt."""
+    if _INDEX_PATH.exists():
+        try:
+            return json.loads(_INDEX_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "schema": "1.0",
+        "counters": {"T": 0, "E": 0, "S": 0, "BUG": 0, "FEAT": 0},
+        "items": [],
+    }
+
+
+def _save_index(index: dict) -> None:
+    """Persist the index to docs/.keeli_index.json."""
+    _INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _INDEX_PATH.write_text(json.dumps(index, indent=2))
+
+
+def _allocate_id(
+    item_type: str,
+    title: str,
+    slug: str,
+    status: str = "Backlog",
+    priority: str = "P1",
+    epic: "str | None" = None,
+    story: "str | None" = None,
+) -> str:
+    """Atomically allocate the next immutable ID and register the item in the index.
+
+    ID format:
+        T-0001  task
+        E-0001  epic
+        S-0001  story
+        BUG-0001  bug
+        FEAT-0001 feature
+    """
+    prefix = _INDEX_PREFIXES.get(item_type, "T")
+    index = _load_index()
+    index["counters"][prefix] = index["counters"].get(prefix, 0) + 1
+    n = index["counters"][prefix]
+    item_id = f"{prefix}-{n:04d}"
+    entry: dict = {
+        "id": item_id,
+        "type": item_type,
+        "title": title,
+        "slug": slug,
+        "status": status,
+        "priority": priority,
+        "epic": epic,
+        "story": story,
+        "created": _now_iso(),
+        "completed": None,
+        "archived": False,
+    }
+    index["items"].append(entry)
+    _save_index(index)
+    return item_id
+
+
+def _index_update_status(
+    task_id: str,
+    *,
+    status: "str | None" = None,
+    completed: "str | None" = None,
+    archived: "bool | None" = None,
+) -> None:
+    """Patch status / completed / archived for a single item in the index."""
+    if not task_id:
+        return
+    index = _load_index()
+    for item in index["items"]:
+        if item.get("id") == task_id:
+            if status is not None:
+                item["status"] = status
+            if completed is not None:
+                item["completed"] = completed
+            if archived is not None:
+                item["archived"] = archived
+            break
+    _save_index(index)
 
 
 # ── Interactive prompt (Angular-CLI style) ─────────────────────────────────
@@ -335,7 +432,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     epic = getattr(args, "epic", None) or "None"
     story = getattr(args, "story", None) or "None"
 
+    task_id = _allocate_id(
+        "task", args.task_name, slug, priority=priority,
+        epic=epic if epic != "None" else None,
+        story=story if story != "None" else None,
+    )
     content = TASK_TEMPLATE.format(
+        task_id=task_id,
         title=args.task_name,
         timestamp=_now_iso(),
         context_note=context_note,
@@ -348,12 +451,12 @@ def cmd_start(args: argparse.Namespace) -> None:
         objective=objective_text,
     )
     task_file.write_text(content)
-    print(f"✅ Created task: {task_file} [@{persona} checklist]")
+    print(f"✅ Created task: {task_file} [{task_id}] [@{persona} checklist]")
     if objective_text:
         print(f"   → Objective pre-filled from {args.objective}")
 
     # Auto-log the event
-    _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}")
+    _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}", task_id=task_id)
 
 
 def cmd_log(args: argparse.Namespace) -> None:
@@ -362,13 +465,18 @@ def cmd_log(args: argparse.Namespace) -> None:
     print(f"✅ Logged to docs/ai_log.md")
 
 
-def _append_log(message: str) -> None:
-    """Low-level helper: append one line to the audit log."""
+def _append_log(message: str, *, task_id: "str | None" = None) -> None:
+    """Low-level helper: append one timestamped line to the audit log.
+
+    Format:  <ISO-8601> | <ID> | <message>
+    The ID segment is omitted when task_id is None.
+    """
     log_file = Path("docs/ai_log.md")
     if not log_file.exists():
         log_file.write_text(AI_LOG_MD)
+    id_part = f" | {task_id}" if task_id else ""
     with log_file.open("a") as f:
-        f.write(f"{_now_iso()} | {message}\n")
+        f.write(f"{_now_iso()}{id_part} | {message}\n")
 
 
 def _parse_task_field(text: str, field: str) -> str:
@@ -390,14 +498,21 @@ def _update_task_field(text: str, field: str, new_value: str) -> str:
 
 
 def _resolve_task_file(tasks_dir: Path, slug: str) -> "Path | None":
-    """Return the first existing file matching plain, bug-, or feat- prefix."""
-    for candidate in (
-        tasks_dir / f"{slug}.md",
-        tasks_dir / f"bug-{slug}.md",
-        tasks_dir / f"feat-{slug}.md",
-    ):
-        if candidate.exists():
-            return candidate
+    """Return the first existing file matching plain, bug-, feat-, story- or epic- prefix.
+
+    Checks the live *tasks_dir* first, then the *archive/* subdirectory, so that
+    completed/archived items remain addressable for reopen / history.
+    """
+    for base in (tasks_dir, tasks_dir / "archive"):
+        for candidate in (
+            base / f"{slug}.md",
+            base / f"bug-{slug}.md",
+            base / f"feat-{slug}.md",
+            base / f"story-{slug}.md",
+            base / f"epic-{slug}.md",
+        ):
+            if candidate.exists():
+                return candidate
     return None
 
 
@@ -482,12 +597,14 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -
         print(f"⚠️  {task_file} is already {new_status}.")
         return
 
+    task_id = _parse_task_field(text, "ID")
     text = _update_task_field(text, "Status", new_status)
     task_file.write_text(text)
     print(f"✅ Marked as {new_status}: {task_file}")
 
+    _index_update_status(task_id, status=new_status)
     persona = getattr(args, "keeli", "developer") or "developer"
-    _append_log(f"@{persona} | Task {log_verb}: {args.task_name} → {task_file}")
+    _append_log(f"@{persona} | Task {log_verb}: {args.task_name} → {task_file}", task_id=task_id)
 
 
 def cmd_progress(args: argparse.Namespace) -> None:
@@ -551,13 +668,23 @@ def cmd_reopen(args: argparse.Namespace) -> None:
         print(f"⚠️  {task_file} is currently '{status}' — reopen only works on Completed or Review tasks.")
         return
 
+    task_id = _parse_task_field(text, "ID")
+
+    # Move back to live tasks_dir if it was in archive
+    if task_file.parent.name == "archive":
+        live_dest = tasks_dir / task_file.name
+        task_file.rename(live_dest)
+        task_file = live_dest
+        print(f"   📤 Restored from archive → {task_file}")
+
     text = _update_task_field(text, "Status", "In Progress")
     text = _update_task_field(text, "Completed", "—")
     task_file.write_text(text)
     print(f"✅ Reopened: {task_file} (now In Progress)")
 
+    _index_update_status(task_id, status="In Progress", completed=None, archived=False)
     persona = getattr(args, "keeli", "developer") or "developer"
-    _append_log(f"@{persona} | Task reopened: {args.task_name} → {task_file}")
+    _append_log(f"@{persona} | Task reopened: {args.task_name} → {task_file}", task_id=task_id)
 
 
 def cmd_bug(args: argparse.Namespace) -> None:
@@ -583,7 +710,12 @@ def cmd_bug(args: argparse.Namespace) -> None:
     ) or "<!-- Describe the bug here -->"
     epic = getattr(args, "epic", None) or "None"
 
+    bug_id = _allocate_id(
+        "bug", args.title, f"bug-{slug}", priority=priority,
+        epic=epic if epic != "None" else None,
+    )
     content = BUG_TEMPLATE.format(
+        task_id=bug_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
@@ -592,9 +724,9 @@ def cmd_bug(args: argparse.Namespace) -> None:
         description=description,
     )
     task_file.write_text(content)
-    print(f"🐛 Created bug report: {task_file}")
+    print(f"🐛 Created bug report: {task_file} [{bug_id}]")
 
-    _append_log(f"@developer | Bug reported: {args.title} [{priority}] → {task_file}")
+    _append_log(f"@developer | Bug reported: {args.title} [{priority}] → {task_file}", task_id=bug_id)
 
 
 def cmd_feature(args: argparse.Namespace) -> None:
@@ -625,7 +757,12 @@ def cmd_feature(args: argparse.Namespace) -> None:
     )
     epic = getattr(args, "epic", None) or "None"
 
+    feat_id = _allocate_id(
+        "feat", args.title, f"feat-{slug}", priority=priority,
+        epic=epic if epic != "None" else None,
+    )
     content = FEATURE_TEMPLATE.format(
+        task_id=feat_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
@@ -633,9 +770,9 @@ def cmd_feature(args: argparse.Namespace) -> None:
         context_note=context_note,
     )
     task_file.write_text(content)
-    print(f"✨ Created feature: {task_file}")
+    print(f"✨ Created feature: {task_file} [{feat_id}]")
 
-    _append_log(f"@architect | Feature created: {args.title} [{priority}] → {task_file}")
+    _append_log(f"@architect | Feature created: {args.title} [{priority}] → {task_file}", task_id=feat_id)
 
 
 def cmd_skill(args: argparse.Namespace) -> None:
@@ -1008,7 +1145,12 @@ def cmd_story(args: argparse.Namespace) -> None:
     goal   = getattr(args, "goal", None)   or _prompt("Goal (e.g. 'create a task')"        )
     reason = getattr(args, "reason", None) or _prompt("Reason (e.g. 'track my work')", default="...")
 
+    story_id = _allocate_id(
+        "story", args.title, f"story-{slug}", priority=priority,
+        epic=epic if epic != "None" else None,
+    )
     content = STORY_TEMPLATE.format(
+        task_id=story_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
@@ -1019,12 +1161,12 @@ def cmd_story(args: argparse.Namespace) -> None:
         reason=reason,
     )
     task_file.write_text(content)
-    print(f"📖 Created story: {task_file}")
+    print(f"📖 Created story: {task_file} [{story_id}]")
     if epic != "None":
         print(f"   → Linked to epic: {epic}")
     print(f"   → Add tasks with: keeli start \"<title>\" --story {slug} --epic {epic}")
 
-    _append_log(f"@architect | Story created: {args.title} [{priority}] epic={epic} → {task_file}")
+    _append_log(f"@architect | Story created: {args.title} [{priority}] epic={epic} → {task_file}", task_id=story_id)
 
 
 def cmd_epic(args: argparse.Namespace) -> None:
@@ -1045,21 +1187,23 @@ def cmd_epic(args: argparse.Namespace) -> None:
         "Epic priority", default="P1", choices=["P0", "P1", "P2"]
     )
 
+    epic_id = _allocate_id("epic", args.title, f"epic-{slug}", priority=priority)
     content = EPIC_TEMPLATE.format(
+        task_id=epic_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
         slug=slug,
     )
     task_file.write_text(content)
-    print(f"🚀 Created epic: {task_file}")
+    print(f"🚀 Created epic: {task_file} [{epic_id}]")
     print(f"   → @architect: define objective/scope, then run: keeli story \"<title>\" --epic {slug}")
 
-    _append_log(f"@architect | Epic created: {args.title} [{priority}] → {task_file}")
+    _append_log(f"@architect | Epic created: {args.title} [{priority}] → {task_file}", task_id=epic_id)
 
 
 def cmd_complete(args: argparse.Namespace) -> None:
-    """Mark a task as completed and suggest the next one."""
+    """Mark a task as completed, auto-archive it, and suggest the next one."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
         print("❌ docs/tasks/ not found. Run `keeli init` first.")
@@ -1079,15 +1223,28 @@ def cmd_complete(args: argparse.Namespace) -> None:
         print(f"⚠️  {task_file} is already marked as Completed.")
         return
 
+    now = _now_iso()
+    task_id = _parse_task_field(text, "ID")
+
     # Update status and add completion timestamp
     text = _update_task_field(text, "Status", "Completed")
-    text = _update_task_field(text, "Completed", _now_iso())
-    task_file.write_text(text) 
+    text = _update_task_field(text, "Completed", now)
+    task_file.write_text(text)
     print(f"✅ Marked as Completed: {task_file}")
+
+    # Auto-archive to docs/tasks/archive/
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    dest = archive_dir / task_file.name
+    task_file.rename(dest)
+    print(f"   📦 Auto-archived → {dest}")
+
+    # Update index
+    _index_update_status(task_id, status="Completed", completed=now, archived=True)
 
     # Auto-log
     persona = getattr(args, "keeli", "developer") or "developer"
-    _append_log(f"@{persona} | Task completed: {args.task_name} → {task_file}")
+    _append_log(f"@{persona} | Task completed: {args.task_name} → {dest}", task_id=task_id)
 
     # Suggest next task
     next_path, next_slug = _get_next_task()
@@ -1266,24 +1423,50 @@ def cmd_archive(args: argparse.Namespace) -> None:
     archive_dir = tasks_dir / "archive"
     archive_dir.mkdir(exist_ok=True)
     
+    task_id = _parse_task_field(text, "ID")
     dest_file = archive_dir / task_file.name
     task_file.rename(dest_file)
     print(f"✅ Archived: {task_file.name} → {dest_file}")
 
+    _index_update_status(task_id, archived=True)
     persona = getattr(args, "keeli", "developer") or "developer"
-    _append_log(f"@{persona} | Task archived: {args.task_name} → {dest_file}")
+    _append_log(f"@{persona} | Task archived: {args.task_name} → {dest_file}", task_id=task_id)
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
     """Dump project context for a new AI session.
 
-    Three verbosity levels to respect context-window limits:
+    Four verbosity levels to respect context-window limits:
+      --nano    ≈ 200 tokens  — current in-progress task ID+title only
       --brief   ≈ 500 tokens  — project overview + active tasks only
       (default) ≈ 1500 tokens — above + recent log + decisions summary
       --full    ≈ 3000 tokens — everything including full decision log
+      --budget N              — auto-select depth to hit a token ceiling
     """
+    nano = getattr(args, "nano", False)
     brief = args.brief
     full = args.full
+
+    # ── nano mode: current task ID + title only (~200 tokens) ────────
+    if nano:
+        tasks_dir = Path("docs/tasks")
+        active_lines: list[str] = []
+        if tasks_dir.exists():
+            for tf in sorted(tasks_dir.glob("*.md")):
+                text = tf.read_text()
+                status = _parse_task_field(text, "Status").lower()
+                if status == "in progress":
+                    tid = _parse_task_field(text, "ID") or "—"
+                    title = text.splitlines()[0].lstrip("# ").strip()
+                    active_lines.append(f"[{tid}] {title}")
+        if active_lines:
+            print("Current task: " + "\n".join(active_lines))
+        else:
+            print("No active task. Run `keeli next` to pick one.")
+        print(f"\n> Keeli v{SCHEMA_VERSION} | nano mode")
+        word_count = sum(len(l.split()) for l in active_lines)
+        print(f"\n📊 ~{int(word_count * 1.35)} tokens (nano mode)")
+        return
 
     sections: list[str] = []
 
@@ -1619,6 +1802,194 @@ def _format_hints_block(hints: dict) -> str:
     return "\n".join(lines)
 
 
+
+# ── Discovery commands ────────────────────────────────────────────────────────
+
+def _print_index_results(items: list[dict], label: str) -> None:
+    """Pretty-print a list of index items."""
+    tasks_dir = Path("docs/tasks")
+    print(f"\n🔍 {label} — {len(items)} result(s)\n")
+    print(f"  {'ID':<10} {'Type':<6} {'Pri':<4} {'Status':<14} Title")
+    print("  " + "-" * 70)
+    for item in sorted(items, key=lambda i: i.get("created", ""), reverse=True):
+        archived = " [archived]" if item.get("archived") else ""
+        epic_tag = f" epic={item['epic']}" if item.get("epic") else ""
+        print(
+            f"  {item.get('id', '?'):<10} {item.get('type', ''):<6} "
+            f"{item.get('priority', '?'):<4} {item.get('status', '?'):<14} "
+            f"{item.get('title', '')}{archived}{epic_tag}"
+        )
+        slug = item.get("slug", "")
+        arch = tasks_dir / "archive" / f"{slug}.md"
+        live = tasks_dir / f"{slug}.md"
+        if arch.exists():
+            print(f"  {'':10} → {arch}")
+        elif live.exists():
+            print(f"  {'':10} → {live}")
+
+
+def cmd_find(args: argparse.Namespace) -> None:
+    """Search the index by exact ID or keyword across title/slug.
+
+    Examples:
+        keeli find T-0003          # exact ID lookup
+        keeli find "auth login"    # keyword search
+    """
+    if not _INDEX_PATH.exists():
+        print("❌ Index not found. Create some tasks first (keeli start / epic / story / bug).")
+        return
+
+    index = _load_index()
+    items = index.get("items", [])
+    query = args.query.strip()
+    query_upper = query.upper()
+
+    # Exact ID match first (e.g. T-0001, BUG-0003)
+    id_matches = [i for i in items if i.get("id", "").upper() == query_upper]
+    if id_matches:
+        _print_index_results(id_matches, label=f"ID: {query_upper}")
+        return
+
+    # Keyword match across title + slug
+    q_lower = query.lower()
+    kw_matches = [
+        i for i in items
+        if q_lower in i.get("title", "").lower() or q_lower in i.get("slug", "").lower()
+    ]
+    if kw_matches:
+        status_filter = getattr(args, "status", None)
+        if status_filter:
+            kw_matches = [i for i in kw_matches if i.get("status", "").lower() == status_filter.lower()]
+        _print_index_results(kw_matches, label=f"Keyword: '{query}'")
+    else:
+        print(f"No results for '{query}'.")
+    if getattr(args, "json", False):
+        import json
+        print("\n" + json.dumps(id_matches or kw_matches, indent=2))
+
+
+def cmd_history(args: argparse.Namespace) -> None:
+    """Show all ai_log entries for a specific task ID or title keyword.
+
+    Examples:
+        keeli history T-0003
+        keeli history "auth"
+    """
+    log_file = Path("docs/ai_log.md")
+    if not log_file.exists():
+        print("❌ docs/ai_log.md not found.")
+        return
+
+    target = args.task_id.strip().upper()
+    lines = log_file.read_text().splitlines()
+    matches = [line for line in lines if target in line.upper()]
+
+    if not matches:
+        print(f"No log entries found for '{target}'.")
+        return
+
+    print(f"\n📜 History for {target} — {len(matches)} entries\n")
+    for line in matches:
+        print(f"  {line}")
+    print()
+
+
+def cmd_digest(args: argparse.Namespace) -> None:
+    """Machine-optimised, token-budgeted context dump for LLM session starts.
+
+    Fills sections greedily in priority order until the token budget is reached:
+      1. Active / In-Progress tasks (always included)
+      2. Project overview (first 5 lines)
+      3. Backlog summary from index (top 10 by priority)
+      4. Recently completed items from index (last 5)
+      5. Recent log lines
+
+    Use --budget to tune the output size for your model's context window.
+    """
+    budget: int = getattr(args, "budget", 2000)
+    sections: list[str] = []
+    used = 0
+
+    def _tokens(text: str) -> int:
+        return int(len(text.split()) * 1.35)
+
+    def _fits(text: str) -> bool:
+        return used + _tokens(text) <= budget
+
+    # 1. Active tasks (in-progress / blocked) — always included
+    tasks_dir = Path("docs/tasks")
+    if tasks_dir.exists():
+        active_lines: list[str] = []
+        for tf in sorted(tasks_dir.glob("*.md")):
+            if tf.name == ".gitkeep":
+                continue
+            text = tf.read_text()
+            status = _parse_task_field(text, "Status").lower()
+            if status in ("in progress", "blocked"):
+                tid = _parse_task_field(text, "ID") or "—"
+                title = text.splitlines()[0].lstrip("# ").strip()
+                active_lines.append(f"- [{tid}] {title} ({status})")
+        if active_lines:
+            sec = "## Active\n" + "\n".join(active_lines)
+            sections.append(sec)
+            used += _tokens(sec)
+
+    # 2. Project overview (first 5 lines)
+    project = Path("docs/project.md")
+    if project.exists():
+        first5 = "\n".join(project.read_text().splitlines()[:5])
+        sec = f"## Project\n{first5}"
+        if _fits(sec):
+            sections.append(sec)
+            used += _tokens(sec)
+
+    # 3. Backlog from index (top 10 by priority then age)
+    if _INDEX_PATH.exists():
+        index = _load_index()
+        backlog = [
+            i for i in index.get("items", [])
+            if i.get("status", "").lower() == "backlog" and not i.get("archived")
+        ]
+        backlog.sort(key=lambda i: (i.get("priority", "P2"), i.get("created", "")))
+        lines = [f"- [{i['id']}] [{i['priority']}] {i['title']}" for i in backlog[:10]]
+        if lines:
+            sec = "## Backlog (top 10)\n" + "\n".join(lines)
+            if _fits(sec):
+                sections.append(sec)
+                used += _tokens(sec)
+
+    # 4. Recently completed from index (last 5 by completion date)
+    if _INDEX_PATH.exists():
+        index = _load_index()
+        done = [
+            i for i in index.get("items", [])
+            if i.get("status", "").lower() == "completed"
+        ]
+        done.sort(key=lambda i: i.get("completed") or "", reverse=True)
+        lines = [
+            f"- [{i['id']}] {i['title']} (done {(i.get('completed') or '')[:10]})"
+            for i in done[:5]
+        ]
+        if lines:
+            sec = "## Recently Completed\n" + "\n".join(lines)
+            if _fits(sec):
+                sections.append(sec)
+                used += _tokens(sec)
+
+    # 5. Recent log (if budget allows)
+    log_file = Path("docs/ai_log.md")
+    if log_file.exists():
+        tail = _tail(log_file, n=10)
+        sec = f"## Recent Log\n```\n{tail}\n```"
+        if _fits(sec):
+            sections.append(sec)
+            used += _tokens(sec)
+
+    output = "\n\n".join(sections) if sections else "No Keeli context found."
+    print(output)
+    print(f"\n📊 ~{used} tokens (budget: {budget})")
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     """Analyze a task and inject AI context hints (skill/ADR relevance)."""
     tasks_dir = Path("docs/tasks")
@@ -1761,6 +2132,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode = p_resume.add_mutually_exclusive_group()
     mode.add_argument("--brief", action="store_true", help="Minimal output (~500 tokens).")
     mode.add_argument("--full", action="store_true", help="Full output (~3000 tokens).")
+    mode.add_argument("--nano", action="store_true", help="~200 tokens: current task ID+title only. Ideal for Copilot in-editor injection.")
+    p_resume.add_argument("--budget", type=int, default=None, metavar="N",
+                          help="Target token budget (e.g. 4096). Auto-selects depth.")
 
     # status
     sub.add_parser("status", help="Health-check all Keeli files.")
@@ -1885,6 +2259,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--dry-run", action="store_true", dest="dry_run",
                            help="Print hints to terminal without writing to file.")
 
+    # find
+    p_find = sub.add_parser("find", help="Search the index by ID (T-0001) or keyword.")
+    p_find.add_argument("query", help="An ID (e.g. T-0001) or keyword to search.")
+    p_find.add_argument("-s", "--status", default=None, help="Filter by status.")
+    p_find.add_argument("--json", action="store_true", help="Output as JSON.")
+
+    # history
+    p_history = sub.add_parser("history", help="Show all ai_log entries for a task ID.")
+    p_history.add_argument("task_id", help="Task ID (e.g. T-0001) or keyword.")
+
+    # digest
+    p_digest = sub.add_parser("digest", help="Machine-optimised token-budgeted context dump.")
+    p_digest.add_argument("--budget", type=int, default=2000,
+                          help="Token budget (default: 2000).")
+
     # mcp
     p_mcp = sub.add_parser("mcp", help="Start the Keeli MCP server.")
     p_mcp.add_argument("--sse", action="store_true", help="Run over HTTP/SSE instead of stdio.")
@@ -1933,6 +2322,9 @@ def main() -> None:
         "stack": cmd_stack,
         "persona": cmd_persona,
         "analyze": cmd_analyze,
+        "find": cmd_find,
+        "history": cmd_history,
+        "digest": cmd_digest,
         "mcp": cmd_mcp,
     }
 
