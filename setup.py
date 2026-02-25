@@ -2,11 +2,11 @@ from setuptools import setup, find_packages
 
 setup(
     name="keeli",
-    version="0.3.0",
-    description="Keeli CLI — Enforce a Four-Persona Architecture for AI Agents.",
+    version="0.4.0",
+    description="Keeli CLI — Enforce a Five-Persona Architecture for AI Agents.",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
-    python_requires=">=3.8",
+    python_requires=">=3.12",
     install_requires=[
         "mcp>=1.0.0",
     ],
