@@ -219,18 +219,14 @@ PROJECT_MD = f"""# Project Documentation  (Keeli Framework v{SCHEMA_VERSION})
 <!-- Describe the project purpose, users, and high-level goals. -->
 
 ## Tech Stack
-<!-- Update this section with the technologies used in your project. -->
+<!-- Run `keeli stack` to apply a preset, or add skills with `keeli skill add`. -->
 
 ### Languages & Frameworks
-- Java, Spring Framework (Boot, Security, Data JPA)
-- Python
-- JavaScript / TypeScript
-- React, React Native
-- AngularJS
-- CSS / SCSS
+<!-- Add your project's primary language(s) and frameworks here. -->
+<!-- Example: Python 3.12+, FastAPI, SQLAlchemy -->
 
 ### Domain Expertise
-- Trading systems, financial data pipelines
+<!-- Add your project's domain knowledge areas here. -->
 
 ### Infrastructure
 <!-- e.g. AWS, Docker, Kubernetes, PostgreSQL, Redis -->
@@ -433,8 +429,7 @@ TASK_CHECKLISTS = {
 # .gitignore additions
 # ---------------------------------------------------------------------------
 GITIGNORE_CONTENT = """# Keeli
-# Note: docs/ai_log.md is intentionally NOT ignored so AI sessions
-#       can resume with full context. Commit it regularly.
+# (ai_log.md is purposefully omitted to allow session context to be committed)
 
 # Python
 __pycache__/
@@ -712,12 +707,10 @@ STORY_TEMPLATE = """# Story: {title}
 **Persona:** @architect
 
 ## User Story
-As a {role}, I want {goal}, so that {reason}.
+As a {role}, I want {goal}, so that I can {reason}.
 
 ## Acceptance Criteria
-- [ ] <!-- Criterion 1 -->
-- [ ] <!-- Criterion 2 -->
-- [ ] <!-- Criterion 3 -->
+{criteria}
 
 ## Non-Functional Requirements
 <!-- Define BEFORE @architect begins design. If any target is unknown, STOP — ask @po or the human before proceeding. -->

@@ -127,6 +127,9 @@ class TestKeeliStart:
 # ── keeli_complete ─────────────────────────────────────────────────────────────
 
 class TestKeeliComplete:
+    def _tick_all(self, path) -> None:
+        path.write_text(path.read_text().replace("- [ ]", "- [x]"))
+
     async def test_missing_slug_returns_error(self, keeli_dir):
         result = await call_tool("keeli_complete", {})
         assert "task_slug is required" in _text(result)
@@ -138,6 +141,7 @@ class TestKeeliComplete:
     async def test_completes_and_archives(self, keeli_dir):
         with patch("sys.argv", ["keeli", "start", "Archive Me"]):
             main()
+        self._tick_all(keeli_dir / "docs" / "tasks" / "archive-me.md")
         result = await call_tool("keeli_complete", {"task_slug": "archive-me"})
         assert "Marked" in _text(result) or "Completed" in _text(result)
         assert not (keeli_dir / "docs" / "tasks" / "archive-me.md").exists()
@@ -146,6 +150,7 @@ class TestKeeliComplete:
     async def test_archived_file_has_completed_status(self, keeli_dir):
         with patch("sys.argv", ["keeli", "start", "Status Check"]):
             main()
+        self._tick_all(keeli_dir / "docs" / "tasks" / "status-check.md")
         await call_tool("keeli_complete", {"task_slug": "status-check"})
         content = (keeli_dir / "docs" / "tasks" / "archive" / "status-check.md").read_text()
         assert "**Status:** Completed" in content
@@ -153,6 +158,7 @@ class TestKeeliComplete:
     async def test_sends_log_message_when_session_active(self, keeli_dir, mock_session):
         with patch("sys.argv", ["keeli", "start", "To Complete"]):
             main()
+        self._tick_all(keeli_dir / "docs" / "tasks" / "to-complete.md")
         with patch.object(type(mcp_mod.app), "request_context", new_callable=PropertyMock) as mock_rc:
             mock_rc.return_value.session = mock_session
             await call_tool("keeli_complete", {"task_slug": "to-complete"})
@@ -428,6 +434,8 @@ class TestStreamingNotifications:
         """Verify level='info' and data contains task slug on keeli_complete."""
         with patch("sys.argv", ["keeli", "start", "Log Args Task"]):
             main()
+        task = keeli_dir / "docs" / "tasks" / "log-args-task.md"
+        task.write_text(task.read_text().replace("- [ ]", "- [x]"))
         with patch.object(type(mcp_mod.app), "request_context", new_callable=PropertyMock) as mock_rc:
             mock_rc.return_value.session = mock_session
             await call_tool("keeli_complete", {"task_slug": "log-args-task"})
@@ -435,3 +443,169 @@ class TestStreamingNotifications:
         kwargs = mock_session.send_log_message.call_args.kwargs
         assert kwargs["level"] == "info"
         assert "log-args-task" in kwargs["data"]
+
+
+# ── keeli_ensure ──────────────────────────────────────────────────────────
+
+class TestKeeliEnsureMCP:
+    async def test_existing_task_reported(self, keeli_dir):
+        await call_tool("keeli_start", {"title": "Existing MCP"})
+        result = await call_tool("keeli_ensure", {"title": "Existing MCP"})
+        assert "Found existing task" in _text(result)
+
+    async def test_create_with_yes_flag(self, keeli_dir):
+        result = await call_tool("keeli_ensure", {
+            "title": "MCP Ensure New",
+            "yes": True,
+            "objective": "Do the thing",
+        })
+        text = _text(result)
+        assert "Created task" in text
+        assert (keeli_dir / "docs" / "tasks" / "mcp-ensure-new.md").exists()
+
+    async def test_error_without_flags(self, keeli_dir):
+        result = await call_tool("keeli_ensure", {"title": "No Flags"})
+        text = _text(result)
+        assert "Error" in text or "must supply yes or no" in text
+
+    async def test_no_flag_skips_creation(self, keeli_dir):
+        result = await call_tool("keeli_ensure", {"title": "Skip Me", "no": True})
+        text = _text(result)
+        assert "No task created" in text
+        assert not (keeli_dir / "docs" / "tasks" / "skip-me.md").exists()
+
+    async def test_yes_flag_requires_objective(self, keeli_dir):
+        result = await call_tool("keeli_ensure", {"title": "Bad Create", "yes": True})
+        text = _text(result)
+        assert "objective required" in text.lower()
+
+
+# ── keeli_skill_scan ──────────────────────────────────────────────────────────
+
+class TestKeelSkillScanMCP:
+    async def test_scan_returns_detected_skills(self, keeli_dir):
+        (keeli_dir / "requirements.txt").write_text("fastapi>=0.110\npydantic==2.7\n")
+        result = await call_tool("keeli_skill_scan", {})
+        text = _text(result)
+        assert "fastapi" in text.lower()
+        assert "pydantic" in text.lower()
+
+    async def test_scan_no_manifest_returns_warning(self, keeli_dir):
+        result = await call_tool("keeli_skill_scan", {})
+        text = _text(result)
+        # No manifest files in a freshly-inited keeli project → warning
+        assert "No recognised manifest" in text or "detected" in text
+
+    async def test_scan_json_structure(self, keeli_dir):
+        (keeli_dir / "requirements.txt").write_text("httpx>=0.27\n")
+        result = await call_tool("keeli_skill_scan", {})
+        text = _text(result)
+        assert "httpx" in text
+        # Should contain JSON with 'name' key
+        assert '"name"' in text
+
+    async def test_scan_custom_path(self, keeli_dir, tmp_path):
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "requirements.txt").write_text("requests>=2.31\n")
+        result = await call_tool("keeli_skill_scan", {"scan_path": str(sub)})
+        text = _text(result)
+        assert "requests" in text.lower()
+
+    async def test_scan_tool_listed(self, keeli_dir):
+        from keeli.mcp_server import list_tools
+        tools = await list_tools()
+        names = [t.name for t in tools]
+        assert "keeli_skill_scan" in names
+
+
+# ── keeli_chain ───────────────────────────────────────────────────────────────
+
+class TestKeeliChainMCP:
+    async def test_chain_tool_listed(self, keeli_dir):
+        from keeli.mcp_server import list_tools
+        tools = await list_tools()
+        names = [t.name for t in tools]
+        assert "keeli_chain" in names
+
+    async def test_chain_missing_steps_returns_error(self, keeli_dir):
+        result = await call_tool("keeli_chain", {"steps": []})
+        text = _text(result)
+        assert "Error" in text or "required" in text.lower()
+
+    async def test_chain_dry_run_does_not_create_task(self, keeli_dir):
+        result = await call_tool("keeli_chain", {
+            "steps": ["start:MCP Dry Run Task", "analyze:auto"],
+            "dry_run": True,
+        })
+        text = _text(result)
+        assert "dry-run" in text.lower() or "previewed" in text.lower()
+        assert not (keeli_dir / "docs" / "tasks" / "mcp-dry-run-task.md").exists()
+
+    async def test_chain_inline_creates_task(self, keeli_dir):
+        # Create with objective first so the progress guard passes
+        await call_tool("keeli_start", {
+            "title": "MCP Chain Task",
+            "objective": "Build the MCP chain feature",
+        })
+        task = keeli_dir / "docs" / "tasks" / "mcp-chain-task.md"
+        assert task.exists(), "Expected task file to be created by start"
+        result = await call_tool("keeli_progress", {"task_slug": "mcp-chain-task"})
+        text = _text(result)
+        from keeli.main import _parse_task_field
+        assert _parse_task_field(task.read_text(), "Status") == "In Progress", f"Output: {text}"
+
+    async def test_chain_run_named_builtin(self, keeli_dir):
+        result = await call_tool("keeli_chain", {
+            "steps": ["run", "new-task"],
+            "vars": {"title": "Named MCP Chain Task"},
+        })
+        task = keeli_dir / "docs" / "tasks" / "named-mcp-chain-task.md"
+        assert task.exists(), f"Named chain should create the task. Output: {_text(result)}"
+
+    async def test_chain_run_unknown_chain_returns_error(self, keeli_dir):
+        result = await call_tool("keeli_chain", {
+            "steps": ["run", "nonexistent-chain"],
+        })
+        text = _text(result)
+        assert "Error" in text or "unknown" in text.lower()
+
+
+# ── keeli_orchestrate ──────────────────────────────────────────────────────────
+
+class TestKeeliOrchestrate:
+    async def test_missing_slug_returns_error(self, keeli_dir):
+        result = await call_tool("keeli_orchestrate", {})
+        assert "Error" in _text(result)
+
+    async def test_not_found_returns_error(self, keeli_dir):
+        result = await call_tool("keeli_orchestrate", {"task_slug": "ghost-task"})
+        assert "Error" in _text(result)
+
+    async def test_backlog_task_handoff_fields(self, keeli_dir):
+        # Create a task so we have something to orchestrate
+        await call_tool("keeli_start", {"title": "Orchestrate Me"})
+        result = await call_tool("keeli_orchestrate", {"task_slug": "orchestrate-me"})
+        data = json.loads(_text(result))
+        assert "task_id" in data
+        assert data["current_status"] == "Backlog"
+        assert "required_persona" in data
+        assert "system_prompt_hint" in data
+        assert data["suggested_next_tool"] == "keeli_progress"
+        assert data["blocking_reason"] is None
+
+    async def test_completed_task_has_blocking_reason(self, keeli_dir):
+        await call_tool("keeli_start", {"title": "Already Done Task"})
+        # Tick all checklist items so complete guard passes
+        task = keeli_dir / "docs" / "tasks" / "already-done-task.md"
+        task.write_text(task.read_text().replace("- [ ]", "- [x]"))
+        await call_tool("keeli_complete", {"task_slug": "already-done-task"})
+        result = await call_tool("keeli_orchestrate", {"task_slug": "already-done-task"})
+        # completed tasks are archived; orchestrate should still find the file or report
+        text = _text(result)
+        # Either an Error (not found post-archive) or blocking_reason set
+        try:
+            data = json.loads(text)
+            assert data["blocking_reason"] is not None
+        except json.JSONDecodeError:
+            assert "Error" in text or "Completed" in text

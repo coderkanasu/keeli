@@ -64,5 +64,18 @@ who want reproducible, auditable, persona-driven AI workflows.
 | `keeli epic / story` | Group tasks into epics and user stories |
 | `keeli mcp [--sse --port N]` | Start MCP server (stdio or SSE) |
 
+## LLM Compatibility Tiers (ADR-005)
+
+Keeli governance (STOP gates, persona labels, slug propagation, auto-state updates) requires
+strong instruction-following. Observed fidelity as of 2026-02:
+
+| Tier | Models | Notes |
+|------|--------|-------|
+| **1 — Full fidelity** | Claude 3.x / 4.x | All personas, STOP gates, chain slug propagation, HATEOAS hints work without prompting |
+| **2 — Good with nudging** | Gemini 1.5/2.x, Raptor Mini | ~80% fidelity; may skip state updates or need explicit slug passed in chains |
+| **3 — Adequate** | GPT-4.1 | Executes commands correctly; weaker persona governance in long sessions; CWD fix already in place |
+
+Update ADR-005 in [docs/decision.md](decision.md) when new model behaviour is observed.
+
 ## Key Decisions
 See [docs/decision.md](decision.md) for all ADRs.

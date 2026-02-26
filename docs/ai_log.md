@@ -71,3 +71,26 @@
 2026-02-24T19:07:36Z | @architect | T-0002 created: implement _validate_transition helper + predicates.
 2026-02-24T19:07:36Z | @architect | T-0003 created: wire guards into cmd_start/story/progress/review/complete.
 2026-02-24T21:33:00Z | @architect | Task audit: archived T-0001 (cli-hard-enforcement) + fix-typos (no-action); epic-streaming In Progress with S-1/S-2/S-3 ACs verified; add-dashboard flagged for @po grooming.
+2026-02-25T19:33:49Z | T-0004 | @architect | Task created: keeli skill scan — architect-owned tech discovery and version registry → docs/tasks/keeli-skill-scan-architect-owned-tech-discovery-and-version-registry.md
+2026-02-25T19:36:31Z | T-0005 | @architect | Task created: keeli chain — sequential command pipeline with slug propagation → docs/tasks/keeli-chain-sequential-command-pipeline-with-slug-propagation.md
+2026-02-25T19:36:57Z | @architect | T-0004 created: keeli skill scan — architect-owned tech discovery + version registry + mandatory constraint enforcement
+2026-02-25T19:36:57Z | @architect | T-0005 created: keeli chain — sequential command pipeline with slug propagation + chain-file support + MCP keeli_chain tool
+2026-02-25T20:17:16Z | @developer | T-0004 completed: keeli skill scan (_scan_manifests, ScannedSkill, cmd_skill scan, --apply, mandatory constraint on skill add); 22 new tests; 134/134 pass
+2026-02-25T20:17:16Z | @developer | T-0005 completed: keeli chain (BUILTIN_CHAINS, _run_chain_inline, _run_chain_from_file, _extract_slug_from_output, auto slug propagation, --dry-run, run/list subcommands); 134/134 pass
+2026-02-25T22:36:01Z | @developer | keeli_chain + keeli_skill_scan wired into MCP server; 11 new MCP tests; 145/145 pass
+
+2026-02-25T22:43:34Z | @developer | HATEOAS _with_next() wired into all 13 MCP tool success paths (keeli_next, keeli_complete, keeli_start, keeli_analyze x2, keeli_log, keeli_find x2, keeli_history, keeli_digest, keeli_archive_task, keeli_skill_scan, keeli_chain); 145/145 pass2026-02-26T03:13:14Z | T-0006 | @architect | Task created: HATEOAS next-action hints for all MCP tools → docs/tasks/hateoas-next-action-hints-for-all-mcp-tools.md
+2026-02-26T03:13:21Z | T-0006 | @developer | Task archived: hateoas-next-action-hints-for-all-mcp-tools → docs/tasks/archive/hateoas-next-action-hints-for-all-mcp-tools.md
+
+
+2026-02-26T03:14:15Z | @developer | State sync: T-0004 + T-0005 task files marked Completed + archived (implemented but status/archive bypassed); T-0006 (HATEOAS _with_next) created retroactively + completed + archived
+2026-02-26T03:15:48Z | @architect | ADR-005 added: LLM compatibility tiers (Claude T1, Gemini/Raptor T2, GPT-4.1 T3); project.md updated with tier table
+2026-02-26T03:24:38Z | T-0007 | @architect | Task created: keeli_orchestrate MCP tool for persona handoff → docs/tasks/keeli-orchestrate-mcp-tool-for-persona-handoff.md
+2026-02-26T03:28:45Z | T-0007 | @developer | Task completed: keeli-orchestrate-mcp-tool-for-persona-handoff → docs/tasks/archive/keeli-orchestrate-mcp-tool-for-persona-handoff.md
+2026-02-26T03:29:02Z | [@developer] T-0007 keeli_orchestrate complete: handler + 4 tests; 149/149 pass
+2026-02-26T03:30:55Z | T-0002 | @developer | Task completed: implement-validate-transition-guard-helper-and-section-predicates → docs/tasks/archive/implement-validate-transition-guard-helper-and-section-predicates.md
+2026-02-26T03:41:16Z | [@developer] T-0002+T-0003 Transition guards implemented + wired: _section_is_filled, _validate_transition, guards in cmd_progress/cmd_review/cmd_complete + MCP keeli_progress tool added; 165/165 pass
+2026-02-26T03:41:21Z | T-0003 | @developer | Task completed: wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete → docs/tasks/archive/wire-transition-guards-into-cmd-start-cmd-story-cmd-progress-cmd-review-cmd-complete.md
+2026-02-26T03:43:10Z | [@developer] Friction bugs fixed: project.md blank-slate template (no Java/React defaults); transition guards (progress/review/complete); keeli_progress MCP tool added; 165/165 pass
+2026-02-26T16:38:17Z | [@developer] Friction fixes: story grammar (so that I can), --ac flag for acceptance criteria, project-2 todo-cli validated (20/20 tests, full keeli lifecycle); 169/169 pass
+2026-02-26T18:02:26Z | [@architect/@developer] ADR-007: keeli tick cmd + gate-item guard + epic/story skip in next; 3 friction fixes via TDD (8 new tests); 177/177 pass

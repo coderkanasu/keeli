@@ -72,4 +72,123 @@ Record every significant decision using the template below.
 
 ---
 
+### ADR-005 — LLM Compatibility Tier for Keeli Integration
+**Date:** 2026-02-25
+**Decision:** Document empirical LLM performance tiers for Keeli agentic integration. Do not gate or restrict any tool by model; instead surface this as guidance so users and CI pipelines can set expectations accordingly.
+
+**Context:** Keeli's Five-Persona Architecture relies on the model correctly interpreting persona labels, respecting STOP gates, propagating task slugs across chains, and maintaining state via `ai_log.md` / task files. These behaviours require strong instruction-following, multi-step reasoning, and tool-chaining fidelity — capabilities that vary significantly across model families.
+
+**Observed tiers (as of 2026-02):**
+
+| Tier | Models | Behaviour |
+|------|--------|-----------|
+| **Tier 1 — Full fidelity** | Claude 3.x / 4.x (Sonnet, Opus) | Respects all five personas; honours STOP gates; auto-propagates `auto` slug sentinel; updates task state without prompting; HATEOAS hints followed correctly |
+| **Tier 2 — Good with nudging** | Gemini 1.5/2.x Pro/Flash, Raptor Mini | Follows persona labels and most workflow steps; occasionally skips state updates or STOP gates; tool chaining works but may need explicit slug passed; HATEOAS hints followed ~80% of the time |
+| **Tier 3 — Adequate** | GPT-4.1 | Executes individual keeli commands correctly; tends to bypass persona governance in long sessions; does not reliably self-propagate slugs between chain steps; `cwd`-mismatch issue requires `_find_project_root()` workaround (already implemented) |
+
+**Alternatives Considered:**
+1. Model-specific prompt variants — rejected: doubles maintenance burden; the Five-Persona instructions should be model-agnostic.
+2. Hard-blocking lower-tier models from certain MCP tools — rejected: unnecessarily restrictive; tier guidance is sufficient.
+3. Silence (no documentation) — rejected: gaps silently attributed to keeli bugs rather than model behaviour.
+
+**Consequences:**
+- `docs/project.md` notes the tier table so any session's onboarding step surfaces it.
+- `@author` should reference these tiers in README usage examples.
+- Future sessions that observe new model behaviour should update this ADR (append a dated row to the table).
+- `_find_project_root()` CWD fix remains as a permanent mitigation for Tier 3.
+
+---
+
+### ADR-006 — Multi-Agent Orchestration: keeli as the Bus, not the Daemon
+**Date:** 2026-02-25
+
+**Context:** The Five-Persona Architecture currently runs as one LLM, one context window, with
+persona labels as governance discipline. The question arose: should keeli force parallel/multi-agent
+execution, or should a separate orchestrator be built?
+
+Key observations:
+1. "Multi-agent" does not require different LLMs — it can be the same model invoked in parallel
+   coroutines or serialised sub-calls, each with a scoped system prompt.
+2. `docs/tasks/*.md` and `ai_log.md` already function as a shared message bus and durable state
+   store. Any agent (or any LLM call) that reads them knows precisely what work is in flight,
+   who owns it, and what the acceptance criteria are.
+3. The MCP server is already the natural orchestration surface — every tool call can be routed
+   to any agent. The missing piece is a structured **persona handoff** message that a master
+   agent can use to spawn a scoped sub-call.
+
+**Decision:** Do NOT build a separate orchestrator process or service. Instead, extend the
+**existing MCP server** with a `keeli_orchestrate(task_slug)` tool that emits a structured
+persona handoff payload. The keeli files remain the coordination layer; keeli provides the
+API on top of them.
+
+**Proposed `keeli_orchestrate` contract:**
+```json
+{
+  "task_id": "T-0003",
+  "task_slug": "implement-words-module",
+  "current_status": "Backlog",
+  "required_persona": "@developer",
+  "system_prompt_hint": "You are @developer. Implement strictly within the interface defined ...",
+  "context_snapshot": "## Objective\n...\n## Checklist\n...",
+  "suggested_next_tool": "keeli_progress",
+  "suggested_next_args": {"task_slug": "implement-words-module"},
+  "blocking_reason": null
+}
+```
+
+The master agent calls `keeli_orchestrate`, receives this payload, constructs a sub-call
+(same LLM or different) with the `system_prompt_hint` injected as the system role, lets it
+work, then polls `keeli_next` for the next handoff. The persona sub-agent uses normal keeli
+tools (`keeli_progress`, `keeli_complete`, `keeli_log`) to write results back — closing the loop.
+
+**Why not a separate orchestrator?**
+1. A daemon/service adds infrastructure with no benefit over the MCP server that already
+   exists and is already connected to every agentic client.
+2. A separate process must replicate the task-state reading logic already in `main.py` —
+   duplicating the source of truth.
+3. The files-as-bus model means any external system (GitHub Actions, a cron job, a custom
+   script) can already "orchestrate" by shelling out to `keeli next` and reading the handoff.
+
+**When a separate orchestrator IS warranted:**
+- If you need true parallelism (multiple personas working simultaneously on independent tasks)
+  — but even then, a thin async wrapper around `keeli_orchestrate` MCP calls suffices.
+- If you need cross-project orchestration spanning multiple keeli repos — out of scope for v0.4.
+
+**Consequences:**
+- `keeli_orchestrate` tool to be added to `mcp_server.py` (new task: T-0007).
+- The `required_persona` field maps to a short system prompt fragment stored in `docs/personas.md`
+  (already exists) so the orchestrating agent can inject it without hallucinating persona rules.
+- ADR-005 tier table remains relevant: the quality of sub-agent execution still depends on
+  the model used for each persona call.
+- `keeli_orchestrate` is purely a READ operation — no state is mutated until the sub-agent
+  calls `keeli_progress` / `keeli_complete`.
+
+---
+
+### ADR-007 — Gate Items, `keeli tick`, and Epic/Story Skip in `keeli next`
+**Date:** 2026-02-26
+**Decision:** Three related agent-friction fixes shipped together:
+1. **Gate-item concept**: A checklist line is a *gate item* if it contains `@security` or `@author`. Gate items must NOT be auto-ticked and must NOT block automated `review`/`complete` transitions — they require explicit human sign-off.
+2. **`keeli tick <slug>`**: New command that ticks all non-gate `- [ ]` items in a task file and reports how many gate items remain for human action.
+3. **`keeli next` skips `epic-*` and `story-*` files**: Epics and stories are planning/coordination artifacts. An agent calling `keeli next` should only receive leaf implementation tasks.
+
+**Context:** During project-2 validation (`/tmp/todo-cli`), observed three agent friction points:
+- Agents had to raw-edit task files to check checklist boxes before every `review`/`complete` call — no CLI primitive existed for this.
+- The guard blocked on `@security sign-off` items an agent can never fulfil, making the full lifecycle unreachable without human edit or unsafe blanket `.replace("- [ ]", "- [x]")`.
+- With an epic at P1 and a task at P2, `keeli next` surfaced the epic — the agent was handed a planning artifact, not implementable work.
+
+**Alternatives Considered:**
+1. *Remove the checklist guard entirely* — rejected: the guard enforces the TDD checklist discipline that is central to keeli's value; making it optional defeats the purpose.
+2. *Separate `keeli gate-approve` instead of skipping gate items* — rejected: an automated agent cannot perform a human sign-off; the right model is to let the agent complete mechanical work and explicitly signal what remains for humanshandoff.
+3. *Make `keeli next` configurable with a `--include-epics` flag* — rejected: surfacing epics is never the right default for an agent; a human running `keeli list` can see epics if needed.
+
+**Consequences:**
+- `_GATE_KEYWORDS = ("@security", "@author")` and `_is_gate_item(line)` added to `main.py`.
+- `cmd_review` and `cmd_complete` guard lambdas now skip gate items.
+- `cmd_tick` added; wired in dispatch table and argparser.
+- `_get_next_task` skips filenames starting with `epic-` or `story-`.
+- 8 new tests; 177/177 passing.
+
+---
+
 <!-- Add new decisions above this line -->

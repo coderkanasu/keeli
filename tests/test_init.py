@@ -60,7 +60,8 @@ class TestInit:
 
         content = (clean_dir / ".gitignore").read_text()
         assert "node_modules/" in content
-        assert "docs/ai_log.md" in content
+        # there should be no ignored ai_log entry (comments are OK)
+        assert not any(line.strip().startswith("docs/ai_log.md") for line in content.splitlines())
 
     def test_schema_version_in_files(self, clean_dir):
         from keeli.templates import SCHEMA_VERSION

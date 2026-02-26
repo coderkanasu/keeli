@@ -22,11 +22,14 @@ Commands
 """
 
 import argparse
+import contextlib
 import json
 import os
 import math as _math
 import re
+import sys
 import textwrap
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -151,6 +154,63 @@ def _resolve_objective(raw: "str | None") -> str:
     except (json.JSONDecodeError, TypeError):
         pass
     return raw
+
+
+# ── Transition guard helpers ────────────────────────────────────────────────
+
+_SEC_NFR = "## Non-Functional Requirements"
+_SEC_TEST_STRATEGY = "## Test Strategy"
+
+# Items containing these keywords require a human persona to sign off.
+# Guards and `keeli tick` intentionally skip them.
+_GATE_KEYWORDS: tuple[str, ...] = ("@security", "@author")
+
+
+def _is_gate_item(line: str) -> bool:
+    """Return True if *line* is a checklist item that requires human sign-off.
+
+    Gate items contain @security or @author and must not be ticked
+    automatically, nor should they block automated transitions.
+    """
+    return any(kw in line for kw in _GATE_KEYWORDS)
+
+
+def _section_is_filled(section_header: str) -> Callable[[str], bool]:
+    """Return a predicate that passes only if *section_header* exists in the
+    file text AND has at least one non-comment, non-empty line after it
+    (before the next ``##`` heading).
+    """
+    def _check(text: str) -> bool:
+        lines = text.splitlines()
+        in_section = False
+        for line in lines:
+            if line.strip() == section_header.strip():
+                in_section = True
+                continue
+            if in_section:
+                if line.startswith("## "):
+                    # Next heading reached without finding content
+                    return False
+                stripped = line.strip()
+                if stripped and not stripped.startswith("<!--"):
+                    return True
+        return False
+
+    return _check
+
+
+def _validate_transition(
+    path: Path,
+    rules: list[tuple[str, Callable[[str], bool]]],
+) -> list[str]:
+    """Read *path* and evaluate each ``(error_message, predicate)`` rule.
+
+    A rule **passes** when ``predicate(file_text)`` returns ``True``.
+    Returns a list of error messages for every rule that failed.
+    An empty list means all rules passed.
+    """
+    text = path.read_text()
+    return [msg for msg, pred in rules if not pred(text)]
 
 
 # ── Index / Ledger helpers ─────────────────────────────────────────────────
@@ -296,7 +356,324 @@ SKILL_TYPES = ["lang", "framework", "domain", "infra", "tool"]
 _SKILLS_START = "<!-- KEELI_SKILLS_START -->"
 _SKILLS_END   = "<!-- KEELI_SKILLS_END -->"
 
+
+# ── Scan helpers ──────────────────────────────────────────────────────────────
+
+class ScannedSkill:
+    """A skill discovered from a project manifest file."""
+    __slots__ = ("name", "skill_type", "version", "source_file", "persona")
+
+    def __init__(
+        self,
+        name: str,
+        skill_type: str,
+        version: str,
+        source_file: str,
+        persona: str = "architect",
+    ) -> None:
+        self.name        = name
+        self.skill_type  = skill_type
+        self.version     = version
+        self.source_file = source_file
+        self.persona     = persona
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"ScannedSkill({self.name!r}, {self.skill_type!r}, {self.version!r})"
+
+
+_FRAMEWORK_NAMES: frozenset[str] = frozenset({
+    "flask", "fastapi", "django", "starlette", "sanic", "tornado", "falcon",
+    "react", "next", "nextjs", "nuxt", "angular", "vue", "svelte", "remix",
+    "express", "nestjs", "hapi", "koa", "fastify",
+    "spring", "springboot", "quarkus", "micronaut",
+    "rails", "sinatra",
+    "gin", "echo", "fiber",
+    "axum", "actix", "warp", "rocket",
+    "sqlalchemy", "alembic", "pydantic", "celery", "pytest",
+    "hibernate", "mybatis", "jpa",
+})
+_LANG_NAMES: frozenset[str] = frozenset({
+    "python", "node", "nodejs", "java", "go", "rust", "ruby", "php",
+    "swift", "kotlin", "scala", "typescript", "javascript", "csharp", "dotnet",
+})
+
+
+def _classify_skill(name: str) -> str:
+    """Guess the keeli skill type from a package / module name."""
+    n = re.sub(r"[-_.]", "", name.lower())
+    if n in _LANG_NAMES:
+        return "lang"
+    if n in _FRAMEWORK_NAMES:
+        return "framework"
+    return "tool"
+
+
+def _scan_manifests(root: Path) -> list[ScannedSkill]:
+    """Scan known manifest files in *root* and return discovered ScannedSkill entries.
+
+    Supported sources (in priority order):
+      pyproject.toml, requirements*.txt, package.json, .python-version,
+      .nvmrc, go.mod, Cargo.toml, pom.xml
+    """
+    results: list[ScannedSkill] = []
+
+    # 1. pyproject.toml (stdlib tomllib, Python 3.11+)
+    ppt = root / "pyproject.toml"
+    if ppt.exists():
+        try:
+            import tomllib  # noqa: PLC0415
+            data = tomllib.loads(ppt.read_text())
+            req_python = (
+                data.get("project", {}).get("requires-python")
+                or data.get("tool", {}).get("poetry", {}).get("dependencies", {}).get("python", "")
+            )
+            if req_python:
+                results.append(ScannedSkill("Python", "lang", str(req_python), "pyproject.toml"))
+            for dep in data.get("project", {}).get("dependencies", []):
+                m = re.match(r"([a-zA-Z0-9_.\-]+)\s*([><=!~^][^\s]*)?", str(dep))
+                if m and m.group(1):
+                    results.append(ScannedSkill(m.group(1), _classify_skill(m.group(1)), (m.group(2) or "").strip(), "pyproject.toml"))
+            for pn, pv in data.get("tool", {}).get("poetry", {}).get("dependencies", {}).items():
+                if pn.lower() == "python":
+                    results.append(ScannedSkill("Python", "lang", str(pv), "pyproject.toml"))
+                    continue
+                ver = pv if isinstance(pv, str) else (pv.get("version", "") if isinstance(pv, dict) else "")
+                results.append(ScannedSkill(pn, _classify_skill(pn), str(ver), "pyproject.toml"))
+        except Exception:
+            pass
+
+    # 2. requirements*.txt
+    for req_file in sorted(root.glob("requirements*.txt")):
+        for line in req_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            m = re.match(r"([a-zA-Z0-9_.\-]+)\s*([><=!~^][^\s]*)?", line)
+            if m and m.group(1):
+                results.append(ScannedSkill(m.group(1), _classify_skill(m.group(1)), (m.group(2) or "").strip(), req_file.name))
+
+    # 3. package.json
+    pkg_json = root / "package.json"
+    if pkg_json.exists():
+        try:
+            data = json.loads(pkg_json.read_text())
+            node_ver = data.get("engines", {}).get("node", "")
+            if node_ver:
+                results.append(ScannedSkill("Node.js", "lang", node_ver, "package.json"))
+            all_deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            for dep_name, dep_ver in all_deps.items():
+                results.append(ScannedSkill(dep_name, _classify_skill(dep_name), str(dep_ver), "package.json"))
+        except Exception:
+            pass
+
+    # 4. .python-version
+    pv = root / ".python-version"
+    if pv.exists():
+        ver = pv.read_text().strip()
+        if ver:
+            results.append(ScannedSkill("Python", "lang", ver, ".python-version"))
+
+    # 5. .nvmrc
+    nvmrc = root / ".nvmrc"
+    if nvmrc.exists():
+        ver = nvmrc.read_text().strip()
+        if ver:
+            results.append(ScannedSkill("Node.js", "lang", ver, ".nvmrc"))
+
+    # 6. go.mod
+    gomod = root / "go.mod"
+    if gomod.exists():
+        in_require = False
+        for line in gomod.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("go ") and not in_require:
+                results.append(ScannedSkill("Go", "lang", stripped[3:].strip(), "go.mod"))
+            elif stripped == "require (":
+                in_require = True
+            elif stripped == ")" and in_require:
+                in_require = False
+            elif in_require or stripped.startswith("require "):
+                clean = re.sub(r"^require\s+", "", stripped).strip()
+                m = re.match(r"([a-zA-Z0-9./\-_]+)\s+v([0-9][^\s]*)", clean)
+                if m:
+                    pkg_parts = m.group(1).split("/")
+                    pkg_name = pkg_parts[-1] if len(pkg_parts) > 1 else m.group(1)
+                    results.append(ScannedSkill(pkg_name, _classify_skill(pkg_name), f"v{m.group(2)}", "go.mod"))
+
+    # 7. Cargo.toml
+    cargo = root / "Cargo.toml"
+    if cargo.exists():
+        try:
+            import tomllib  # noqa: PLC0415
+            data = tomllib.loads(cargo.read_text())
+            edition = data.get("package", {}).get("edition", "")
+            results.append(ScannedSkill("Rust", "lang", f"edition {edition}" if edition else "", "Cargo.toml"))
+            for dep_name, dep_spec in data.get("dependencies", {}).items():
+                dep_ver = dep_spec if isinstance(dep_spec, str) else (dep_spec.get("version", "") if isinstance(dep_spec, dict) else "")
+                results.append(ScannedSkill(dep_name, _classify_skill(dep_name), str(dep_ver), "Cargo.toml"))
+        except Exception:
+            pass
+
+    # 8. pom.xml (stdlib regex — no XML dependency)
+    pom = root / "pom.xml"
+    if pom.exists():
+        content = pom.read_text()
+        m = re.search(r"<java\.version>([^<]+)</java\.version>", content)
+        if m:
+            results.append(ScannedSkill("Java", "lang", m.group(1), "pom.xml"))
+        skip = {"maven-compiler-plugin", "maven-surefire-plugin", "maven-jar-plugin"}
+        for mm in re.finditer(r"<artifactId>([^<]+)</artifactId>\s*(?:<version>([^<]+)</version>)?", content):
+            dep_name, dep_ver = mm.group(1), mm.group(2) or ""
+            if dep_name not in skip:
+                results.append(ScannedSkill(dep_name, _classify_skill(dep_name), dep_ver, "pom.xml"))
+
+    # Deduplicate (first occurrence wins)
+    seen: set[str] = set()
+    deduped: list[ScannedSkill] = []
+    for s in results:
+        if s.name.lower() not in seen:
+            seen.add(s.name.lower())
+            deduped.append(s)
+    return deduped
+
+
+# ── Chain infrastructure ───────────────────────────────────────────────────
+
+BUILTIN_CHAINS: dict[str, dict] = {
+    "new-task": {
+        "description": "Create a task, inject AI context hints, then mark In Progress",
+        "steps": [
+            {"cmd": "start",    "args": ["{title}"]},
+            {"cmd": "analyze",  "args": ["auto"]},
+            {"cmd": "progress", "args": ["auto"]},
+        ],
+    },
+    "close-task": {
+        "description": "Send a task to Review then mark it Completed",
+        "steps": [
+            {"cmd": "review",   "args": ["{slug}"]},
+            {"cmd": "complete", "args": ["auto"]},
+        ],
+    },
+    "onboard": {
+        "description": "Scan project manifests for skills, then show the next task",
+        "steps": [
+            {"cmd": "skill", "args": ["scan", "--apply"]},
+            {"cmd": "next",  "args": []},
+        ],
+    },
+}
+
+
+def _extract_slug_from_output(output: str) -> "str | None":
+    """Extract a task slug from keeli command output.
+
+    Looks for patterns like: docs/tasks/my-task.md
+    """
+    m = re.search(r"docs/tasks/([a-z0-9-]+)\.md", output)
+    return m.group(1) if m else None
+
+
+def _run_chain_inline(
+    steps_raw: list[str],
+    *,
+    dry_run: bool = False,
+    vars_: "dict[str, str] | None" = None,
+) -> None:
+    """Execute an ordered list of keeli steps given as 'cmd:arg' strings.
+
+    The task slug produced by each step is automatically propagated to
+    the next step whenever that step uses the sentinel value ``auto``.
+    Errors in any step halt the chain by default.
+    """
+    vars_ = vars_ or {}
+    context_slug: "str | None" = None
+
+    # Parse raw step strings into dicts
+    steps: list[dict] = []
+    for raw in steps_raw:
+        if ":" in raw:
+            cmd_part, rest = raw.split(":", 1)
+            step_args = [rest.strip()] if rest.strip() else []
+        else:
+            cmd_part = raw.strip()
+            step_args = []
+        steps.append({"cmd": cmd_part.strip(), "args": step_args})
+
+    print(f"\n\u26d3  Chain: {len(steps)} step(s)\n")
+
+    for i, step in enumerate(steps, 1):
+        resolved_args: list[str] = []
+        for a in step["args"]:
+            if a == "auto" and context_slug:
+                a = context_slug
+            for k, v in vars_.items():
+                a = a.replace(f"{{{k}}}", v)
+            resolved_args.append(a)
+
+        cmd_display = ("keeli " + step["cmd"] + " " + " ".join(resolved_args)).strip()
+        print(f"  \u25b6  Step {i}/{len(steps)}: {cmd_display}")
+
+        if dry_run:
+            print(f"     [dry-run] execution skipped\n")
+            continue
+
+        old_argv = sys.argv
+        buf: "__import__('io').StringIO" = __import__("io").StringIO()
+        try:
+            sys.argv = ["keeli", step["cmd"]] + resolved_args
+            with contextlib.redirect_stdout(buf):
+                main()
+        except SystemExit:
+            pass
+        except Exception as exc:
+            print(f"  \u274c Step {i} failed: {exc}")
+            print(f"     Halting chain.")
+            return
+        finally:
+            sys.argv = old_argv
+
+        output = buf.getvalue()
+        print(output, end="")
+
+        # Propagate the task slug to subsequent 'auto' steps
+        extracted = _extract_slug_from_output(output)
+        if extracted:
+            context_slug = extracted
+
+    if not dry_run:
+        print(f"\n\u2705 Chain complete ({len(steps)} step(s)).")
+    else:
+        print(f"\n  [dry-run] {len(steps)} step(s) previewed. Remove --dry-run to execute.")
+
+
+def _run_chain_from_file(chain_file: Path, *, vars_: "dict[str, str]", dry_run: bool) -> None:
+    """Run a chain defined in a YAML file. Requires pyyaml."""
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        print("\u274c pyyaml required for chain files: pip install pyyaml")
+        print("   Alternatively use inline syntax: keeli chain \"cmd:arg\" ...")
+        return
+    try:
+        data = yaml.safe_load(chain_file.read_text())
+    except Exception as exc:
+        print(f"\u274c Failed to parse chain file '{chain_file}': {exc}")
+        return
+    steps_raw: list[str] = []
+    for step in data.get("steps", []):
+        cmd = step.get("cmd", "")
+        raw_args = [str(a) for a in step.get("args", [])]
+        # Apply variable substitution
+        subst_args = [a for a in raw_args]
+        for k, v in vars_.items():
+            subst_args = [a.replace(f"{{{k}}}", v) for a in subst_args]
+        steps_raw.append(f"{cmd}:{' '.join(subst_args)}" if subst_args else cmd)
+    _run_chain_inline(steps_raw, dry_run=dry_run, vars_=vars_)
+
+
 # ── Personas helpers ──────────────────────────────────────────────────────────
+
 
 DEFAULT_PERSONAS = ["po", "architect", "developer", "security", "author"]
 
@@ -605,8 +982,13 @@ def _get_next_task() -> tuple[Path | None, str | None]:
     if not tasks_dir.exists():
         return None, None
 
+    # Epics and stories are planning artifacts — not leaf implementation tasks.
+    _SKIP_PREFIXES = ("epic-", "story-")
+
     # First: any In Progress tasks (resume those first)
     for tf in sorted(tasks_dir.glob("*.md")):
+        if tf.name.startswith(_SKIP_PREFIXES):
+            continue
         text = tf.read_text()
         status = _parse_task_field(text, "Status")
         if status.lower() == "in progress":
@@ -616,6 +998,8 @@ def _get_next_task() -> tuple[Path | None, str | None]:
     backlog: list[tuple[str, str, Path]] = []
     for tf in sorted(tasks_dir.glob("*.md")):
         if tf.name == ".gitkeep":
+            continue
+        if tf.name.startswith(_SKIP_PREFIXES):
             continue
         text = tf.read_text()
         status = _parse_task_field(text, "Status")
@@ -673,6 +1057,27 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -
 
 def cmd_progress(args: argparse.Namespace) -> None:
     """Mark a task as In Progress."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    errors = _validate_transition(task_file, [
+        ("Objective section is empty or contains only a placeholder comment",
+         _section_is_filled("## Objective")),
+    ])
+    if errors:
+        print("❌ Cannot move to In Progress — fix these issues first:")
+        for e in errors:
+            print(f"   • {e}")
+        return
+
     _transition_task(args, "In Progress", "started")
 
 
@@ -700,6 +1105,20 @@ def cmd_review(args: argparse.Namespace) -> None:
 
     if current.lower() == "review":
         print(f"⚠️  {task_file} is already In Review.")
+        return
+
+    errors = _validate_transition(task_file, [
+        ("Checklist has unchecked items — tick all boxes (or run `keeli tick`) before requesting review",
+         lambda t: not any(
+             line.strip().startswith("- [ ]")
+             and not _is_gate_item(line)
+             for line in t.splitlines()
+         )),
+    ])
+    if errors:
+        print("❌ Cannot move to Review — fix these issues first:")
+        for e in errors:
+            print(f"   • {e}")
         return
 
     text = _update_task_field(text, "Status", "Review")
@@ -904,9 +1323,19 @@ def cmd_skill(args: argparse.Namespace) -> None:
         persona = "" if persona.strip().lower() in ("global", "") else persona.strip().lower()
         constraint = getattr(args, "constraint", None)
         if constraint is None:
-            print("  Tip: constraint = the specific VERSION + RULES your project chose.")
-            print("       Generic names alone add no value. Leave blank to add later.")
-            constraint = _prompt("Constraint / decision (blank to skip)", default="")
+            # Interactive — require non-empty (@architect must document the why)
+            print("  \u26a0\ufe0f  Constraint is REQUIRED — @architect must document the why and how.")
+            print("     Include: version pin, project-specific rules, key decisions.")
+            print("     Example: '3.12+; Pydantic v2 strict; async/await throughout'")
+            while True:
+                constraint = _prompt("Constraint (required)", default="")
+                if constraint.strip():
+                    break
+                print("  \u274c Cannot be empty. This teaches the LLM your project's dialect.")
+        elif not constraint.strip():
+            print("\u274c --constraint / -c cannot be empty. @architect must document why and how.")
+            print("   Example: -c '3.12+; async/await throughout; Pydantic v2 strictly'")
+            return
         skills = _read_skills()
         if any(n2.lower() == name.lower() and t2 == skill_type and p2 == persona
                for t2, n2, p2, _ in skills):
@@ -936,8 +1365,73 @@ def cmd_skill(args: argparse.Namespace) -> None:
         print(f"\u2705 Removed skill: {name}")
         _append_log(f"@architect | Skill removed: {name}")
 
+    elif sub == "scan":
+        root = _find_project_root()
+        scan_path = getattr(args, "scan_path", None)
+        if scan_path:
+            root = Path(scan_path)
+        dry_run   = getattr(args, "dry_run", False)
+        apply_now = getattr(args, "apply",   False)
+
+        found = _scan_manifests(root)
+        if not found:
+            print(
+                "\u26a0\ufe0f  No recognised manifest files found.\n"
+                "   Supported: pyproject.toml  requirements*.txt  package.json\n"
+                "              go.mod  Cargo.toml  pom.xml  .python-version  .nvmrc"
+            )
+            return
+
+        print(f"\n\U0001f50d Scanned {root} \u2014 {len(found)} technology/package(s) detected\n")
+        print(f"  {'Type':<12} {'Name':<28} {'Version':<16} Source")
+        print("  " + "-" * 72)
+        for s in found:
+            print(f"  {s.skill_type:<12} {s.name:<28} {s.version or '?':<16} {s.source_file}")
+
+        if dry_run or not apply_now:
+            print(f"\n  Run with --apply to register these in docs/skills.md")
+            print(f"  @architect: you will be prompted for a constraint on each skill.")
+            return
+
+        # --apply: interactive constraint prompt per skill
+        existing      = _read_skills()
+        existing_keys = {n2.lower() for _, n2, _, _ in existing}
+
+        print(f"\n  @architect: Add a constraint for each detected skill.")
+        print(f"  Constraint = version pin + why you chose it + project-specific rules.")
+        print(f"  Press Enter to skip a skill. Type 'q' to stop.\n")
+        print("  " + "-" * 72)
+
+        added = 0
+        for s in found:
+            if s.name.lower() in existing_keys:
+                print(f"  \u23ed  [{s.skill_type}] {s.name}  \u2014 already registered, skipping")
+                continue
+            ver_hint = f"  (detected: {s.version})" if s.version else ""
+            print(f"\n  [{s.skill_type}] {s.name}{ver_hint}  from {s.source_file}")
+            if not sys.stdin.isatty():
+                print(f"  Non-interactive \u2014 skipping. Add manually: keeli skill add \"{s.name}\"")
+                continue
+            constraint = input("  Constraint (blank=skip, q=stop): ").strip()
+            if constraint.lower() == "q":
+                print("  Stopped. Skills added so far will be saved.")
+                break
+            if not constraint:
+                print("  Skipped.")
+                continue
+            existing.append((s.skill_type, s.name, "architect", constraint))
+            existing_keys.add(s.name.lower())
+            added += 1
+
+        if added:
+            _write_skills(existing)
+            print(f"\n\u2705 Added {added} skill(s) to docs/skills.md + updated copilot-instructions.md")
+            _append_log(f"@architect | Skill scan applied: {added} new skill(s) from manifest files")
+        else:
+            print(f"\n  No new skills added.")
+
     else:
-        print("Usage: keeli skill <add|list|remove|show>")
+        print("Usage: keeli skill <add|list|remove|show|scan>")
 
 
 # ---------------------------------------------------------------------------
@@ -1213,6 +1707,17 @@ def cmd_story(args: argparse.Namespace) -> None:
     goal   = getattr(args, "goal", None)   or _prompt("Goal (e.g. 'create a task')"        )
     reason = getattr(args, "reason", None) or _prompt("Reason (e.g. 'track my work')", default="...")
 
+    # Build acceptance criteria block from --ac flags or placeholder comments
+    raw_acs: list[str] = getattr(args, "ac", None) or []
+    if raw_acs:
+        criteria_lines = "\n".join(f"- [ ] {ac}" for ac in raw_acs)
+    else:
+        criteria_lines = (
+            "- [ ] <!-- Criterion 1 -->\n"
+            "- [ ] <!-- Criterion 2 -->\n"
+            "- [ ] <!-- Criterion 3 -->"
+        )
+
     story_id = _allocate_id(
         "story", args.title, f"story-{slug}", priority=priority,
         epic=epic if epic != "None" else None,
@@ -1227,6 +1732,7 @@ def cmd_story(args: argparse.Namespace) -> None:
         role=role,
         goal=goal,
         reason=reason,
+        criteria=criteria_lines,
     )
     task_file.write_text(content)
     print(f"📖 Created story: {task_file} [{story_id}]")
@@ -1295,6 +1801,20 @@ def cmd_complete(args: argparse.Namespace) -> None:
         print(f"⚠️  {task_file} is already marked as Completed.")
         return
 
+    errors = _validate_transition(task_file, [
+        ("Checklist has unchecked items — tick all boxes (or run `keeli tick`) before marking complete",
+         lambda t: not any(
+             line.strip().startswith("- [ ]")
+             and not _is_gate_item(line)
+             for line in t.splitlines()
+         )),
+    ])
+    if errors:
+        print("❌ Cannot mark as Completed — fix these issues first:")
+        for e in errors:
+            print(f"   • {e}")
+        return
+
     now = _now_iso()
     task_id = _parse_task_field(text, "ID")
 
@@ -1328,6 +1848,87 @@ def cmd_complete(args: argparse.Namespace) -> None:
         print(f"   → {next_path}")
     else:
         print("\n🎉 All tasks are complete. Awaiting new instructions.")
+
+
+def cmd_ensure(args: argparse.Namespace) -> None:
+    """Check for an existing task matching *description*; optionally create one.
+
+    If several files contain a slug match, they are listed and nothing else is done.
+    Without -y/--yes the user is prompted before creation; --no suppresses creation.
+    """
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    desc = args.title
+    slug = _slugify(desc)
+    matches = [tf for tf in tasks_dir.glob("*.md") if slug in tf.stem]
+    if matches:
+        print("✅ Found existing task(s):")
+        for tf in matches:
+            print(f"  - {tf.name}")
+        return
+
+    # no match found
+    if args.no:
+        return
+    if args.yes:
+        create = True
+    else:
+        resp = _prompt("No task found. Create one?", default="Y", choices=["Y", "n"])
+        create = resp.lower().startswith("y")
+    if not create:
+        print("ok, nothing created")
+        return
+
+    # delegate to cmd_start with objective defaulting to description
+    new_args = argparse.Namespace(
+        task_name=desc,
+        context=None,
+        objective=desc,
+        priority=None,
+        depends_on=None,
+        keeli=None,
+    )
+    cmd_start(new_args)
+
+
+def cmd_tick(args: argparse.Namespace) -> None:
+    """Tick all mechanical checklist items; leave @security/@author gate items untouched."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    lines = task_file.read_text().splitlines()
+    updated, count = [], 0
+    for line in lines:
+        if line.strip().startswith("- [ ]") and not _is_gate_item(line):
+            updated.append(line.replace("- [ ]", "- [x]", 1))
+            count += 1
+        else:
+            updated.append(line)
+
+    task_file.write_text("\n".join(updated))
+    if count:
+        print(f"✅ Ticked {count} item(s) in {task_file}")
+        # Gate items remaining?
+        gate_left = sum(
+            1 for l in updated
+            if l.strip().startswith("- [ ]") and _is_gate_item(l)
+        )
+        if gate_left:
+            print(f"   ⚠️  {gate_left} gate item(s) still require human sign-off (@security/@author)")
+    else:
+        print(f"ℹ️  No mechanical items to tick in {task_file}")
 
 
 def cmd_next(args: argparse.Namespace) -> None:
@@ -2102,6 +2703,97 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     print(summary)
 
 
+def cmd_chain(args: argparse.Namespace) -> None:
+    """Execute a sequential pipeline of keeli commands (tool chaining).
+
+    Inline usage::
+
+        keeli chain "start:My Task" "analyze:auto" "progress:auto"
+
+    Named chain::
+
+        keeli chain run new-task --var title="My Task"
+
+    The keyword ``auto`` in any step argument is replaced by the task slug
+    produced by the previous step.
+    """
+    steps_raw: list[str] = getattr(args, "steps", []) or []
+    dry_run:   bool      = getattr(args, "dry_run", False)
+    vars_raw:  list[str] = getattr(args, "var", None) or []
+
+    def _parse_vars(raw: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for item in raw:
+            if "=" in item:
+                k, v = item.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    if not steps_raw:
+        print("Usage:")
+        print("  keeli chain \"start:My Task\" \"analyze:auto\" \"progress:auto\"  # inline")
+        print("  keeli chain list                                                  # show chains")
+        print("  keeli chain run <name> [--var key=value ...]                     # named chain")
+        print("  Add --dry-run to preview without executing.\n")
+        print("Inline step format:  cmd:arg   (use 'auto' = slug from previous step)")
+        return
+
+    first = steps_raw[0].strip()
+
+    # ── list ──────────────────────────────────────────────────────────────────
+    if first == "list":
+        chain_dir = Path(".keeli/chains")
+        print("\n\u26d3  Built-in chains:\n")
+        print(f"  {'Name':<22} Description")
+        print("  " + "-" * 66)
+        for name, defn in BUILTIN_CHAINS.items():
+            steps_preview = " \u2192 ".join(s["cmd"] for s in defn["steps"])
+            print(f"  {name:<22} {defn['description']}")
+            print(f"  {'':22} Steps: {steps_preview}")
+        if chain_dir.exists():
+            project_chains = sorted(
+                list(chain_dir.glob("*.yaml")) + list(chain_dir.glob("*.yml"))
+            )
+            if project_chains:
+                print(f"\n  Project chains ({chain_dir}):\n")
+                for cf in project_chains:
+                    print(f"  {cf.stem}")
+        print()
+        return
+
+    # ── run <name> [--var ...] ─────────────────────────────────────────────────
+    if first == "run":
+        chain_name = steps_raw[1] if len(steps_raw) > 1 else None
+        if not chain_name:
+            print("\u274c Usage: keeli chain run <chain-name>")
+            print(f"   Available: {', '.join(BUILTIN_CHAINS)}")
+            return
+        vars_ = _parse_vars(vars_raw)
+        # Built-in chain
+        if chain_name in BUILTIN_CHAINS:
+            defn = BUILTIN_CHAINS[chain_name]
+            step_strs = [
+                f"{s['cmd']}:{' '.join(s['args'])}" if s["args"] else s["cmd"]
+                for s in defn["steps"]
+            ]
+            for k, v in vars_.items():
+                step_strs = [s.replace(f"{{{k}}}", v) for s in step_strs]
+            _run_chain_inline(step_strs, dry_run=dry_run, vars_=vars_)
+            return
+        # Project chain file
+        for ext in (".yaml", ".yml"):
+            chain_file = Path(f".keeli/chains/{chain_name}{ext}")
+            if chain_file.exists():
+                _run_chain_from_file(chain_file, vars_=vars_, dry_run=dry_run)
+                return
+        print(f"\u274c Unknown chain '{chain_name}'. Run `keeli chain list` to see available chains.")
+        return
+
+    # ── inline pipeline ────────────────────────────────────────────────────────
+    vars_ = _parse_vars(vars_raw)
+    _run_chain_inline(steps_raw, dry_run=dry_run, vars_=vars_)
+
+
 def cmd_update(args: argparse.Namespace) -> None:
     """Update copilot-instructions.md to the latest template version.
 
@@ -2185,6 +2877,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
     p_complete.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona completing the task.")
 
+    # tick
+    p_tick = sub.add_parser("tick", help="Tick all mechanical checklist items (skips @security/@author gate items).")
+    p_tick.add_argument("task_name", help="Task title or slug.")
+    p_tick.set_defaults(func=cmd_tick)
+
+    # ensure
+    p_ensure = sub.add_parser("ensure", help="Verify a task exists or offer to create it.")
+    p_ensure.add_argument("title", help="Short description of the work or problem.")
+    p_ensure.add_argument("-y", "--yes", action="store_true", help="Automatically create the task if it does not exist.")
+    p_ensure.add_argument("-n", "--no", action="store_true", help="Do not create a task if one is not found.")
+    p_ensure.add_argument("-o", "--objective", help="Objective text to use when auto-creating a task.")
+    p_ensure.add_argument("-p", "--priority", choices=["P0","P1","P2"], default="P1", help="Priority when auto-creating a task.")
+    p_ensure.set_defaults(func=cmd_ensure)
+
     # archive
     p_archive = sub.add_parser("archive", help="Move a completed task to docs/tasks/archive/.")
     p_archive.add_argument("task_name", help="Task title or slug to archive.")
@@ -2264,6 +2970,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_story.add_argument("--role", help="The user role (e.g. 'developer', 'admin'). Prompted if omitted.")
     p_story.add_argument("--goal", help="What the user wants to do. Prompted if omitted.")
     p_story.add_argument("--reason", help="Why the user wants it. Prompted if omitted.")
+    p_story.add_argument("--ac", action="append", metavar="CRITERION",
+                         help="Acceptance criterion (repeatable). E.g. --ac 'Can add a todo' --ac 'Persists to disk'.")
     p_story.add_argument("-f", "--force", action="store_true", help="Overwrite existing story file.")
 
     # epic
@@ -2290,6 +2998,23 @@ def build_parser() -> argparse.ArgumentParser:
     # skill remove
     p_skill_rm = skill_sub.add_parser("remove", help="Remove a registered skill.")
     p_skill_rm.add_argument("skill_name", nargs="?", default=None, help="Skill name to remove. Prompted if omitted.")
+    # skill scan
+    p_skill_scan = skill_sub.add_parser(
+        "scan",
+        help="Scan manifest files (pyproject.toml, requirements.txt, package.json, etc.) to discover project technologies."
+    )
+    p_skill_scan.add_argument(
+        "scan_path", nargs="?", default=None,
+        help="Root directory to scan (default: project root)."
+    )
+    p_skill_scan.add_argument(
+        "--apply", action="store_true",
+        help="Interactively register discovered skills with @architect constraints into docs/skills.md."
+    )
+    p_skill_scan.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print detected technologies without writing or prompting (default when --apply is omitted)."
+    )
 
     # stack
     p_stack = sub.add_parser("stack", help="Apply an opinionated stack preset interactively.")
@@ -2348,6 +3073,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_digest.add_argument("--budget", type=int, default=2000,
                           help="Token budget (default: 2000).")
 
+    # chain
+    p_chain = sub.add_parser(
+        "chain",
+        help="Run a sequential pipeline of keeli commands (tool chaining).",
+        description=(
+            "Execute multiple keeli commands in order, automatically propagating "
+            "the output task slug between steps via the 'auto' sentinel.\n\n"
+            "Examples:\n"
+            "  keeli chain \"start:My Task\" \"analyze:auto\" \"progress:auto\"\n"
+            "  keeli chain list\n"
+            "  keeli chain run new-task --var title=\"My Task\"\n"
+            "  keeli chain run close-task --var slug=my-task"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_chain.add_argument(
+        "steps", nargs="*", metavar="STEP",
+        help="Inline steps as 'cmd:arg'. Use 'list' to list chains or 'run <name>' for named chains."
+    )
+    p_chain.add_argument(
+        "--var", action="append", metavar="KEY=VALUE",
+        help="Variable substitution for named chains (repeatable: --var title=\"Foo\" --var slug=bar)."
+    )
+    p_chain.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Print the resolved steps without executing them."
+    )
+
     # mcp
     p_mcp = sub.add_parser("mcp", help="Start the Keeli MCP server.")
     p_mcp.add_argument("--sse", action="store_true", help="Run over HTTP/SSE instead of stdio.")
@@ -2382,6 +3135,7 @@ def main() -> None:
         "init": cmd_init,
         "start": cmd_start,
         "complete": cmd_complete,
+        "tick": cmd_tick,
         "archive": cmd_archive,
         "next": cmd_next,
         "list": cmd_list,
@@ -2399,6 +3153,7 @@ def main() -> None:
         "feature": cmd_feature,
         "epic": cmd_epic,
         "story": cmd_story,
+        "ensure": cmd_ensure,
         "skill": cmd_skill,
         "stack": cmd_stack,
         "persona": cmd_persona,
@@ -2407,6 +3162,7 @@ def main() -> None:
         "history": cmd_history,
         "digest": cmd_digest,
         "mcp": cmd_mcp,
+        "chain": cmd_chain,
     }
 
     handler = dispatch.get(args.command)

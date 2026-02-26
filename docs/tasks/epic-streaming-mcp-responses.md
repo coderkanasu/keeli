@@ -125,3 +125,9 @@ digest streaming third, cancellation last — each story is independently shippa
 context into the tool handler to emit notifications. @architect to validate the
 correct emission pattern (direct server.send vs request-scoped context) before S-1
 implementation begins.
+
+**S-4 Decision Needed (2026-02-25):** S-1, S-2, S-3 fully implemented and verified
+(48 tests). S-4 (cancellation — `CancelledNotification` on mid-stream abort) was
+deferred. @po + @architect must decide: (a) implement S-4 now, (b) defer to a
+separate epic, or (c) close as out-of-scope for v0.4. Until this decision is made
+the epic remains **In Progress** and `@security` sign-off is blocked.
