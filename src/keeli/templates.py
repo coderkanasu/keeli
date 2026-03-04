@@ -349,15 +349,115 @@ TASK_TEMPLATE = """# Task: {title}
 **Context:** {context_note}
 **Persona:** {persona}
 
-## Objective
-{objective}
-<!-- @architect: describe what needs to be done and why -->
+## Handshakes
+_Each persona signs off by checking the row and adding a summary._
 
-## Checklist
-{checklist}
+| Persona | Status | Signed | Summary |
+|---------|--------|--------|---------|
+| @po | ☐ pending | — | Waiting: user story + ACs + NFRs |
+| @architect | ☐ pending | — | Waiting: @po sign-off |
+| @developer | ☐ pending | — | Waiting: @architect design |
+| @security | ☐ pending | — | Waiting: @developer code review |
+| @author | ☐ pending | — | Waiting: @security sign-off |
+
+---
+
+## @po (Goals & Acceptance Criteria)
+_User story, acceptance criteria, and success metrics._
+
+### User Story
+<!-- As a [user role], I want [feature] so that [business value/user benefit]. -->
+
+### Acceptance Criteria
+<!-- At least 3 measurable, testable criteria. Every AC must be verifiable by @developer and @security. -->
+
+### Non-Functional Requirements
+<!-- Performance targets, availability, scalability, data retention, latency, throughput, or security constraints. -->
+<!-- STOP: if any NFR is unknown, block @architect from proceeding until @po answers. -->
+
+---
+
+## @architect (Design & Planning)
+_Interfaces, architecture decisions, and implementation plan._
+
+### Design Summary
+<!-- Describe the high-level design: data flow, key components, technology choices, assumptions. -->
+<!-- Reference any ADRs in docs/decision.md (e.g. "per ADR-003, we use async/await"). -->
+
+### Implementation Plan
+<!-- Numbered steps that @developer will follow exactly. No redesign or shortcuts. -->
+<!-- Example:
+1. Create UserRepository interface
+2. Implement in-memory UserRepository for testing
+3. Write UserService with dependency injection
+4. Add HTTP routes in UserController
+5. Wire up authentication middleware
+-->
+
+### Test Strategy
+<!-- What @developer must test. Example:
+- Unit tests: repository + service layers (mock HTTP)
+- Integration tests: with real database
+- E2E tests: full API flow with auth
+- Security: SQL injection, XSS, CSRF vectors tested
+-->
+
+---
+
+## @developer (Implementation)
+_TDD: red → green → refactor. Follow @architect's numbered plan exactly._
+
+### Tests
+<!-- Write tests first. Implement second. Show test output. -->
+
+### Implementation
+<!-- Source code and any config/env changes. Locked after @developer signs handshake. -->
+
+### Validation
+- [ ] All tests pass
+- [ ] No hardcoded values
+- [ ] No commented-out code or TODOs
+- [ ] Code follows architecture from @architect section
+- [ ] Ready for @security review
+
+---
+
+## @security (Findings & Issues)
+_Threat model, injection vectors, auth/authz, secrets, audit logging._
+
+### Checklist
+- [ ] Threat model: what are the attack surfaces?
+- [ ] All inputs validated at boundary; outputs sanitised
+- [ ] Zero hardcoded secrets, credentials, PII
+- [ ] Auth/authz boundaries not widened; least-privilege preserved
+- [ ] OWASP Top-10 check: new endpoints, data flows, file uploads
+- [ ] Third-party deps: CVE audit, licence check
+- [ ] Audit logging: sensitive operations logged
+- [ ] Rate limiting & abuse vectors considered
+
+### Findings
+<!-- Any issues found, severity, and remediation. Blocked until resolved. -->
+
+---
+
+## @author (Documentation)
+_User-facing docs, examples, API reference._
+
+### Documentation
+<!-- Where docs were written/changed. Examples must be working and tested. -->
+<!-- No implementation internals; no references to unreleased features. -->
+<!-- Headings, paragraphs short; jargon explained. -->
+
+### WCAG 2.1 AA
+- [ ] Alt text for images
+- [ ] Colour contrast ≥4.5:1
+- [ ] Keyboard navigation tested
+- [ ] No flashing content
+
+---
 
 ## Notes
-<!-- @developer: add implementation notes, questions, blockers -->
+<!-- Implementation notes, blockers, decisions made during work. -->
 """
 
 # Per-persona checklists injected into TASK_TEMPLATE

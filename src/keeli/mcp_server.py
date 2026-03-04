@@ -552,6 +552,40 @@ async def list_tools() -> list[Tool]:
                 "required": ["steps"],
             },
         ),
+
+        Tool(
+            name="keeli_prompts_list",
+            description="Retrieve the latest curated custom prompts with metadata.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "persona": {
+                        "type": "string",
+                        "description": "Filter by persona (architect, developer, security, author, po). Omit to see all.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of prompts to return.",
+                        "default": 10,
+                    }
+                },
+            },
+        ),
+
+        Tool(
+            name="keeli_prompts_read",
+            description="Fetch the full content of a custom prompt by slug.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "The slug of the prompt to fetch (e.g., 'architect-design-principles')."
+                    }
+                },
+                "required": ["slug"],
+            },
+        ),
     ]
 
 @app.call_tool()
@@ -1073,6 +1107,71 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         output = buf.getvalue()
         await _mcp_log("info", f"[chain] Pipeline complete")
         return [TextContent(type="text", text=_with_next(output or "Chain executed (no output).", "keeli_chain", {}))]
+
+    elif name == "keeli_prompts_list":
+        from keeli.main import _load_all_prompts, _filter_prompts_by_persona
+        
+        persona_filter = arguments.get("persona")
+        limit = arguments.get("limit", 10)
+        
+        prompts = _load_all_prompts()
+        
+        if persona_filter:
+            prompts = _filter_prompts_by_persona(prompts, persona_filter)
+        
+        # Sort by priority and creation date, limit results
+        sorted_prompts = sorted(
+            prompts.items(),
+            key=lambda x: (
+                {"high": 0, "medium": 1, "low": 2}.get(x[1]["metadata"].get("priority", "low"), 3),
+                x[1]["metadata"].get("created", ""),
+            )
+        )
+        
+        limited = dict(sorted_prompts[:limit])
+        
+        if not limited:
+            return [TextContent(type="text", text="No custom prompts found.")]
+        
+        output = f"Found {len(limited)} custom prompt(s):\n\n"
+        for slug, data in limited.items():
+            meta = data["metadata"]
+            output += f"• **{slug}** (persona: {meta.get('persona', '?')}, applies: {meta.get('applies_to', '?')})\n"
+        
+        await _mcp_log("info", f"Listed {len(limited)} prompt(s)")
+        return [TextContent(type="text", text=_with_next(output, "keeli_prompts_list", {}))]
+
+    elif name == "keeli_prompts_read":
+        from keeli.main import _load_all_prompts
+        
+        slug = arguments.get("slug")
+        if not slug:
+            return [TextContent(type="text", text="Error: slug is required.")]
+        
+        prompts = _load_all_prompts()
+        
+        if slug not in prompts:
+            return [TextContent(type="text", text=f"Error: Prompt '{slug}' not found.")]
+        
+        data = prompts[slug]
+        meta = data["metadata"]
+        body = data["body"]
+        
+        output = f"""# Prompt: {slug}
+
+**Persona:** {meta.get('persona', '?')}
+**Applies to:** {meta.get('applies_to', '?')}
+**Priority:** {meta.get('priority', '?')}
+**Created:** {meta.get('created', '?')}
+**Location:** {data['path']}
+
+## Content
+
+{body}
+"""
+        
+        await _mcp_log("info", f"Read prompt: {slug}")
+        return [TextContent(type="text", text=_with_next(output, "keeli_prompts_read", {"slug": slug}))]
 
     else:
         return [TextContent(type="text", text=f"Error: Unknown tool {name}")]

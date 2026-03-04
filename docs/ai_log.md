@@ -94,3 +94,4 @@
 2026-02-26T03:43:10Z | [@developer] Friction bugs fixed: project.md blank-slate template (no Java/React defaults); transition guards (progress/review/complete); keeli_progress MCP tool added; 165/165 pass
 2026-02-26T16:38:17Z | [@developer] Friction fixes: story grammar (so that I can), --ac flag for acceptance criteria, project-2 todo-cli validated (20/20 tests, full keeli lifecycle); 169/169 pass
 2026-02-26T18:02:26Z | [@architect/@developer] ADR-007: keeli tick cmd + gate-item guard + epic/story skip in next; 3 friction fixes via TDD (8 new tests); 177/177 pass
+2026-03-04T03:08:27Z | @developer | Prompt added: security-test

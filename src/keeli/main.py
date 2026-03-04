@@ -199,6 +199,33 @@ def _section_is_filled(section_header: str) -> Callable[[str], bool]:
     return _check
 
 
+def _handshake_signed(persona: str) -> Callable[[str], bool]:
+    """Return a predicate: True if *persona* has signed the handshake.
+    
+    Checks the ## Handshakes table for a row like:
+      | @po | ☑ signed | 2026-03-03T12:34:56Z | User story complete |
+    
+    Signed status is ☑ or [x] (checked).
+    """
+    def _check(text: str) -> bool:
+        lines = text.splitlines()
+        in_handshakes = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("## Handshakes"):
+                in_handshakes = True
+                continue
+            if in_handshakes:
+                if line.startswith("## "):
+                    # Next section reached without finding the persona row
+                    return False
+                if f"| @{persona} " in line or f"| @{persona}|" in line:
+                    # Found the row; check if it has ☑ or [x]
+                    return "☑" in line or "[x]" in line.split("|")[2]
+        return False
+    
+    return _check
+
+
 def _validate_transition(
     path: Path,
     rules: list[tuple[str, Callable[[str], bool]]],
@@ -867,8 +894,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     priority = getattr(args, "priority", None) or _prompt(
         "Task priority", default="P1", choices=["P0", "P1", "P2"]
     )
-    persona = getattr(args, "keeli", "architect") or "architect"
-    checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
+    persona = getattr(args, "persona", None) or "architect"
     depends_on = getattr(args, "depends_on", None) or "None"
     epic = getattr(args, "epic", None) or "None"
     story = getattr(args, "story", None) or "None"
@@ -888,13 +914,9 @@ def cmd_start(args: argparse.Namespace) -> None:
         epic=epic,
         story=story,
         persona=f"@{persona}",
-        checklist=checklist,
-        objective=objective_text,
     )
     task_file.write_text(content)
-    print(f"✅ Created task: {task_file} [{task_id}] [@{persona} checklist]")
-    if objective_text:
-        print(f"   → Objective set ({len(objective_text.splitlines())} line(s))")
+    print(f"✅ Created task: {task_file} [{task_id}]")
 
     # Auto-log the event
     _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}", task_id=task_id)
@@ -1069,8 +1091,12 @@ def cmd_progress(args: argparse.Namespace) -> None:
         return
 
     errors = _validate_transition(task_file, [
-        ("Objective section is empty or contains only a placeholder comment",
-         _section_is_filled("## Objective")),
+        ("@po handshake must be signed before @architect can start design",
+         _handshake_signed("po")),
+        ("@po (Goals & Acceptance Criteria) section must be filled",
+         _section_is_filled("## @po (Goals & Acceptance Criteria)")),
+        ("@architect (Design & Planning) section must be filled with at least a Design Summary",
+         _section_is_filled("## @architect (Design & Planning)")),
     ])
     if errors:
         print("❌ Cannot move to In Progress — fix these issues first:")
@@ -2106,6 +2132,69 @@ def cmd_archive(args: argparse.Namespace) -> None:
     _append_log(f"@{persona} | Task archived: {args.task_name} → {dest_file}", task_id=task_id)
 
 
+def cmd_handoff(args: argparse.Namespace) -> None:
+    """Sign off on a task handshake row as a specific persona.
+    
+    Updates the ## Handshakes table to mark a persona as signed with a timestamp.
+    """
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return
+
+    slug = _slugify(args.task_name)
+    task_file = _resolve_task_file(tasks_dir, slug)
+
+    if task_file is None:
+        print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    persona = args.persona
+    message = getattr(args, "message", None) or ""
+    text = task_file.read_text()
+    lines = text.splitlines()
+
+    # Find and update the handshakes table row for this persona
+    updated = False
+    new_lines: list[str] = []
+    in_handshakes = False
+    
+    for line in lines:
+        if line.strip().startswith("## Handshakes"):
+            in_handshakes = True
+            new_lines.append(line)
+        elif in_handshakes and line.startswith("## "):
+            # Left the handshakes section
+            in_handshakes = False
+            new_lines.append(line)
+        elif in_handshakes and f"| @{persona} " in line:
+            # Found the persona row — update it
+            parts = [p.strip() for p in line.split("|")]
+            # Format: | @persona | status | timestamp | summary |
+            if len(parts) >= 5:
+                parts[2] = "☑ signed"  # status column
+                parts[3] = _now_iso()   # timestamp column
+                parts[4] = message or "Signed off"  # summary column
+                new_lines.append("|" + "|".join(f" {p} " for p in parts) + "|")
+                updated = True
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    if not updated:
+        print(f"❌ Could not find handshake row for @{persona} in {task_file}")
+        return
+
+    task_file.write_text("\n".join(new_lines))
+    print(f"✅ Handoff signed: @{persona} → {task_file}")
+    if message:
+        print(f"   Message: {message}")
+
+    _append_log(f"@{persona} | Handshake signed: {args.task_name}", task_id=_parse_task_field(text, "ID"))
+
+
+
 def cmd_resume(args: argparse.Namespace) -> None:
     """Dump project context for a new AI session.
 
@@ -2842,6 +2931,228 @@ def cmd_update(args: argparse.Namespace) -> None:
     print(f"📝 User files (project.md, decision.md, tasks, log) preserved.")
 
 
+# ── Custom Prompts ─────────────────────────────────────────────────────────
+
+def _load_all_prompts() -> dict:
+    """Load all custom prompts from docs/prompts/ and .keeli/prompts/.
+    
+    Returns a dict: {slug: {"path": Path, "metadata": dict, "body": str}}
+    """
+    prompts = {}
+    
+    # Load from both user-facing and internal directories
+    for base_dir in [Path("docs/prompts"), Path(".keeli/prompts")]:
+        if not base_dir.exists():
+            continue
+        
+        for md_file in base_dir.glob("*.md"):
+            slug = md_file.stem
+            content = md_file.read_text()
+            metadata, body = _parse_prompt_metadata(content)
+            
+            prompts[slug] = {
+                "path": md_file,
+                "metadata": metadata,
+                "body": body,
+            }
+    
+    return prompts
+
+
+def _parse_prompt_metadata(content: str) -> tuple[dict, str]:
+    """Extract YAML-like frontmatter from a prompt file.
+    
+    Expected format:
+    ```
+    ---
+    persona: architect
+    applies_to: all
+    priority: high
+    ---
+    Prompt body here...
+    ```
+    
+    Returns: (metadata_dict, body_str)
+    """
+    lines = content.strip().split("\n")
+    
+    # If no frontmatter, return empty metadata
+    if not lines or lines[0] != "---":
+        return {}, content
+    
+    # Find closing ---
+    end_idx = None
+    for i, line in enumerate(lines[1:], start=1):
+        if line == "---":
+            end_idx = i
+            break
+    
+    if end_idx is None:
+        return {}, content
+    
+    metadata = {}
+    for line in lines[1:end_idx]:
+        if ":" in line:
+            key, val = line.split(":", 1)
+            metadata[key.strip()] = val.strip()
+    
+    body = "\n".join(lines[end_idx + 1:]).strip()
+    return metadata, body
+
+
+def _filter_prompts_by_persona(prompts: dict, persona: str) -> dict:
+    """Filter prompts applicable to a specific persona."""
+    filtered = {}
+    for slug, data in prompts.items():
+        meta = data.get("metadata", {})
+        prompt_persona = meta.get("persona", "").lower()
+        applies_to = meta.get("applies_to", "all").lower()
+        
+        # Include if: persona matches OR applies_to is "all"
+        if prompt_persona == persona.lower() or applies_to == "all":
+            filtered[slug] = data
+    
+    return filtered
+
+
+def cmd_prompt(args: argparse.Namespace) -> None:
+    """Manage custom prompts for the project."""
+    action = getattr(args, "prompt_action", None)
+    
+    if action == "add":
+        cmd_prompt_add(args)
+    elif action == "list":
+        cmd_prompt_list(args)
+    elif action == "show":
+        cmd_prompt_show(args)
+    elif action == "remove":
+        cmd_prompt_remove(args)
+    else:
+        print("Usage: keeli prompt {add|list|show|remove}")
+
+
+def cmd_prompt_add(args: argparse.Namespace) -> None:
+    """Add a custom prompt from a file.
+    
+    Usage: keeli prompt add SLUG --file ./my-prompt.md
+                          [--persona PERSONA] [--applies-to APPLIES_TO]
+                          [--priority PRIORITY] [--force]
+    """
+    slug = args.slug
+    file_path = Path(args.file)
+    
+    if not file_path.exists():
+        print(f"❌ File not found: {file_path}")
+        return
+    
+    # Determine destination
+    dest_dir = Path("docs/prompts")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{slug}.md"
+    
+    if dest_path.exists() and not args.force:
+        print(f"❌ Prompt '{slug}' already exists. Use --force to overwrite.")
+        return
+    
+    # Read source content
+    content = file_path.read_text()
+    
+    # If not already frontmatter'd, add defaults
+    if not content.strip().startswith("---"):
+        persona = getattr(args, "persona", "").lower() or "developer"
+        applies_to = getattr(args, "applies_to", "").lower() or "all"
+        priority = getattr(args, "priority", "").lower() or "medium"
+        
+        frontmatter = f"""---
+persona: {persona}
+applies_to: {applies_to}
+priority: {priority}
+created: {_now_iso()}
+---
+
+{content}"""
+        content = frontmatter
+    
+    dest_path.write_text(content)
+    print(f"✅ Added prompt '{slug}' to {dest_path}")
+    _append_log(f"@developer | Prompt added: {slug}")
+
+
+def cmd_prompt_list(args: argparse.Namespace) -> None:
+    """List all custom prompts with metadata."""
+    prompts = _load_all_prompts()
+    
+    if not prompts:
+        print("No custom prompts registered yet.")
+        return
+    
+    print(f"\nFound {len(prompts)} custom prompt(s):\n")
+    for slug, data in sorted(prompts.items()):
+        meta = data["metadata"]
+        persona = meta.get("persona", "?")
+        applies_to = meta.get("applies_to", "?")
+        priority = meta.get("priority", "?")
+        created = meta.get("created", "?")
+        location = "user" if "docs/prompts" in str(data["path"]) else "internal"
+        
+        print(f"  • {slug}")
+        print(f"    Persona: {persona} | Applies: {applies_to} | Priority: {priority}")
+        print(f"    Created: {created} | Location: {location}")
+        print()
+
+
+def cmd_prompt_show(args: argparse.Namespace) -> None:
+    """Show the full content of a custom prompt."""
+    slug = args.slug
+    prompts = _load_all_prompts()
+    
+    if slug not in prompts:
+        print(f"❌ Prompt '{slug}' not found.")
+        return
+    
+    data = prompts[slug]
+    meta = data["metadata"]
+    body = data["body"]
+    
+    print(f"\n{'='*60}")
+    print(f"Prompt: {slug}")
+    print(f"{'='*60}")
+    print(f"Persona:    {meta.get('persona', '?')}")
+    print(f"Applies to: {meta.get('applies_to', '?')}")
+    print(f"Priority:   {meta.get('priority', '?')}")
+    print(f"Created:    {meta.get('created', '?')}")
+    print(f"Location:   {data['path']}")
+    print(f"{'='*60}\n")
+    print(body)
+    print(f"\n{'='*60}\n")
+
+
+def cmd_prompt_remove(args: argparse.Namespace) -> None:
+    """Remove a custom prompt."""
+    slug = args.slug
+    prompts = _load_all_prompts()
+    
+    if slug not in prompts:
+        print(f"❌ Prompt '{slug}' not found.")
+        return
+    
+    # Only allow removing from docs/prompts (user-facing)
+    path = prompts[slug]["path"]
+    if "docs/prompts" not in str(path):
+        print(f"❌ Cannot remove internal prompt. Location: {path}")
+        return
+    
+    if not args.force:
+        response = input(f"Remove '{slug}'? (yes/no): ").strip().lower()
+        if response != "yes":
+            print("Cancelled.")
+            return
+    
+    path.unlink()
+    print(f"✅ Removed prompt '{slug}'")
+    _append_log(f"@developer | Prompt removed: {slug}")
+
+
 # ── Argument parser ────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3106,6 +3417,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_mcp.add_argument("--sse", action="store_true", help="Run over HTTP/SSE instead of stdio.")
     p_mcp.add_argument("--port", type=int, default=8000, help="Port for SSE server (default: 8000).")
 
+    # prompt
+    p_prompt = sub.add_parser("prompt", help="Manage custom prompts for the project.")
+    prompt_sub = p_prompt.add_subparsers(dest="prompt_action", help="Prompt action")
+    
+    # prompt add
+    p_prompt_add = prompt_sub.add_parser("add", help="Add a custom prompt from a file.")
+    p_prompt_add.add_argument("slug", help="Short slug for the prompt (used as filename).")
+    p_prompt_add.add_argument("--file", required=True, help="Path to the .md prompt file to add.")
+    p_prompt_add.add_argument("--persona", help="Persona this prompt applies to (architect, developer, etc.). Prompted if omitted.")
+    p_prompt_add.add_argument("--applies-to", help="When prompt applies (all, domain, task-type, etc.). Prompted if omitted.")
+    p_prompt_add.add_argument("--priority", help="Prompt priority (high, medium, low). Prompted if omitted.")
+    p_prompt_add.add_argument("-f", "--force", action="store_true", help="Overwrite existing prompt.")
+    
+    # prompt list
+    prompt_sub.add_parser("list", help="List all custom prompts with metadata.")
+    
+    # prompt show
+    p_prompt_show = prompt_sub.add_parser("show", help="Show the full content of a custom prompt.")
+    p_prompt_show.add_argument("slug", help="Slug of the prompt to display.")
+    
+    # prompt remove
+    p_prompt_remove = prompt_sub.add_parser("remove", help="Remove a custom prompt.")
+    p_prompt_remove.add_argument("slug", help="Slug of the prompt to remove.")
+    p_prompt_remove.add_argument("-f", "--force", action="store_true", help="Skip confirmation prompt.")
+
+    # handoff
+    p_handoff = sub.add_parser("handoff", help="Sign a persona handshake on a task.")
+    p_handoff.add_argument("task_name", help="Task title or slug.")
+    p_handoff.add_argument("-p", "--persona", required=True, choices=personas, metavar="PERSONA", 
+                          help=f"Persona signing off ({'/'.join(personas)}).")
+    p_handoff.add_argument("-m", "--message", default=None, help="Optional handoff summary/notes.")
+
     return parser
 
 def cmd_mcp(args: argparse.Namespace) -> None:
@@ -3163,6 +3506,8 @@ def main() -> None:
         "digest": cmd_digest,
         "mcp": cmd_mcp,
         "chain": cmd_chain,
+        "handoff": cmd_handoff,
+        "prompt": cmd_prompt,
     }
 
     handler = dispatch.get(args.command)
