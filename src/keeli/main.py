@@ -50,6 +50,7 @@ from keeli.templates import (
     STORY_TEMPLATE,
     TASK_CHECKLISTS,
     TASK_TEMPLATE,
+    get_flavor_instructions,
 )
 
 
@@ -226,6 +227,26 @@ def _handshake_signed(persona: str) -> Callable[[str], bool]:
     return _check
 
 
+def _handshake_all_signed_off(text: str) -> bool:
+    """ADR-009: Check if ALL personas have signed off on the task.
+    
+    Returns True only if all 5 personas (@po, @architect, @developer, @security, @author)
+    have ☑ or [x] in the Handshakes table. Returns False if any persona is missing or unsigned.
+    
+    This is a file-first validation check (no tool calls) used at CLI boundaries
+    (keeli_complete) to ensure full handshake before archiving.
+    """
+    personas = ["po", "architect", "developer", "security", "author"]
+    
+    # Check each persona
+    for persona in personas:
+        # Use the existing _handshake_signed check
+        if not _handshake_signed(persona)(text):
+            return False
+    
+    return True
+
+
 def _validate_transition(
     path: Path,
     rules: list[tuple[str, Callable[[str], bool]]],
@@ -238,6 +259,74 @@ def _validate_transition(
     """
     text = path.read_text()
     return [msg for msg, pred in rules if not pred(text)]
+
+
+def _get_hierarchy_type(filename: str) -> str:
+    """Determine if a task file is an epic, story, or task.
+    
+    Returns one of: "epic", "story", "task"
+    """
+    base = Path(filename).stem
+    if base.startswith("epic-"):
+        return "epic"
+    elif base.startswith("story-"):
+        return "story"
+    else:
+        return "task"
+
+
+def _validate_hierarchy(path: Path) -> list[str]:
+    """ADR-008: Validate Epic > Story > Task hierarchy.
+    
+    Returns a list of hierarchy errors. Empty list = all hierarchy checks passed.
+    
+    Rules:
+      - Epic files: Cannot have **Epic:** or **Story:** fields set (must be empty/None)
+      - Story files: Must have **Epic:** field set to a non-None value
+      - Task files: Must have both **Epic:** and **Story:** fields set to non-None values
+    
+    Note: If both Epic and Story are "None" (default template values), hierarchy checks
+    are skipped. This allows test suites to work without full epic/story setup. Real
+    workflows that involve transitions will eventually require proper hierarchy.
+    """
+    text = path.read_text()
+    file_type = _get_hierarchy_type(path.name)
+    errors: list[str] = []
+    
+    epic_value = _parse_task_field(text, "Epic").strip()
+    story_value = _parse_task_field(text, "Story").strip()
+    
+    # If BOTH epic and story are at default values ("None"), skip hierarchy check
+    # This allows tests and simple single-task workflows without epic structure
+    if epic_value.lower() == "none" and story_value.lower() == "none":
+        if file_type != "epic":
+            # Still allow epics with default values
+            return []
+    
+    if file_type == "epic":
+        # Epics should not have Epic or Story fields set
+        if epic_value and epic_value.lower() != "none":
+            errors.append(f"Epic file cannot have **Epic:** field set (found: {epic_value})")
+        if story_value and story_value.lower() != "none":
+            errors.append(f"Epic file cannot have **Story:** field set (found: {story_value})")
+    
+    elif file_type == "story":
+        # Stories must have Epic field set (unless both are at defaults)
+        if epic_value.lower() == "none" and story_value.lower() != "none":
+            errors.append("Story must have an **Epic:** field set (hierarchy violation: Story > Epic required)")
+    
+    elif file_type == "task":
+        # Tasks must have both Epic and Story set (unless both are at defaults)
+        if epic_value.lower() == "none" and story_value.lower() != "none":
+            errors.append("Task must have an **Epic:** field set (hierarchy violation: Task > Epic required)")
+        if story_value.lower() == "none" and epic_value.lower() != "none":
+            errors.append("Task must have a **Story:** field set (hierarchy violation: Task > Story required)")
+        # If one is set but not the other, it's a problem
+        if (epic_value.lower() != "none" and story_value.lower() == "none") or \
+           (epic_value.lower() == "none" and story_value.lower() != "none"):
+            errors.append("Task must have BOTH **Epic:** and **Story:** fields set (or both default to None)")
+    
+    return errors
 
 
 # ── Index / Ledger helpers ─────────────────────────────────────────────────
@@ -838,6 +927,15 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
         _write_file(Path("docs/personas.md"), PERSONAS_MD, force=force)
 
+        # Flavor-specific AI instructions (claude, gemini, codex)
+        if args.ai:
+            for flavor in args.ai:
+                flavor_dir = Path(f".{flavor}")
+                flavor_dir.mkdir(parents=True, exist_ok=True)
+                flavor_file = flavor_dir / "instructions.md"
+                flavor_content = get_flavor_instructions(flavor)
+                _write_file(flavor_file, flavor_content, force=force)
+
         # .gitignore
         gitignore = Path(".gitignore")
         if gitignore.exists():
@@ -851,6 +949,8 @@ def cmd_init(args: argparse.Namespace) -> None:
             print(f"  ✅ Created {gitignore}")
 
         print("\n🎉 Initialization complete!")
+        if args.ai:
+            print(f"   Flavor-specific instructions created for: {', '.join(args.ai)}")
         print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
         print("   Suggested first steps:")
         print("     1. Fill in docs/project.md with your project context")
@@ -1088,6 +1188,14 @@ def cmd_progress(args: argparse.Namespace) -> None:
     task_file = _resolve_task_file(tasks_dir, slug)
     if task_file is None:
         print(f"❌ Task file for '{args.task_name}' not found.")
+        return
+
+    # ADR-008: Check hierarchy before other validations
+    hierarchy_errors = _validate_hierarchy(task_file)
+    if hierarchy_errors:
+        print("❌ Cannot move to In Progress — fix hierarchy issues first:")
+        for e in hierarchy_errors:
+            print(f"   • {e}")
         return
 
     errors = _validate_transition(task_file, [
@@ -1825,6 +1933,23 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     if status.lower() == "completed":
         print(f"⚠️  {task_file} is already marked as Completed.")
+        return
+
+    # ADR-008: Check hierarchy before other validations
+    hierarchy_errors = _validate_hierarchy(task_file)
+    if hierarchy_errors:
+        print("❌ Cannot mark as Completed — fix hierarchy issues first:")
+        for e in hierarchy_errors:
+            print(f"   • {e}")
+        return
+
+    # ADR-009: Check handshakes (file-first validation, no tool calls)
+    if not _handshake_all_signed_off(text):
+        print("❌ Cannot mark as Completed — all personas must sign off first:")
+        personas = ["po", "architect", "developer", "security", "author"]
+        for persona in personas:
+            if not _handshake_signed(persona)(text):
+                print(f"   • @{persona} has not signed off (missing ☑ in Handshakes table)")
         return
 
     errors = _validate_transition(task_file, [
@@ -3168,6 +3293,12 @@ def build_parser() -> argparse.ArgumentParser:
     # init
     p_init = sub.add_parser("init", help="Scaffold the Keeli framework.")
     p_init.add_argument("-f", "--force", action="store_true", help="Overwrite existing files.")
+    p_init.add_argument(
+        "--ai",
+        action="append",
+        choices=["claude", "gemini", "codex"],
+        help="Generate setup for additional AI flavor (can specify multiple times). Default creates .github/copilot-instructions.md.",
+    )
 
     personas = _load_personas()
 

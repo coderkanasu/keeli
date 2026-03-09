@@ -627,7 +627,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text="No tasks available. All tasks are complete or blocked.")]
 
         content = task_path.read_text()
-        return [TextContent(type="text", text=_with_next(f"Next task: {task_slug}\n\n{content}", "keeli_next", {"slug": task_slug}))]
+        persona = _parse_task_field(content, "Persona") or "@developer"
+        persona_hint = f"Load persona rules from docs/personas.md ## {persona.lstrip('@')}"
+        
+        # Enhanced response with persona metadata
+        enhanced_output = f"""Next task: {task_slug}
+
+**Persona:** {persona}
+**Hint:** {persona_hint}
+
+---
+
+{content}"""
+        
+        return [TextContent(type="text", text=_with_next(enhanced_output, "keeli_next", {"slug": task_slug, "persona": persona}))]
 
     elif name == "keeli_complete":
         slug = arguments.get("task_slug")

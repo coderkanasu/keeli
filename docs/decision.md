@@ -191,4 +191,111 @@ tools (`keeli_progress`, `keeli_complete`, `keeli_log`) to write results back �
 
 ---
 
+### ADR-008 — Hierarchy Enforcement (Epic > Story > Task)
+**Date:** 2026-03-07
+**Status:** Approved; Pending Implementation
+**Decision:** Enforce the Epic > Story > Task hierarchy at CLI state-transitions. Tasks are NOT standalone; every task must link to both an epic and a story via `**Epic:**` and `**Story:**` metadata fields. Validation guards are added to `cmd_progress()` and `cmd_complete()`.
+
+**Context:** Tasks were created as standalone items, causing orphaned tasks that nobody knew how to prioritize or contextualize. The Five-Persona Architecture requires clear scope boundaries; a task without a parent story has no acceptance criteria and no assigned personas.
+
+**Alternatives Considered:**
+1. Make epic/story optional — rejected: defeats the organizational benefit of hierarchy.
+2. Auto-create dummy stories for orphaned tasks — rejected: hides the problem; the user should fix it.
+3. Warn without blocking — rejected: soft warnings are ignored; hard enforcement is clearer.
+
+**Consequences:**
+- `keeli start --epic <slug> --story <slug>` becomes mandatory; both flags required.
+- `_validate_hierarchy(task_slug)` helper checks that referenced epic/story files exist.
+- `cmd_progress(slug)` and `cmd_complete(slug)` call `_validate_hierarchy(slug)` before state change.
+- Tasks with missing epic or story cannot transition; user must fill the fields first.
+- 15 new TDD tests for hierarchy paths.
+- Refactoring script provided in `ADR-008_IMPLEMENTATION_GUIDE.md` for existing projects.
+
+---
+
+### ADR-009 — Simplified Persona Handshakes (File-First, No Tool Calls)
+**Date:** 2026-03-07
+**Status:** Approved; Pending Implementation
+**Decision:** Abandon MPC sign-off tool calls (e.g., `keeli_po_sign_off`, `keeli_architect_sign_off`). Instead, personas sign off by editing the task file directly: fill their assigned section + mark the handshake table row. Validation at `keeli_complete()` checks that all four persona rows are marked.
+
+**Context:** Tool call overhead (invoke → wait for response → parse) is 1-2 seconds per call. With 4 handshake calls per workflow, this compounds to unacceptable latency for agentic AI loops. File edits are native LLM operations (instant, no tool overhead). HATEOAS hints directly in task files guide the workflow without tool latency.
+
+**Alternatives Considered:**
+1. Keep MPC tool calls; optimize them — rejected: tool latency is structural; optimization gains are small (<20%).
+2. Async tool calls (fire-and-forget) — rejected: no way to validate success; state would be unauditable.
+3. Merge handshakes into a single tool call instead of five — rejected: still 1-2s latency; LLM still blocked.
+
+**Consequences:**
+- 5 MPC handlers (`keeli_po_sign_off`, `keeli_architect_sign_off`, `keeli_developer_sign_off`, `keeli_security_sign_off`, `keeli_author_sign_off`) are deleted.
+- Handshake table remains in task file; LLM updates it via direct file edit.
+- `**Handshake Status:**` field tracks: `backlog` → `@po_pending` → `@po_approved` → `@architect_pending` → ... → `@security_approved` → ready to archive.
+- `_handshake_all_signed_off(content)` helper validates all 4 checkboxes are marked.
+- `cmd_complete()` calls `_handshake_all_signed_off(content)` and fails with clear error if any persona is missing.
+- HATEOAS hints in task template guide LLM through sign-off sequence without tool overhead.
+- 20 new TDD tests for handshake validation.
+
+---
+
+### ADR-010 — REJECTED: MCP-Tool-Heavy Workflow
+**Date:** 2026-02-28
+**Status:** ❌ REJECTED (Replaced by ADR-011)
+**Reason for Rejection:** User feedback: "MPC tools significantly slow agents." Analysis confirmed tool call overhead (1-2s per call × 4-6 mutations per workflow = 4-12s total) is unacceptable for agentic loops. ADR-010 proposed 5 new sign-off tools, which would make latency worse. Superseded by ADR-011 (File-First approach).
+
+---
+
+### ADR-011 — File-First, LLM-Native Workflow
+**Date:** 2026-03-07
+**Status:** ✅ Approved; Phase 1 Implementation Complete
+**Decision:** Shift from "MCP tools as primary interface" to "files as interface; MCP tools as helpers." LLMs edit task files natively (instant, no tool overhead). MCP tools reserved for read-only operations only: `keeli_next` (query index), `keeli_analyze` (TF-IDF), `keeli_digest` (context), `keeli_chain` (multi-step), `keeli_log` (safe append). Validation pushed to CLI boundaries (`keeli progress`, `keeli_complete`).
+
+**Context:** ADR-010 (MCP-tool-heavy) was designed assuming tools are the primary interface. Empirical testing showed tool call latency compounds across workflows: call → wait → response → parse → continue = ~1-2s per mutation. With 4-6 mutations per task workflow, total latency 4-12 seconds — killing agent velocity.
+
+**Key Insight:** LLMs are natively fast at file operations (read, edit, write). Pushing state mutations through tool calls adds unnecessary round-trip latency. File edits are instant; validation at CLI boundaries is deterministic and testable.
+
+**Alternatives Considered:**
+1. Keep ADR-010; optimize tool latency — rejected: fundamental overhead is structural.
+2. Async tool calls (agent doesn't wait) — rejected: unauditable; agent cannot confirm success.
+3. Hybrid: some mutations via tools, some via file edit — rejected: inconsistent model confuses agents.
+
+**Consequences:**
+- `keeli_complete()` validates handshakes locally (fast file read).
+- Handshakes enforced via file edits + HATEOAS hints (no tool calls).
+- Task templates include HATEOAS guidance for workflow.
+- MCP tools reduced from 13 to 8 (delete 5 sign-off tools, keep 8 query/utility tools).
+- Result: ~10-20x faster agent workflows (0.5s per task vs 4-12s with ADR-010).
+- Full specification: `ADR-011_FILE_FIRST_LLM_NATIVE.md` (700+ lines, approved design).
+
+---
+
+### ADR-012 — Lean Instructions + Persona Hooks (On-Demand Loading)
+**Date:** 2026-03-07
+**Status:** ✅ Approved; Phases 1–2 Implementation Complete
+**Decision:** Split bloated `.github/copilot-instructions.md` into lean core (~300 lines) + on-demand persona hooks. Personas load only when assigned to a task (via `**Persona:**` field). Task files include HATEOAS links to `docs/personas.md ## <persona>`.
+
+**Context:** Copilot instructions were 2,000+ lines with all 5 persona definitions embedded. LLMs loaded every persona for every task, wasting 73% of tokens on irrelevant rules. @po rules were loaded even for @developer tasks (waste). Progressive disclosure principle: show only what's needed now.
+
+**Design (File-First):**
+- `.github/copilot-instructions.md`: ~300 lines, lean core framework + "Persona Activation Hook" section.
+- `docs/personas.md`: Full persona definitions (unchanged); ONLY read when assigned.
+- `keeli_next()` includes `"persona": "@developer"` field with hint to load that section.
+- Task templates include HATEOAS comment explaining hook mechanism.
+
+**Alternatives Considered:**
+1. Keep all personas in copilot-instructions, compressed — rejected: pruning loses nuance; problem is presence, not verbosity.
+2. Dynamic instruction generation per persona — rejected: adds latency and complexity; static hints are simpler.
+3. Silence (no change) — rejected: token waste hurts agentic loop velocity.
+
+**Consequences:**
+- Copilot instructions trim from 2,000+ lines to ~300 lines.
+- Base instruction size: 4,000 tokens → 600 tokens (85% reduction).
+- Personas load on demand via file reference (no tool overhead).
+- HATEOAS hints guide LLMs through activation mechanism.
+- `keeli_next()` response includes `"persona"` and `"persona_hint"` fields.
+- Task templates updated with persona hook comments.
+- 8 new TDD tests; all passing.
+- Scalable: adding 6th, 7th persona does NOT bloat base instructions.
+- Implementation split into 3 phases: Phase 1 (CLI + templates), Phase 2 (documentation), Phase 3 (cleanup).
+
+---
+
 <!-- Add new decisions above this line -->

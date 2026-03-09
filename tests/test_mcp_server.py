@@ -609,3 +609,98 @@ class TestKeeliOrchestrate:
             assert data["blocking_reason"] is not None
         except json.JSONDecodeError:
             assert "Error" in text or "Completed" in text
+
+
+# ── ADR-012: Lean Instructions + Persona Hooks ──────────────────────────────
+
+class TestADR012PersonaHooks:
+    """Tests for ADR-012: Lean instructions + on-demand persona loading."""
+
+    async def test_task_template_includes_hateoas_persona_hook(self):
+        """Verify TASK_TEMPLATE includes HATEOAS persona hook comment."""
+        from keeli.templates import TASK_TEMPLATE
+        assert "<!-- HATEOAS: Persona Hook" in TASK_TEMPLATE
+        assert "docs/personas.md" in TASK_TEMPLATE
+        assert "Don't load personas not assigned to you" in TASK_TEMPLATE
+
+    async def test_keeli_next_includes_persona_field(self, keeli_dir):
+        """Verify keeli_next() output includes persona field and hint."""
+        # Create a task with explicit persona
+        await call_tool("keeli_start", {"title": "OAuth Setup", "persona": "developer"})
+        
+        # Call keeli_next
+        result = await call_tool("keeli_next", {})
+        text = _text(result)
+        
+        # Should include persona field
+        assert "**Persona:**" in text
+        assert "**Hint:**" in text
+        assert "Load persona rules from docs/personas.md" in text
+
+    async def test_keeli_next_persona_defaults_to_developer(self, keeli_dir):
+        """Verify keeli_next uses @developer as default persona if not specified."""
+        # Create task without explicit persona
+        await call_tool("keeli_start", {"title": "Default Persona Task"})
+        
+        result = await call_tool("keeli_next", {})
+        text = _text(result)
+        
+        # Should show @developer as default
+        assert "@developer" in text
+
+    async def test_task_file_persona_field_propagates_to_keeli_next(self, keeli_dir):
+        """Verify persona field in task file is reflected in keeli_next output."""
+        # Create task with @architect persona
+        await call_tool("keeli_start", {"title": "Design Phase", "persona": "architect"})
+        
+        result = await call_tool("keeli_next", {})
+        text = _text(result)
+        
+        # Should show @architect, not @developer
+        assert "@architect" in text
+
+    def test_copilot_instructions_is_lean(self):
+        """Verify .github/copilot-instructions.md is < 400 lines (was 2000+)."""
+        from pathlib import Path
+        instructions = Path(".github/copilot-instructions.md")
+        if instructions.exists():
+            lines = len(instructions.read_text().split("\n"))
+            # Target: ~188 lines (actual trimmed); generous limit: 400 lines
+            assert lines < 400, f"Instructions should be lean; got {lines} lines"
+
+    def test_copilot_instructions_has_persona_activation_hook(self):
+        """Verify instructions include 'Persona Activation Hook' section."""
+        from pathlib import Path
+        instructions = Path(".github/copilot-instructions.md")
+        if instructions.exists():
+            text = instructions.read_text()
+            assert "## Persona Activation Hook" in text
+            assert "keeli_next()" in text
+            assert "docs/personas.md" in text
+
+    def test_copilot_instructions_no_duplicate_persona_definitions(self):
+        """Verify full persona definitions are not duplicated in instructions."""
+        from pathlib import Path
+        instructions = Path(".github/copilot-instructions.md")
+        if instructions.exists():
+            text = instructions.read_text()
+            # Should NOT have full persona definitoins like "### 1. @po" or "### 2. @architect"
+            assert "### 1. @po" not in text
+            assert "### 2. @architect" not in text
+            assert "### 3. @developer" not in text
+            assert "### 4. @security" not in text
+            assert "### 5. @author" not in text
+            # Should HAVE "## The Five Personas" but only as brief intro
+            assert "## The Five Personas" in text
+            # Count of "## The Five Personas" should be 1 (not duplicated)
+            assert text.count("## The Five Personas") == 1
+
+    def test_instructions_link_to_docs_personas_md(self):
+        """Verify instructions link to docs/personas.md for full definitions."""
+        from pathlib import Path
+        instructions = Path(".github/copilot-instructions.md")
+        if instructions.exists():
+            text = instructions.read_text()
+            # Should have link to docs/personas.md
+            assert "docs/personas.md" in text
+            assert "-> See [docs/personas.md]" in text or "[docs/personas.md]" in text
