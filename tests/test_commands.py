@@ -59,6 +59,15 @@ class TestStart:
         assert "**Persona:** @author" in content
         assert "- [ ] Write from the user's perspective, not the implementer's" in content
 
+    def test_persona_qa_assignment(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "QA Gate Task", "-k", "qa"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "qa-gate-task.md"
+        content = task.read_text()
+        assert "**Persona:** @qa" in content
+        assert "## @qa (Quality Assurance)" in content
+
     def test_slugifies_name(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Fix Bug #42!!"]):
             main()
@@ -1534,6 +1543,30 @@ Nothing here.
         content = task_file.read_text()
         assert not _handshake_all_signed_off(content), "New task should fail handshake check"
 
+    def test_handshake_requires_qa_when_present(self, tmp_path):
+        """If @qa row exists in the handshake table, it must be signed too."""
+        from keeli.main import _handshake_all_signed_off
+
+        task_file = tmp_path / "test-task.md"
+        task_file.write_text("""# Task: Example
+
+## Handshakes
+
+| Persona | Status | Signed | Summary |
+|---------|--------|--------|---------|
+| @po | ☑ signed | 2026-03-08T10:00:00Z | OK |
+| @architect | ☑ signed | 2026-03-08T10:05:00Z | OK |
+| @developer | ☑ signed | 2026-03-08T10:10:00Z | OK |
+| @qa | ☐ pending | — | Waiting |
+| @security | ☑ signed | 2026-03-08T10:15:00Z | OK |
+| @author | ☑ signed | 2026-03-08T10:15:00Z | OK |
+""")
+        content = task_file.read_text()
+        assert not _handshake_all_signed_off(content), "Should fail if @qa exists but is unsigned"
+
+        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
+        assert _handshake_all_signed_off(content), "Should pass when @qa is also signed"
+
 
 # ── Phase 4: Integration Testing (E2E Workflows) ───────────────────────────
 
@@ -1586,7 +1619,7 @@ class TestPhase4IntegrationADRs008And009:
         assert "❌" in out, "Should fail on some validation"
 
     def test_handshake_required_for_completion(self, initialized_dir, capsys):
-        """ADR-009: Task cannot complete until all 5 personas sign off."""
+        """ADR-009: Task cannot complete until all required personas sign off."""
         # Create a task and tick all checklist items
         with patch("sys.argv", ["keeli", "start", "Handshake Test", "-k", "developer", "-o", "Test feature"]):
             main()
@@ -1607,7 +1640,7 @@ class TestPhase4IntegrationADRs008And009:
         assert "sign off" in out.lower() or "handshake" in out.lower(), "Error should mention handshakes"
 
     def test_full_handshake_workflow_then_complete(self, initialized_dir, capsys):
-        """ADR-009: Task can complete only after all 5 personas have signed off."""
+        """ADR-009: Task can complete only after all required personas have signed off."""
         # Create a task
         with patch("sys.argv", ["keeli", "start", "Full Handshake Task", "-k", "developer", "-o", "Complete feature"]):
             main()
@@ -1620,10 +1653,11 @@ class TestPhase4IntegrationADRs008And009:
             if "- [ ]" in line and "@security" not in line and "@author" not in line:
                 content = content.replace(line, line.replace("- [ ]", "- [x]"), 1)
         
-        # Sign off all 5 personas
+        # Sign off all required personas (including @qa)
         content = content.replace("| @po | ☐ pending", "| @po | ☑ signed")
         content = content.replace("| @architect | ☐ pending", "| @architect | ☑ signed")
         content = content.replace("| @developer | ☐ pending", "| @developer | ☑ signed")
+        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
         content = content.replace("| @security | ☐ pending", "| @security | ☑ signed")
         content = content.replace("| @author | ☐ pending", "| @author | ☑ signed")
         task.write_text(content)
@@ -1674,6 +1708,7 @@ class TestPhase4IntegrationADRs008And009:
         content = content.replace("| @po | ☐ pending", "| @po | ☑ signed")
         content = content.replace("| @architect | ☐ pending", "| @architect | ☑ signed")
         content = content.replace("| @developer | ☐ pending", "| @developer | ☑ signed")
+        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
         content = content.replace("| @security | ☐ pending", "| @security | ☑ signed")
         content = content.replace("| @author | ☐ pending", "| @author | ☑ signed")
         task.write_text(content)

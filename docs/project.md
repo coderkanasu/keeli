@@ -1,81 +1,85 @@
 # Project Documentation  (Keeli Framework v0.4.0)
 
 ## Overview
-Keeli is a Python CLI tool that enforces a **Five-Persona Architecture** ([@po, @architect,
-@developer, @security, @author]) for AI-assisted software development. It provides a
-structured governance layer — task tracking, skill/stack registry, decision logs, and
-context injection — so that LLM agents operate within a disciplined project workflow
-rather than hallucinating unconstrained solutions.
-
-**Primary users:** Developers and teams using GitHub Copilot or other LLM assistants
-who want reproducible, auditable, persona-driven AI workflows.
-
-## Goals
-- Enforce task lifecycle: Backlog → In Progress → Review → Completed
-- Record architectural decisions (ADRs) and prevent re-litigation
-- Maintain a skills/stack registry with project-specific constraints (not generic labels)
-- Auto-inject relevant context (skills, ADRs) into tasks via TF-IDF analysis
-- Expose all commands via a Model Context Protocol (MCP) server for agentic AI use
-- Stay framework-agnostic: no mandatory runtime dependencies beyond stdlib
+<!-- Describe the project purpose, users, and high-level goals. -->
 
 ## Tech Stack
-- Python 3.12+
-- MCP SDK — stdio + SSE transports for agentic AI integration
-- FastAPI / Starlette + Uvicorn — SSE server mode
-- scikit-learn (optional) — richer TF-IDF for `keeli analyze`; falls back to pure Python
-- pytest + pytest-asyncio — TDD test harness (112 tests)
-- `argparse` — CLI parser (zero framework overhead)
+<!-- Run `keeli stack` to apply a preset, or add skills with `keeli skill add`. -->
+
+### Languages & Frameworks
+<!-- Add your project's primary language(s) and frameworks here. -->
+<!-- Example: Python 3.12+, FastAPI, SQLAlchemy -->
+
+### Domain Expertise
+<!-- Add your project's domain knowledge areas here. -->
+
+### Infrastructure
+<!-- e.g. AWS, Docker, Kubernetes, PostgreSQL, Redis -->
 
 ## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                   keeli CLI                         │
-│  main.py  (all commands, TF-IDF engine, dispatch)   │
-│  templates.py  (COPILOT_INSTRUCTIONS, SKILLS_MD …)  │
-└──────────────┬──────────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────────┐
-│              MCP Server  (mcp_server.py)             │
-│  keeli_next  keeli_start  keeli_complete             │
-│  keeli_log   keeli_analyze                           │
-│  Resources: project.md, decision.md, tasks/*        │
-└─────────────────────────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────────┐
-│         docs/  (all persistent state)               │
-│  project.md   decision.md   ai_log.md               │
-│  skills.md    personas.md   tasks/<slug>.md         │
-└─────────────────────────────────────────────────────┘
-```
-
-## Key Commands
-
-| Command | Description |
-|---------|-------------|
-| `keeli init` | Scaffold all docs/ files and `.github/copilot-instructions.md` |
-| `keeli update` | Upgrade an existing project to the latest template version |
-| `keeli start <title>` | Create a new task file |
-| `keeli next` | Show highest-priority task + inline AI context hints |
-| `keeli complete <slug>` | Mark task done; auto-show next |
-| `keeli analyze <slug>` | Score task vs. corpus; inject `## AI Context Hints` block |
-| `keeli stack apply <preset>` | Apply opinionated skill constraints from a preset |
-| `keeli skill add/list/show` | Manage individual skills with persona + constraint |
-| `keeli epic / story` | Group tasks into epics and user stories |
-| `keeli mcp [--sse --port N]` | Start MCP server (stdio or SSE) |
-
-## LLM Compatibility Tiers (ADR-005)
-
-Keeli governance (STOP gates, persona labels, slug propagation, auto-state updates) requires
-strong instruction-following. Observed fidelity as of 2026-02:
-
-| Tier | Models | Notes |
-|------|--------|-------|
-| **1 — Full fidelity** | Claude 3.x / 4.x | All personas, STOP gates, chain slug propagation, HATEOAS hints work without prompting |
-| **2 — Good with nudging** | Gemini 1.5/2.x, Raptor Mini | ~80% fidelity; may skip state updates or need explicit slug passed in chains |
-| **3 — Adequate** | GPT-4.1 | Executes commands correctly; weaker persona governance in long sessions; CWD fix already in place |
-
-Update ADR-005 in [docs/decision.md](decision.md) when new model behaviour is observed.
+<!-- High-level system design, key modules, data flow. -->
 
 ## Key Decisions
-See [docs/decision.md](decision.md) for all ADRs.
+<!-- Link to docs/decision.md for detailed ADRs. -->
+
+## License & Liability Disclaimer
+**IMPORTANT:** This project is governed by a strict proprietary license.
+- **NO AI TRAINING:** The code, documentation, and architecture in this repository may NOT be used to train, fine-tune, or improve any AI models, LLMs, or machine learning algorithms.
+- **NO CRAWLING:** Web crawlers and bots are prohibited from indexing this repository for AI data aggregation.
+- **NO LIABILITY:** The author assumes NO LIABILITY for any code, architecture, or outputs generated by AI agents or human users utilizing this framework. You are solely responsible for reviewing, testing, and securing your software.
+
+---
+
+## Keeli CLI — What I Can Do For You
+
+**IMPORTANT:** You have the `keeli` CLI available. Always use these commands to manage tasks and epics — never edit `docs/tasks/*.md` files directly unless you are adding **Notes** content only.
+
+### Task & Work Management
+| Command | Who calls it | Purpose |
+|---------|-------------|---------|
+| `keeli epic "<title>" -p P0/P1/P2` | @architect | Create an epic (high-level objective) |
+| `keeli story "<title>" --epic <slug>` | @architect | Create a user story under an epic |
+| `keeli start "<title>" -k architect -p P1` | @architect | Create a new implementation task |
+| `keeli start "<title>" --story <slug> --epic <slug> -k developer` | @developer | Create task linked to a story |
+| `keeli progress "<title>"` | @developer | Mark task as In Progress |
+| `keeli complete "<title>"` | @developer | Mark task as Completed |
+| `keeli reopen "<title>"` | @developer | Reopen a completed task |
+| `keeli block "<title>"` | @developer | Mark task as Blocked |
+| `keeli review "<title>"` | @developer | Submit task for @security review |
+| `keeli bug "<title>" -p P0 --epic <slug>` | @developer / human | Log a bug (humans identify, @developer fixes) |
+| `keeli feature "<title>" --epic <slug>` | @architect | Create a feature request |
+| `keeli archive "<title>"` | @developer | Archive a completed task |
+| `keeli note "<title>" "<message>"` | any | Add a timestamped note to a task |
+
+### Project Context
+| Command | Purpose |
+|---------|---------|
+| `keeli resume --brief` | Dump minimal context for a new session (~500 tokens) |
+| `keeli resume` | Full context dump including recent log and decisions |
+| `keeli status` | Health-check all Keeli files and show task counts |
+| `keeli list` | List all tasks with Epic/Story/Status columns |
+| `keeli list --epic <slug>` | Filter tasks by epic |
+| `keeli list --status in-progress` | Filter by status |
+| `keeli list --json` | JSON output for agentic pipelines |
+| `keeli next` | Show the highest-priority next task |
+| `keeli log "<message>"` | Append a manual entry to docs/ai_log.md |
+
+### Skills & Config
+| Command | Purpose |
+|---------|---------|
+| `keeli skill add <name> -t lang/framework/domain/infra/tool` | Register a project skill |
+| `keeli skill list` | List registered skills |
+| `keeli skill remove <name>` | Remove a skill |
+| `keeli update` | Update copilot-instructions.md to latest template |
+| `keeli mcp` | Start the MCP server (stdio, for Claude/Cursor) |
+| `keeli mcp --sse --port 8080` | Start MCP server over HTTP/SSE |
+
+### What Keeli Does NOT Do
+- Keeli does **not** write code — you do.
+- Keeli does **not** run tests — you do.
+- Keeli does **not** decide architecture — @architect does, then logs it in `docs/decision.md`.
+- Keeli does **not** auto-commit — you choose when to commit.
+
+<!-- KEELI_SKILLS_START -->
+(no skills registered — run `keeli stack` to apply a preset, or `keeli skill add` for individual skills)
+<!-- KEELI_SKILLS_END -->

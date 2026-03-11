@@ -164,7 +164,7 @@ _SEC_TEST_STRATEGY = "## Test Strategy"
 
 # Items containing these keywords require a human persona to sign off.
 # Guards and `keeli tick` intentionally skip them.
-_GATE_KEYWORDS: tuple[str, ...] = ("@security", "@author")
+_GATE_KEYWORDS: tuple[str, ...] = ("@qa", "@security", "@author")
 
 
 def _is_gate_item(line: str) -> bool:
@@ -227,6 +227,28 @@ def _handshake_signed(persona: str) -> Callable[[str], bool]:
     return _check
 
 
+def _handshake_personas_in_text(text: str) -> list[str]:
+    """Return persona slugs listed in the task's Handshakes table.
+
+    Parses rows like: `| @developer | ... |` and returns `['developer', ...]`
+    in table order.
+    """
+    personas: list[str] = []
+    in_handshakes = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## Handshakes"):
+            in_handshakes = True
+            continue
+        if in_handshakes and stripped.startswith("## "):
+            break
+        if in_handshakes:
+            m = re.match(r"\|\s*@([a-z0-9-]+)\s*\|", stripped)
+            if m:
+                personas.append(m.group(1))
+    return personas
+
+
 def _handshake_all_signed_off(text: str) -> bool:
     """ADR-009: Check if ALL personas have signed off on the task.
     
@@ -236,7 +258,7 @@ def _handshake_all_signed_off(text: str) -> bool:
     This is a file-first validation check (no tool calls) used at CLI boundaries
     (keeli_complete) to ensure full handshake before archiving.
     """
-    personas = ["po", "architect", "developer", "security", "author"]
+    personas = _handshake_personas_in_text(text) or ["po", "architect", "developer", "security", "author"]
     
     # Check each persona
     for persona in personas:
@@ -791,7 +813,7 @@ def _run_chain_from_file(chain_file: Path, *, vars_: "dict[str, str]", dry_run: 
 # ── Personas helpers ──────────────────────────────────────────────────────────
 
 
-DEFAULT_PERSONAS = ["po", "architect", "developer", "security", "author"]
+DEFAULT_PERSONAS = ["po", "architect", "developer", "qa", "security", "author"]
 
 
 def _load_personas() -> list[str]:
@@ -879,7 +901,7 @@ def _inject_skills_into_instructions(skills: list[tuple[str, str, str, str]]) ->
     if not grouped:
         block = "(no skills registered \u2014 run `keeli stack` or `keeli skill add` to populate)"
     else:
-        persona_order = ["po", "architect", "developer", "security", "author", "global"]
+        persona_order = ["po", "architect", "developer", "qa", "security", "author", "global"]
         ordered_keys = [k for k in persona_order if k in grouped] + [
             k for k in grouped if k not in persona_order
         ]
@@ -994,7 +1016,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     priority = getattr(args, "priority", None) or _prompt(
         "Task priority", default="P1", choices=["P0", "P1", "P2"]
     )
-    persona = getattr(args, "persona", None) or "architect"
+    persona = getattr(args, "keeli", None) or "architect"
     depends_on = getattr(args, "depends_on", None) or "None"
     epic = getattr(args, "epic", None) or "None"
     story = getattr(args, "story", None) or "None"
@@ -1946,7 +1968,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
     # ADR-009: Check handshakes (file-first validation, no tool calls)
     if not _handshake_all_signed_off(text):
         print("❌ Cannot mark as Completed — all personas must sign off first:")
-        personas = ["po", "architect", "developer", "security", "author"]
+        personas = _handshake_personas_in_text(text) or ["po", "architect", "developer", "security", "author"]
         for persona in personas:
             if not _handshake_signed(persona)(text):
                 print(f"   • @{persona} has not signed off (missing ☑ in Handshakes table)")

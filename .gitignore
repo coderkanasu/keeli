@@ -13,3 +13,33 @@ dist/
 .env
 venv/
 env/
+
+# Keeli
+# (ai_log.md is purposefully omitted to allow session context to be committed)
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+.env
+venv/
+env/
+
+# Keeli
+# (ai_log.md is purposefully omitted to allow session context to be committed)
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+.env
+venv/
+env/
