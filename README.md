@@ -1,29 +1,53 @@
 # Keeli
 
-Keeli is an AI-native state machine for managing complex software projects with six-persona governance. Work naturally in your IDE and Git; Keeli enforces quality gates invisibly.
+Keeli is a Python CLI for running AI-assisted software delivery with structured project artifacts, a SQLite-backed state model, audit logging, and automation hooks.
 
-## Core Vision: Invisible State Management
+It gives you a file-first workflow for humans and a machine-readable workflow for tooling:
 
-Code freely. Keeli guards silently.
+- Markdown in `docs/` stays readable and editable.
+- `keeli_state.db` gives fast structured state for CLI automation and MCP tools.
+- Git hooks and commit/test helpers reduce manual status updates.
+- JSON envelopes make command output stable for agents and scripts.
 
-**What happens:**
-1. Developer codes and commits → Git pre-commit hook validates task state
-2. Architect designs → Keeli auto-detects persona change, logs decision
-3. QA tests → background evidence capture, gate enforcement
-4. All state lives in encrypted SQLite (`keeli_state.db`) — single source of truth
-5. External platforms (Jira, Trello, Monday) sync in background
+## What Is Implemented
 
-**What you don't do:**
-- ❌ No manual `keeli handoff` commands
-- ❌ No handoff tables to edit
-- ❌ No persona sign-off checklists to check
-- ❌ No GitHub issues or Markdown task files as state
+Keeli currently provides:
 
-**Guardrails you hit if out of order:**
-- Task state missing? → Keeli creates stub task
-- @architect approval needed? → Pre-commit blocks with "Needs design review first"
-- PII in code? → Keeli redacts before logging
-- Epic incomplete? → Keeli suggests "Run `keeli story` to break it down"
+- Project initialization with generated docs, Copilot instructions, and SQLite state.
+- Work item management for epics, stories, tasks, bugs, and features.
+- Lifecycle commands for backlog, in-progress, blocked, review, reopen, complete, and archive flows.
+- Passive validation and automation hooks via `validate-task-state` and `capture-commit-state`.
+- Commit-intent evaluation with `transition-from-commit`.
+- SQLite rebuild and dry-run support with `sync`.
+- Test-run integration with `keeli test`.
+- Machine-readable JSON output for major automation-facing commands.
+- MCP server tool coverage for key workflows.
+- Custom prompt management, including template rendering with variables.
+- Initial persona-gate pipeline primitives and an isolated sandbox proving the flow.
+
+## Core Model
+
+Keeli uses a hybrid model:
+
+- Markdown files in `docs/tasks/` are the human-facing work artifacts.
+- `keeli_state.db` is the structured operational state used for fast queries, audit correlations, and automation.
+
+The standard lifecycle is:
+
+```text
+Backlog -> In Progress -> Review -> Completed -> Archived
+```
+
+Additional operational states include `Blocked` and reopened work returning to `In Progress`.
+
+The built-in personas are:
+
+- `@po` for requirements and acceptance criteria.
+- `@architect` for design, interfaces, and decisions.
+- `@developer` for implementation.
+- `@qa` for test evidence and regression safety.
+- `@security` for threat modeling and secrets/auth concerns.
+- `@author` for user-facing documentation.
 
 ## Install
 
@@ -34,69 +58,155 @@ pip install -e .
 ## Quick Start
 
 ```bash
-# 1) Initialize framework — creates keeli_state.db + agent instructions
+# 1) Initialize a Keeli project
 keeli init --force
 
-# 2) Create planning artifacts (epics, stories still manual for now)
-keeli epic "Build encrypted state machine" -p P0
+# 2) Create planning artifacts
+keeli epic "Pipeline compliance gates" -p P0 -o "Introduce deterministic delivery gates"
+keeli story "Persona gate engine" --epic pipeline-compliance-gates --role platform-engineer --goal "enforce ordered gates" --reason "prevent unsafe transitions" --ac "Transitions require prior evidence" -p P0
 
-# 3) Code naturally
-git add -A
-git commit -m "Implement SQLite schema"
-# ← Git hook runs: keeli validate-task-state
-# ← Keeli logs: "T-0001 moved In Progress → Review (auto-detected)"
+# 3) Create implementation work
+keeli start "Build pipeline runner" --epic pipeline-compliance-gates --story persona-gate-engine -k developer -p P0 -o "Implement the first pipeline pass"
 
-# 4) Keeli tracks state automatically
-keeli status        # Show current task state from keeli_state.db
-keeli next          # What should I work on next?
-keeli resume --brief # Full context snapshot
+# 4) Move the task through the lifecycle
+keeli progress build-pipeline-runner
+keeli review build-pipeline-runner
+keeli complete build-pipeline-runner
 ```
 
-## Core Model
-
-**State Machine (no manual transitions):**
-```
-Backlog → In Progress (auto-detected via git)
-	→ Review (auto-detected when tests pass)
-	→ Completed (auto-detected when merged to main)
-	→ Archived (auto-cleanup after 7 days)
-```
-
-**Personas (6-persona governance):**
-- @po — requirements, acceptance criteria
-- @architect — design decisions, interfaces
-- @developer — implementation, TDD
-- @qa — test evidence, regression coverage
-- @security — threat model, auth, secrets
-- @author — user-facing docs, examples
-
-**State Storage:**
-- `keeli_state.db` — encrypted SQLite (AES-256-GCM)
-- `docs/decision.md` — ADR log (Git-tracked)
-- `docs/ai_log.md` — audit trail (Git-tracked)
-- `.github/copilot-instructions.md` — agent rules (Git-tracked)
-
-## High-Value Commands
+## Daily Commands
 
 ```bash
-keeli list          # All tasks with state
-keeli next          # Next task to work on
-keeli status        # Current task + state
-keeli log "msg"     # Manual audit entry
-keeli skill add <name> -t lang/framework/domain/infra
+keeli list
+keeli next
+keeli status
+keeli history T-0001
+keeli digest --budget 1200
+keeli log "Captured follow-up architecture notes"
 ```
+
+## Automation Commands
+
+These are the commands most useful for hooks, scripts, and agents:
+
+```bash
+keeli validate-task-state
+keeli validate-task-state --auto-stub
+
+keeli capture-commit-state --json
+
+keeli transition-from-commit --subject "feat: closes T-0001" --json
+keeli transition-from-commit --subject "keeli:complete" --target-id T-0001 --apply
+
+keeli sync --dry-run --json
+keeli sync --json
+
+keeli test -q
+keeli test --dry-run --json -q
+```
+
+Most automation-facing commands now use a shared JSON envelope shaped like:
+
+```json
+{
+  "ok": true,
+  "command": "sync",
+  "timestamp": "2026-03-12T03:39:31Z",
+  "data": {}
+}
+```
+
+That envelope is implemented across commit automation, lifecycle transitions, discovery/read flows, and context helpers such as `history` and `digest`.
+
+## Custom Prompts
+
+Keeli supports project prompts stored in `docs/prompts/` and rendered through the CLI.
+
+```bash
+keeli prompt add trello-connector --file ./trello-template.md
+keeli prompt list
+keeli prompt show trello-connector
+keeli prompt apply trello-connector \
+  --var board_id=board-123 \
+  --var list_architect=list-456 \
+  --output .keeli/connectors/trello.json
+```
+
+This is currently used to manage connector configuration templates without hardcoding provider-specific values into the CLI.
+
+## Pipeline Foundation
+
+Keeli now includes an initial pipeline package in `src/keeli/pipeline/`:
+
+- `PersonaGate` for deterministic gate ordering.
+- `AuditTrail` for persisted gate evidence in SQLite.
+- `RegressionScope` for deriving a regression scope from `affects` metadata.
+- `PipelineRunner` for single-pass gate execution.
+
+The current gate order is:
+
+```text
+Analyst -> Architect -> Security -> QA -> Regression
+```
+
+This is foundation work, not a complete end-user pipeline product yet. The implemented pieces are intended for experimentation, tests, and follow-on CLI integration.
+
+## Sandbox And Test-And-Learn
+
+The repository includes an isolated sandbox at `sandbox/keeli-pipeline-sandbox/`.
+
+It demonstrates:
+
+- Running the pipeline package against a sample task.
+- Recording gate evidence in a separate sandbox database.
+- Blocking regression when high-risk side effects are unresolved.
+- Rendering a Trello-style connector config from a prompt template.
+
+Run it with:
+
+```bash
+cd sandbox/keeli-pipeline-sandbox
+keeli init --force
+PYTHONPATH=/absolute/path/to/src python run_tnl.py
+```
+
+## MCP Support
+
+Keeli exposes a matching MCP server with tool handlers for common workflows, including:
+
+- `keeli_start`
+- `keeli_next`
+- `keeli_progress`
+- `keeli_complete`
+- `keeli_transition_from_commit`
+- `keeli_capture_commit_state`
+
+This lets external agents call the same workflow primitives without re-implementing CLI behavior.
 
 ## Repository Layout
 
-- `src/keeli/` — CLI, state machine, hooks
-- `docs/` — decision log, persona definitions, project context
-- `.github/copilot-instructions.md` — agent rules
-- `tests/` — test suite
-- `keeli_state.db` — task state machine (encrypted, not in Git)
+- `src/keeli/` contains the CLI, state helpers, MCP server, templates, and pipeline package.
+- `docs/` contains project context, decisions, prompts, tasks, and the audit log.
+- `tests/` contains CLI, MCP, and pipeline coverage.
+- `sandbox/keeli-pipeline-sandbox/` contains the isolated pipeline experiment.
+
+## Recent Accomplishments
+
+The current repository state includes the following delivered work:
+
+- Shared JSON envelope across core CLI automation commands.
+- JSON support for lifecycle and discovery commands such as `progress`, `complete`, `next`, `list`, `find`, `history`, and `digest`.
+- Deterministic commit transition evaluation and apply flows.
+- Commit capture with correlated audit event IDs.
+- Dry-run support for `sync`, `test`, and commit transition application.
+- Prompt application with variable substitution and file output.
+- Architecture and backlog formalization for persona-routing pipeline work.
+- Initial persona-gate pipeline modules and tests.
+- Sandbox validation of blocked and passing regression gate behavior.
 
 ## Notes
 
-- State lives in SQLite, not Git — sync happens via hooks
-- Handoffs are automatic, logged invisibly
-- Each feature iteration: delete `.github docs/`, reinit, test til perfect
-- AI learning log maintained separately for recursive improvement
+- Keeli is currently hybrid, not DB-only. Markdown remains part of the workflow.
+- SQLCipher-style encrypted evidence storage is planned work, not finished functionality.
+- External connector sync is not yet implemented as a complete runtime feature; prompt-driven connector config management is implemented.
+- If you are using a git repository, `keeli init` installs hook scripts to support passive validation and commit capture.
