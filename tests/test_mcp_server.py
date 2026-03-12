@@ -14,6 +14,19 @@ def _text(result) -> str:
     return result[0].text
 
 
+def _add_completion_evidence(task_path: Path) -> None:
+    text = task_path.read_text()
+    text = text.replace(
+        "<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->",
+        "- Commit: abcdef123456\n- Artifact: docs/ai_log.md",
+    )
+    text = text.replace(
+        "<!-- Link validation artifacts (tests, checks, commands with outcomes). -->",
+        "- Test: pytest -q (pass)\n- Report: tests/test_mcp_server.py",
+    )
+    task_path.write_text(text)
+
+
 @pytest.fixture
 def keeli_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -70,6 +83,7 @@ class TestMcpServer:
 
     async def test_keeli_complete_archives_and_updates_db(self, keeli_dir):
         await call_tool("keeli_start", {"title": "Finalize schema"})
+        _add_completion_evidence(keeli_dir / "docs" / "tasks" / "finalize-schema.md")
         await call_tool("keeli_complete", {"task_slug": "finalize-schema"})
 
         archived = keeli_dir / "docs" / "tasks" / "archive" / "finalize-schema.md"
@@ -104,6 +118,7 @@ class TestMcpServer:
     async def test_keeli_capture_commit_state_returns_correlated_payload(self, keeli_dir):
         await call_tool("keeli_start", {"title": "Capture MCP", "objective": "Do work"})
         await call_tool("keeli_progress", {"task_slug": "capture-mcp"})
+        _add_completion_evidence(keeli_dir / "docs" / "tasks" / "capture-mcp.md")
 
         def fake_run(cmd, check, capture_output, text):
             result = MagicMock()
@@ -128,6 +143,7 @@ class TestMcpServer:
         await call_tool("keeli_start", {"title": "MCP B", "objective": "B"})
         await call_tool("keeli_progress", {"task_slug": "mcp-a"})
         await call_tool("keeli_progress", {"task_slug": "mcp-b"})
+        _add_completion_evidence(keeli_dir / "docs" / "tasks" / "mcp-b.md")
 
         task_text = (keeli_dir / "docs" / "tasks" / "mcp-b.md").read_text()
         task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))

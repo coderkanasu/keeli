@@ -23,5 +23,11 @@ Provide an explicit and reproducible hook installation path for teams and CI ima
 - Push is blocked when required persona evidence is missing.
 - Tests cover install idempotency and failure exit codes.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Keep existing `keeli init` behavior, but make hook lifecycle independently manageable.

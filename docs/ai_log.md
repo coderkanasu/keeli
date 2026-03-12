@@ -30,3 +30,24 @@
 2026-03-12T13:20:47Z | T-0001 | @developer | Task completed: Trailer One → docs/tasks/archive/trailer-one.md
 2026-03-12T13:20:47Z | T-0002 | @developer | Task completed: Trailer Two → docs/tasks/archive/trailer-two.md
 2026-03-12T13:20:47Z | T-0003 | @developer | Task completed: Override A → docs/tasks/archive/override-a.md
+2026-03-12T18:17:40Z | E-0004 | @architect | Epic created: Operationalize AI Governance and Delivery Reliability [P0] → docs/tasks/epic-operationalize-ai-governance-and-delivery-reliability.md
+2026-03-12T18:17:40Z | S-0005 | @architect | Story created: Define 30 60 90 Governance KPI Framework [P0] epic=operationalize-ai-governance-and-delivery-reliability → docs/tasks/story-define-30-60-90-governance-kpi-framework.md
+2026-03-12T18:17:40Z | S-0006 | @architect | Story created: Enforce Evidence-Linked Task Completion [P0] epic=operationalize-ai-governance-and-delivery-reliability → docs/tasks/story-enforce-evidence-linked-task-completion.md
+2026-03-12T18:17:40Z | S-0007 | @architect | Story created: Create Weekly Governance Snapshot Template [P1] epic=operationalize-ai-governance-and-delivery-reliability → docs/tasks/story-create-weekly-governance-snapshot-template.md
+2026-03-12T18:17:40Z | S-0008 | @architect | Story created: Map Keeli Artifacts to SDLC Systems [P1] epic=operationalize-ai-governance-and-delivery-reliability → docs/tasks/story-map-keeli-artifacts-to-sdlc-systems.md
+2026-03-12T18:17:41Z | T-0015 | @po | Task created: Draft KPI metric dictionary and target bands → docs/tasks/draft-kpi-metric-dictionary-and-target-bands.md
+2026-03-12T18:17:41Z | T-0016 | @architect | Task created: Update task template to require acceptance evidence → docs/tasks/update-task-template-to-require-acceptance-evidence.md
+2026-03-12T18:17:41Z | T-0017 | @author | Task created: Author KPI reporting cadence and owner model → docs/tasks/author-kpi-reporting-cadence-and-owner-model.md
+2026-03-12T18:17:41Z | T-0018 | @developer | Task created: Backfill active tasks with evidence placeholders → docs/tasks/backfill-active-tasks-with-evidence-placeholders.md
+2026-03-12T18:17:41Z | T-0019 | @author | Task created: Design weekly governance snapshot structure → docs/tasks/design-weekly-governance-snapshot-structure.md
+2026-03-12T18:17:41Z | T-0020 | @architect | Task created: Define SDLC field mapping matrix → docs/tasks/define-sdlc-field-mapping-matrix.md
+2026-03-12T18:17:41Z | T-0021 | @qa | Task created: Generate first governance snapshot from current artifacts → docs/tasks/generate-first-governance-snapshot-from-current-artifacts.md
+2026-03-12T18:17:41Z | T-0022 | @author | Task created: Document pilot integration workflow example → docs/tasks/document-pilot-integration-workflow-example.md
+2026-03-12T18:48:06Z | T-0015 | @po | Task completed: Draft KPI metric dictionary and target bands → docs/tasks/archive/draft-kpi-metric-dictionary-and-target-bands.md
+2026-03-12T18:48:06Z | T-0017 | @author | Task completed: Author KPI reporting cadence and owner model → docs/tasks/archive/author-kpi-reporting-cadence-and-owner-model.md
+2026-03-12T18:48:06Z | T-0016 | @architect | Task completed: Update task template to require acceptance evidence → docs/tasks/archive/update-task-template-to-require-acceptance-evidence.md
+2026-03-12T18:48:06Z | T-0018 | @developer | Task completed: Backfill active tasks with evidence placeholders → docs/tasks/archive/backfill-active-tasks-with-evidence-placeholders.md
+2026-03-12T18:48:06Z | T-0019 | @author | Task completed: Design weekly governance snapshot structure → docs/tasks/archive/design-weekly-governance-snapshot-structure.md
+2026-03-12T18:48:06Z | T-0021 | @qa | Task completed: Generate first governance snapshot from current artifacts → docs/tasks/archive/generate-first-governance-snapshot-from-current-artifacts.md
+2026-03-12T18:48:06Z | T-0020 | @architect | Task completed: Define SDLC field mapping matrix → docs/tasks/archive/define-sdlc-field-mapping-matrix.md
+2026-03-12T18:48:06Z | T-0022 | @author | Task completed: Document pilot integration workflow example → docs/tasks/archive/document-pilot-integration-workflow-example.md

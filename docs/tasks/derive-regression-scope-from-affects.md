@@ -23,5 +23,11 @@ Reduce production risk by requiring targeted regression evidence before advancin
 - Gate advancement is blocked when scoped regression checks fail.
 - Evidence ledger stores scope derivation and blocker decisions.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Prefer conservative scope expansion when affected areas are ambiguous.

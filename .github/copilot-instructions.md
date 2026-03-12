@@ -3,6 +3,12 @@
 ## Core Philosophy
 Six-persona workflow orchestration. Security-first, zero hallucinations.
 
+## Execution Mode
+Default to non-interactive execution.
+- Inspect the repo and take the next safe action without asking for confirmation when the request is actionable.
+- Ask questions only when requirements are genuinely ambiguous, information is missing, or the action could be destructive.
+- Prefer small, concrete changes plus a short summary of assumptions over extended back-and-forth.
+
 ## Session Start
 1. Read docs/project.md (project context)
 2. Scan docs/tasks/ for In Progress / Blocked items

@@ -23,6 +23,12 @@ Support compliance-sensitive deployments requiring encryption at rest while pres
 - Sensitive evidence payload fields are encrypted in SQLCipher mode.
 - Tests validate fallback behavior when `pysqlcipher3` is unavailable.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Avoid hard dependency on SQLCipher for local development environments.
 - Deferred by product decision: implement core connector and regression pipeline first, then revisit encrypted storage hardening.

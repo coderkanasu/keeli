@@ -23,5 +23,11 @@ Prevent provider lock-in and avoid hardcoded external integration logic inside p
 - Pipeline runner emits transition events through registry without provider-specific branching.
 - Unit tests verify registry dispatch and connector failure isolation.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Keep Trello implementation in a dedicated adapter module that consumes this interface.

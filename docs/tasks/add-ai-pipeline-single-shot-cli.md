@@ -23,5 +23,11 @@ Enable deterministic one-shot orchestration for AI agents and CI automation.
 - Non-zero exit and machine-readable error on gate blockers.
 - CLI and integration tests cover success and blocked paths.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Reuse pipeline runner internals rather than duplicating gate logic in CLI command.

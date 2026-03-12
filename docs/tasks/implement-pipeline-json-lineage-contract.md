@@ -23,5 +23,11 @@ Provide a stable machine contract for compliance tooling, AI agents, and externa
 - Compliance payload includes gate evidence references and pass/fail summaries.
 - Tests cover schema validation and checksum mismatch handling.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Keep output compatible with existing JSON envelope conventions.

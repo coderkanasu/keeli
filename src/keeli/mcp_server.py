@@ -879,6 +879,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             what=objective or "<!-- Be specific about the implementation work. -->",
             why="<!-- Explain the user or business impact. -->",
             acceptance="<!-- Add verification steps or test evidence here. -->",
+            evidence="<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->",
+            verification="<!-- Link validation artifacts (tests, checks, commands with outcomes). -->",
         )
 
         task_path.write_text(content)

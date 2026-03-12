@@ -177,6 +177,8 @@ def _resolve_objective(raw: "str | None") -> str:
 
 _SEC_NFR = "## Non-Functional Requirements"
 _SEC_TEST_STRATEGY = "## Test Strategy"
+_SEC_EVIDENCE = "## Evidence"
+_SEC_VERIFICATION = "## Verification"
 
 # Items containing these keywords require a human persona to sign off.
 # Guards and `keeli tick` intentionally skip them.
@@ -214,6 +216,80 @@ def _section_is_filled(section_header: str) -> Callable[[str], bool]:
         return False
 
     return _check
+
+
+def _section_body(text: str, section_header: str) -> list[str]:
+    """Return non-empty body lines for a markdown section (until next ``##``)."""
+    lines = text.splitlines()
+    in_section = False
+    body: list[str] = []
+    for line in lines:
+        if line.strip() == section_header.strip():
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break
+            stripped = line.strip()
+            if stripped:
+                body.append(stripped)
+    return body
+
+
+def _section_has_reference(section_lines: list[str]) -> bool:
+    """Heuristic check for link/reference-like evidence lines."""
+    placeholder_hints = (
+        "<!--",
+        "tbd",
+        "todo",
+        "add",
+        "replace this",
+        "n/a",
+    )
+    ref_markers = (
+        "http://",
+        "https://",
+        "/",
+        ".md",
+        ".py",
+        ".json",
+        "test",
+        "pytest",
+        "commit",
+        "sha",
+        "log",
+        "report",
+        "artifact",
+        "evidence",
+    )
+    for raw in section_lines:
+        line = raw.lower()
+        if line.startswith("- [ ]"):
+            continue
+        if any(hint in line for hint in placeholder_hints):
+            continue
+        if any(marker in line for marker in ref_markers):
+            return True
+    return False
+
+
+def _completion_evidence_errors(text: str) -> list[str]:
+    """Validate task completion prerequisites for evidence-linked done state."""
+    errors: list[str] = []
+    evidence_lines = _section_body(text, _SEC_EVIDENCE)
+    verification_lines = _section_body(text, _SEC_VERIFICATION)
+
+    if not evidence_lines:
+        errors.append("Missing required section content: ## Evidence")
+    elif not _section_has_reference(evidence_lines):
+        errors.append("## Evidence must include at least one concrete link/reference to delivery artifacts")
+
+    if not verification_lines:
+        errors.append("Missing required section content: ## Verification")
+    elif not _section_has_reference(verification_lines):
+        errors.append("## Verification must include at least one concrete link/reference to validation artifacts")
+
+    return errors
 
 
 def _handshake_signed(persona: str) -> Callable[[str], bool]:
@@ -1469,6 +1545,8 @@ def cmd_start(args: argparse.Namespace) -> None:
         what=objective_text or "<!-- Be specific about the implementation work. -->",
         why="<!-- Explain the user or business impact. -->",
         acceptance="<!-- Add verification steps or test evidence here. -->",
+        evidence="<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->",
+        verification="<!-- Link validation artifacts (tests, checks, commands with outcomes). -->",
     )
     task_file.write_text(content)
     _db_sync_task_file(task_file)
@@ -1664,6 +1742,8 @@ def _ensure_validate_stub_task() -> str:
             what="Investigate and reconcile untracked ongoing work.",
             why="Validation found pending leaf work without an active task.",
             acceptance="Validation passes with one active task; replace this stub with a real task.",
+            evidence="- Validation context: docs/ai_log.md",
+            verification="- Command: keeli validate-task-state --auto-stub",
         )
         task_file.write_text(content)
     else:
@@ -2952,6 +3032,17 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     text = task_file.read_text()
     status = _parse_task_field(text, "Status")
+
+    evidence_errors = _completion_evidence_errors(text)
+    if evidence_errors:
+        msg = "Task is missing required completion evidence"
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("complete", False, error=msg, data={"errors": evidence_errors}), indent=2))
+        else:
+            print(f"❌ {msg}:")
+            for err in evidence_errors:
+                print(f"   - {err}")
+        return
 
     if status.lower() == "completed":
         if getattr(args, "json", False):

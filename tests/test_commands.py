@@ -28,6 +28,19 @@ def _db_value(db_path: Path, query: str, params: tuple = ()):
     return None if row is None else row[0]
 
 
+def _add_completion_evidence(task_path: Path) -> None:
+    text = task_path.read_text()
+    text = text.replace(
+        "<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->",
+        "- Commit: abcdef123456\n- Artifact: docs/ai_log.md",
+    )
+    text = text.replace(
+        "<!-- Link validation artifacts (tests, checks, commands with outcomes). -->",
+        "- Test: pytest -q (pass)\n- Report: tests/test_commands.py",
+    )
+    task_path.write_text(text)
+
+
 class TestInit:
     def test_init_creates_framework_files_and_state_db(self, initialized_dir):
         assert (initialized_dir / ".github" / "copilot-instructions.md").exists()
@@ -212,6 +225,7 @@ class TestLifecycle:
     def test_complete_archives_and_marks_db_archived(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Ship Login", "-o", "Ship it"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "ship-login.md")
         with patch("sys.argv", ["keeli", "complete", "Ship Login"]):
             main()
 
@@ -232,6 +246,7 @@ class TestLifecycle:
     def test_reopen_restores_archived_task_and_db_state(self, initialized_dir):
         with patch("sys.argv", ["keeli", "start", "Reopen Login", "-o", "Ship it"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "reopen-login.md")
         with patch("sys.argv", ["keeli", "complete", "Reopen Login"]):
             main()
         with patch("sys.argv", ["keeli", "reopen", "Reopen Login"]):
@@ -668,6 +683,7 @@ class TestIterationFiveFeatures:
             main()
         with patch("sys.argv", ["keeli", "progress", "Commit Complete"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "commit-complete.md")
 
         def fake_run(cmd, check, capture_output, text):
             result = MagicMock()
@@ -914,6 +930,7 @@ class TestIterationEightFeatures:
             main()
         with patch("sys.argv", ["keeli", "progress", "Target B"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "target-b.md")
 
         target_b_text = (initialized_dir / "docs" / "tasks" / "target-b.md").read_text()
         target_b_id = next(line.split()[-1] for line in target_b_text.splitlines() if line.startswith("**ID:**"))
@@ -942,6 +959,7 @@ class TestIterationEightFeatures:
             main()
         with patch("sys.argv", ["keeli", "progress", "Audit Trail"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "audit-trail.md")
 
         def fake_run(cmd, check, capture_output, text):
             result = MagicMock()
@@ -971,6 +989,7 @@ class TestIterationEightFeatures:
     def test_progress_and_complete_support_json_output(self, initialized_dir, capsys):
         with patch("sys.argv", ["keeli", "start", "Json Flow", "-o", "A"]):
             main()
+        _add_completion_evidence(initialized_dir / "docs" / "tasks" / "json-flow.md")
 
         capsys.readouterr()
         with patch("sys.argv", ["keeli", "progress", "Json Flow", "--json"]):

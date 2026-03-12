@@ -51,6 +51,7 @@ class TestInit:
         content = (clean_dir / ".github" / "copilot-instructions.md").read_text()
         assert content != marker
         assert "Six-persona workflow orchestration" in content
+        assert "Default to non-interactive execution." in content
 
     def test_gitignore_appends_if_exists(self, clean_dir):
         (clean_dir / ".gitignore").write_text("node_modules/\n")

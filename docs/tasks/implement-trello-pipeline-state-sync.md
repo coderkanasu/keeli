@@ -22,5 +22,11 @@ Keep provider-specific behavior isolated so pipeline core supports any number of
 - Connector registry can enable/disable Trello without code changes in pipeline core.
 - Transition publish and external_id reconciliation events are audited in evidence ledger.
 
+## Evidence
+<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
+
+## Verification
+<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
+
 ## Notes
 - Trello is the first connector, not the architecture baseline.
