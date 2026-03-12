@@ -1,1750 +1,1104 @@
-"""Tests for `keeli start`, `keeli log`, `keeli resume`, `keeli status`, `keeli clear-log`."""
-
-import pytest
+import sqlite3
+import json
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import MagicMock
+
+import pytest
 
 from keeli.main import main
 
 
 @pytest.fixture
 def initialized_dir(tmp_path, monkeypatch):
-    """Run `persona init` in a temp dir and return the path."""
     monkeypatch.chdir(tmp_path)
     with patch("sys.argv", ["keeli", "init"]):
         main()
     return tmp_path
 
 
-# ── persona start ──────────────────────────────────────────────────────────
+def _db_row(db_path: Path, query: str, params: tuple = ()):
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(query, params).fetchone()
 
-class TestStart:
-    def test_creates_task_file(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Implement Auth"]):
+
+def _db_value(db_path: Path, query: str, params: tuple = ()):
+    row = _db_row(db_path, query, params)
+    return None if row is None else row[0]
+
+
+class TestInit:
+    def test_init_creates_framework_files_and_state_db(self, initialized_dir):
+        assert (initialized_dir / ".github" / "copilot-instructions.md").exists()
+        assert (initialized_dir / "docs" / "project.md").exists()
+        assert (initialized_dir / "docs" / "tasks" / ".gitkeep").exists()
+        assert (initialized_dir / "docs" / "requirements" / ".gitkeep").exists()
+        assert (initialized_dir / "keeli_state.db").exists()
+
+    def test_state_db_has_core_tables(self, initialized_dir):
+        db_path = initialized_dir / "keeli_state.db"
+        with sqlite3.connect(db_path) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        assert {"state_meta", "work_items", "audit_events"}.issubset(tables)
+
+
+class TestEpicStoryTask:
+    def test_epic_creation_populates_file_and_db(self, initialized_dir):
+        with patch(
+            "sys.argv",
+            ["keeli", "epic", "Build State Machine", "-p", "P0", "-o", "Replace markdown state"],
+        ):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "implement-auth.md"
-        assert task.exists()
-        content = task.read_text()
-        assert "Implement Auth" in content
-        # default persona is @architect
-        assert "- [ ] Define the interfaces and contracts first" in content
-        assert "**Persona:** @architect" in content
-        assert "**Priority:** P1" in content  # default priority
+        epic = initialized_dir / "docs" / "tasks" / "epic-build-state-machine.md"
+        assert epic.exists()
+        assert "Replace markdown state" in epic.read_text()
 
-    def test_persona_developer_checklist(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Build Route", "-k", "developer"]):
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT item_type, slug, priority, status FROM work_items WHERE slug = ?",
+            ("epic-build-state-machine",),
+        )
+        assert row["item_type"] == "epic"
+        assert row["priority"] == "P0"
+        assert row["status"] == "Backlog"
+
+    def test_story_creation_uses_simple_user_story_and_acceptance_criteria(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "epic", "Auth Epic", "-p", "P1", "-o", "Auth goal"]):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "story",
+                "User can login",
+                "--epic",
+                "auth-epic",
+                "--role",
+                "user",
+                "--goal",
+                "log in",
+                "--reason",
+                "access the app",
+                "--ac",
+                "Login succeeds with valid credentials",
+                "--ac",
+                "Invalid password shows an error",
+                "-p",
+                "P1",
+            ],
+        ):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "build-route.md"
-        content = task.read_text()
-        assert "**Persona:** @developer" in content
-        assert "- [ ] Write the failing test first (red), then implement (green), then refactor" in content
+        story = initialized_dir / "docs" / "tasks" / "story-user-can-login.md"
+        text = story.read_text()
+        assert "As a user, I want log in so that I can access the app." in text
+        assert "Login succeeds with valid credentials" in text
+        assert "Invalid password shows an error" in text
 
-    def test_persona_security_checklist(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Audit Login", "-k", "security"]):
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT item_type, epic_slug FROM work_items WHERE slug = ?",
+            ("story-user-can-login",),
+        )
+        assert row["item_type"] == "story"
+        assert row["epic_slug"] == "auth-epic"
+
+    def test_task_creation_syncs_to_db_with_persona(self, initialized_dir):
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "start",
+                "Create SQLite schema",
+                "-k",
+                "architect",
+                "-p",
+                "P0",
+                "-o",
+                "Design state database schema",
+            ],
+        ):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "audit-login.md"
-        content = task.read_text()
-        assert "**Persona:** @security" in content
-        assert "- [ ] Threat model: enumerate attack surfaces for this change" in content
+        task = initialized_dir / "docs" / "tasks" / "create-sqlite-schema.md"
+        text = task.read_text()
+        assert "**Persona:** @architect" in text
+        assert "Design state database schema" in text
 
-    def test_persona_author_checklist(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Write Docs", "-k", "author"]):
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT persona, priority, item_type FROM work_items WHERE slug = ?",
+            ("create-sqlite-schema",),
+        )
+        assert row["persona"] == "@architect"
+        assert row["priority"] == "P0"
+        assert row["item_type"] == "task"
+
+
+class TestBugAndFeature:
+    def test_bug_renders_description_and_found_during(self, initialized_dir):
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "bug",
+                "Login crash",
+                "-d",
+                "Happens when session is expired",
+                "--found-during",
+                "implement-auth",
+            ],
+        ):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "write-docs.md"
-        content = task.read_text()
-        assert "**Persona:** @author" in content
-        assert "- [ ] Write from the user's perspective, not the implementer's" in content
+        bug = initialized_dir / "docs" / "tasks" / "bug-login-crash.md"
+        text = bug.read_text()
+        assert "Happens when session is expired" in text
+        assert "**Found During:** implement-auth" in text
 
-    def test_persona_qa_assignment(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "QA Gate Task", "-k", "qa"]):
+    def test_feature_renders_context_and_objective(self, initialized_dir):
+        ctx = initialized_dir / "docs" / "requirements" / "payment-spec.md"
+        ctx.write_text("# Payment Spec\n")
+
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "feature",
+                "Checkout Flow",
+                "-c",
+                str(ctx),
+                "-o",
+                "As a buyer, I want checkout so that I can pay",
+            ],
+        ):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "qa-gate-task.md"
-        content = task.read_text()
-        assert "**Persona:** @qa" in content
-        assert "## @qa (Quality Assurance)" in content
+        feature = initialized_dir / "docs" / "tasks" / "feat-checkout-flow.md"
+        text = feature.read_text()
+        assert "payment-spec.md" in text
+        assert "## User Story" in text
+        assert "As a buyer, I want checkout so that I can pay" in text
 
-    def test_slugifies_name(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Fix Bug #42!!"]):
+
+class TestLifecycle:
+    def test_progress_updates_file_and_db(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Implement Login", "-o", "Build login flow"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Implement Login"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "fix-bug-42.md"
-        assert task.exists()
+        task = initialized_dir / "docs" / "tasks" / "implement-login.md"
+        assert "**Status:** In Progress" in task.read_text()
 
-    def test_links_context_file(self, initialized_dir):
-        ctx = initialized_dir / "docs" / "requirements" / "auth-spec.md"
-        ctx.write_text("# Auth Spec\nDetails here.")
+        db_path = initialized_dir / "keeli_state.db"
+        status = _db_value(
+            db_path,
+            "SELECT status FROM work_items WHERE slug = ?",
+            ("implement-login",),
+        )
+        assert status == "In Progress"
 
-        with patch("sys.argv", ["keeli", "start", "Auth Feature", "-c", str(ctx)]):
+    def test_complete_archives_and_marks_db_archived(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Ship Login", "-o", "Ship it"]):
+            main()
+        with patch("sys.argv", ["keeli", "complete", "Ship Login"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "auth-feature.md"
-        content = task.read_text()
-        assert "auth-spec.md" in content
+        archived = initialized_dir / "docs" / "tasks" / "archive" / "ship-login.md"
+        assert archived.exists()
+        assert "**Status:** Completed" in archived.read_text()
 
-    def test_does_not_overwrite_without_force(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "My Task"]):
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT status, archived, completed_at FROM work_items WHERE slug = ?",
+            ("ship-login",),
+        )
+        assert row["status"] == "Completed"
+        assert row["archived"] == 1
+        assert row["completed_at"]
+
+    def test_reopen_restores_archived_task_and_db_state(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Reopen Login", "-o", "Ship it"]):
             main()
-        marker = "ORIGINAL"
-        (initialized_dir / "docs" / "tasks" / "my-task.md").write_text(marker)
-
-        with patch("sys.argv", ["keeli", "start", "My Task"]):
+        with patch("sys.argv", ["keeli", "complete", "Reopen Login"]):
             main()
-
-        content = (initialized_dir / "docs" / "tasks" / "my-task.md").read_text()
-        assert content == marker
-
-    def test_auto_logs_creation(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "New Feature"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Task created: New Feature" in log
-
-    def test_priority_flag(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Critical Fix", "-p", "P0"]):
+        with patch("sys.argv", ["keeli", "reopen", "Reopen Login"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "critical-fix.md"
-        content = task.read_text()
-        assert "**Priority:** P0" in content
+        live = initialized_dir / "docs" / "tasks" / "reopen-login.md"
+        assert live.exists()
+        assert "**Status:** In Progress" in live.read_text()
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT status, archived FROM work_items WHERE slug = ?",
+            ("reopen-login",),
+        )
+        assert row["status"] == "In Progress"
+        assert row["archived"] == 0
 
 
-# ── persona complete ───────────────────────────────────────────────────────
-
-class TestComplete:
-    def _tick_all(self, task_file):
-        """Tick all checklist items so the complete guard passes."""
-        task_file.write_text(task_file.read_text().replace("- [ ]", "- [x]"))
-
-    def test_marks_task_completed(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "My Task"]):
+class TestListingAndStatus:
+    def test_list_reads_from_db_backed_state(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "High Prio", "-p", "P0", "-o", "Do it"]):
             main()
-        task = initialized_dir / "docs" / "tasks" / "my-task.md"
-        self._tick_all(task)
-        with patch("sys.argv", ["keeli", "complete", "My Task"]):
+        with patch("sys.argv", ["keeli", "start", "Low Prio", "-p", "P2", "-o", "Do it"]):
             main()
-
-        archived = initialized_dir / "docs" / "tasks" / "archive" / "my-task.md"
-        content = archived.read_text()
-        assert "**Status:** Completed" in content
-        assert "**Completed:** 20" in content  # timestamp starts with year
-
-    def test_logs_completion(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Log Test"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "log-test.md"
-        self._tick_all(task)
-        with patch("sys.argv", ["keeli", "complete", "Log Test"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Task completed: Log Test" in log
-
-    def test_suggests_next_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "First Task", "-p", "P0"]):
-            main()
-        with patch("sys.argv", ["keeli", "start", "Second Task", "-p", "P1"]):
-            main()
-        first = initialized_dir / "docs" / "tasks" / "first-task.md"
-        self._tick_all(first)
-        with patch("sys.argv", ["keeli", "complete", "First Task"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "Next task:" in output
-        assert "second-task" in output
-
-    def test_all_done_message(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Only Task"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "only-task.md"
-        self._tick_all(task)
-        with patch("sys.argv", ["keeli", "complete", "Only Task"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "All tasks are complete" in output
-
-    def test_already_completed(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Done Task"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "done-task.md"
-        self._tick_all(task)
-        with patch("sys.argv", ["keeli", "complete", "Done Task"]):
-            main()
-        # Try to complete again — it's now in archive
-        archived = initialized_dir / "docs" / "tasks" / "archive" / "done-task.md"
-        with patch("sys.argv", ["keeli", "complete", "Done Task"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "already marked as Completed" in output
-
-
-# ── persona next ───────────────────────────────────────────────────────────
-
-class TestNext:
-    def test_shows_highest_priority_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Low Prio", "-p", "P2"]):
-            main()
-        with patch("sys.argv", ["keeli", "start", "High Prio", "-p", "P0"]):
-            main()
-        with patch("sys.argv", ["keeli", "next", "-q"]):
+        with patch("sys.argv", ["keeli", "list"]):
             main()
 
         output = capsys.readouterr().out
         assert "high-prio" in output
+        assert "low-prio" in output
 
-    def test_no_tasks_remaining(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "next"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "All tasks are complete" in output
-
-    def test_skips_epics_in_next(self, initialized_dir, capsys):
-        """keeli next must never surface epic-*.md files — they are not leaf tasks."""
-        with patch("sys.argv", ["keeli", "epic", "Big Epic", "-p", "P0",
-                                 "-o", "goal of big epic"]):
-            main()
-        # No regular tasks — only the epic exists
-        with patch("sys.argv", ["keeli", "next", "-q"]):
-            main()
-        output = capsys.readouterr().out
-        assert "All tasks are complete" in output or "big-epic" not in output
-
-    def test_skips_stories_in_next(self, initialized_dir, capsys):
-        """keeli next must never surface story-*.md files — they are planning artifacts."""
-        with patch("sys.argv", ["keeli", "epic", "Story Epic", "-p", "P1",
-                                 "-o", "parent epic"]):
-            main()
-        with patch("sys.argv", ["keeli", "story", "User can login",
-                                 "--epic", "story-epic",
-                                 "--role", "user", "--goal", "login",
-                                 "--reason", "access the app", "-p", "P1"]):
-            main()
-        # One real task at P2 — story at P1 should be skipped
-        with patch("sys.argv", ["keeli", "start", "Real Task", "-p", "P2"]):
-            main()
-        with patch("sys.argv", ["keeli", "next", "-q"]):
-            main()
-        output = capsys.readouterr().out
-        assert "real-task" in output
-
-
-# ── persona log ────────────────────────────────────────────────────────────
-
-class TestLog:
-    def test_appends_timestamped_entry(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "log", "Fixed auth bug"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Fixed auth bug" in log
-        # Check ISO timestamp format (YYYY-MM-DDT)
-        assert "T" in log.splitlines()[-1]
-
-    def test_multiple_entries(self, initialized_dir):
-        for msg in ["First entry", "Second entry", "Third entry"]:
-            with patch("sys.argv", ["keeli", "log", msg]):
-                main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "First entry" in log
-        assert "Third entry" in log
-
-
-# ── persona resume ─────────────────────────────────────────────────────────
-
-class TestResume:
-    def test_brief_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Active Task"]):
-            main()
-
-        with patch("sys.argv", ["keeli", "resume", "--brief"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "Project" in output or "Active Tasks" in output
-
-    def test_full_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "resume", "--full"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "Keeli Framework" in output
-
-    def test_default_mode(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "resume"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "Keeli Framework" in output
-
-
-# ── persona status ─────────────────────────────────────────────────────────
-
-class TestStatus:
-    def test_healthy_after_init(self, initialized_dir, capsys):
+    def test_status_reports_state_database(self, initialized_dir, capsys):
         with patch("sys.argv", ["keeli", "status"]):
             main()
 
         output = capsys.readouterr().out
+        assert "keeli_state.db" in output
         assert "Healthy" in output
 
-    def test_unhealthy_when_file_missing(self, initialized_dir, capsys):
-        (initialized_dir / "docs" / "decision.md").unlink()
-
-        with patch("sys.argv", ["keeli", "status"]):
+    def test_next_json_returns_enveloped_task_payload(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Next", "-p", "P0", "-o", "Do it"]):
             main()
 
-        output = capsys.readouterr().out
-        assert "Incomplete" in output
-
-
-# ── persona clear-log ──────────────────────────────────────────────────────
-
-class TestClearLog:
-    def test_clears_log(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "log", "Some noise"]):
-            main()
-        with patch("sys.argv", ["keeli", "clear-log"]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "next", "--json"]):
             main()
 
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Some noise" not in log
-        assert "AI Audit Log" in log
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "next"
+        assert payload["timestamp"]
+        assert payload["data"]["task"] == "json-next"
+        assert payload["data"]["priority"] == "P0"
 
-
-# ── persona progress ───────────────────────────────────────────────────────
-
-class TestProgress:
-    def test_marks_task_in_progress(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "My Task", "-o", "Implement feature X"]):
-            main()
-        with patch("sys.argv", ["keeli", "progress", "My Task"]):
+    def test_list_json_returns_enveloped_items_payload(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json List", "-o", "Do it"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "my-task.md"
-        content = task.read_text()
-        assert "**Status:** In Progress" in content
-
-    def test_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Log Progress", "-o", "Log progress task"]):
-            main()
-        with patch("sys.argv", ["keeli", "progress", "Log Progress"]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "list", "--json"]):
             main()
 
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Task started: Log Progress" in log
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "list"
+        assert payload["data"]["count"] >= 1
+        assert any(item["task"] == "json-list" for item in payload["data"]["items"])
 
-    def test_already_in_progress(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "WIP Task", "-o", "Work in progress task"]):
-            main()
-        with patch("sys.argv", ["keeli", "progress", "WIP Task"]):
-            main()
-        with patch("sys.argv", ["keeli", "progress", "WIP Task"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "already In Progress" in output
-
-    def test_not_found(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "progress", "Nonexistent"]):
+    def test_find_json_returns_enveloped_results_payload(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Find", "-o", "Do it"]):
             main()
 
-        output = capsys.readouterr().out
-        assert "not found" in output
-
-
-# ── persona block ──────────────────────────────────────────────────────────
-
-class TestBlock:
-    def test_marks_task_blocked(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Blocked Task"]):
-            main()
-        with patch("sys.argv", ["keeli", "block", "Blocked Task"]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "find", "json-find", "--json"]):
             main()
 
-        task = initialized_dir / "docs" / "tasks" / "blocked-task.md"
-        content = task.read_text()
-        assert "**Status:** Blocked" in content
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "find"
+        assert payload["data"]["mode"] == "keyword"
+        assert any(item["slug"] == "json-find" for item in payload["data"]["results"])
 
-    def test_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "start", "Block Log"]):
-            main()
-        with patch("sys.argv", ["keeli", "block", "Block Log"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Task blocked: Block Log" in log
-
-
-# ── persona update ─────────────────────────────────────────────────────────
-
-class TestUpdate:
-    def test_updates_instructions(self, initialized_dir, capsys):
-        # Tamper with version to simulate old template
-        instructions = initialized_dir / ".github" / "copilot-instructions.md"
-        instructions.write_text("# Old template v0.1.0\nStale content.")
-
-        with patch("sys.argv", ["keeli", "update"]):
+    def test_history_json_returns_enveloped_entries(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json History", "-o", "Do it"]):
             main()
 
-        output = capsys.readouterr().out
-        assert "Updated" in output
-        content = instructions.read_text()
-        assert "Five-Persona Architecture" in content
+        task_text = (initialized_dir / "docs" / "tasks" / "json-history.md").read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
 
-    def test_skip_if_same_version(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "update"]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "history", task_id, "--json"]):
             main()
 
-        output = capsys.readouterr().out
-        assert "Already at" in output
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "history"
+        assert payload["data"]["query"] == task_id
+        assert payload["data"]["count"] >= 1
+        assert any(task_id in entry for entry in payload["data"]["entries"])
 
-    def test_force_regenerate(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "update", "--force"]):
+    def test_digest_json_returns_enveloped_context(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Digest", "-o", "Do it"]):
             main()
 
-        output = capsys.readouterr().out
-        assert "Updated" in output
-
-    def test_preserves_user_files(self, initialized_dir):
-        # Write custom content to project.md
-        project = initialized_dir / "docs" / "project.md"
-        project.write_text("# My Custom Project")
-
-        with patch("sys.argv", ["keeli", "update", "--force"]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "digest", "--budget", "500", "--json"]):
             main()
 
-        # project.md should be untouched
-        assert project.read_text() == "# My Custom Project"
-
-
-# ── persona resume token estimate ──────────────────────────────────────────
-
-class TestResumeTokenEstimate:
-    def test_shows_token_estimate(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "resume"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "~" in output and "tokens" in output
-        assert "default mode" in output
-
-    def test_brief_mode_label(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "resume", "--brief"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "brief mode" in output
-
-    def test_full_mode_label(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "resume", "--full"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "full mode" in output
-
-
-# ── persona init .gitkeep ──────────────────────────────────────────────────
-
-class TestInitGitkeep:
-    def test_creates_gitkeep_files(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        with patch("sys.argv", ["keeli", "init"]):
-            main()
-
-        assert (tmp_path / "docs" / "tasks" / ".gitkeep").exists()
-        assert (tmp_path / "docs" / "requirements" / ".gitkeep").exists()
-
-
-# ── persona reopen ─────────────────────────────────────────────────────────
-
-class TestReopen:
-    def _make_completable_task(self, initialized_dir, title: str) -> None:
-        """Create a task with filled objective and all checklist items checked."""
-        slug = title.lower().replace(" ", "-")
-        with patch("sys.argv", ["keeli", "start", title, "-o", f"Objective for {title}"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / f"{slug}.md"
-        task.write_text(task.read_text().replace("- [ ]", "- [x]"))
-
-    def test_reopens_completed_task(self, initialized_dir):
-        self._make_completable_task(initialized_dir, "Reopen Me")
-        with patch("sys.argv", ["keeli", "complete", "Reopen Me"]):
-            main()
-        with patch("sys.argv", ["keeli", "reopen", "Reopen Me"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "reopen-me.md"
-        content = task.read_text()
-        assert "**Status:** In Progress" in content
-        assert "**Completed:** —" in content
-
-    def test_logs_reopen_event(self, initialized_dir):
-        self._make_completable_task(initialized_dir, "Log Reopen")
-        with patch("sys.argv", ["keeli", "complete", "Log Reopen"]):
-            main()
-        with patch("sys.argv", ["keeli", "reopen", "Log Reopen"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Task reopened: Log Reopen" in log
-
-    def test_cannot_reopen_backlog_task(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Backlog Task"]):
-            main()
-        with patch("sys.argv", ["keeli", "reopen", "Backlog Task"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "reopen only works on Completed or Review" in output
-
-    def test_reopen_not_found(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "reopen", "Nonexistent"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "not found" in output
-
-
-# ── persona bug ────────────────────────────────────────────────────────────
-
-class TestBug:
-    def test_creates_bug_report(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Login crash"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "bug-login-crash.md"
-        assert task.exists()
-        content = task.read_text()
-        assert "# Bug: Login crash" in content
-        assert "**Priority:** P0" in content  # default for bugs
-        assert "- [ ] Write regression test" in content
-
-    def test_bug_with_description(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "NullPointer in OrderService", "-d", "Happens when order.qty is null"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "bug-nullpointer-in-orderservice.md"
-        content = task.read_text()
-        assert "Happens when order.qty is null" in content
-
-    def test_bug_with_priority(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Minor typo", "-p", "P2"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "bug-minor-typo.md"
-        content = task.read_text()
-        assert "**Priority:** P2" in content
-
-    def test_bug_with_found_during(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Race condition", "--found-during", "implement-auth"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "bug-race-condition.md"
-        content = task.read_text()
-        assert "implement-auth" in content
-
-    def test_bug_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Auth bypass"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Bug reported: Auth bypass" in log
-
-    def test_bug_no_overwrite_without_force(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Dup Bug"]):
-            main()
-        marker = "ORIGINAL"
-        (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").write_text(marker)
-
-        with patch("sys.argv", ["keeli", "bug", "Dup Bug"]):
-            main()
-        assert (initialized_dir / "docs" / "tasks" / "bug-dup-bug.md").read_text() == marker
-
-
-# ── persona init skills ───────────────────────────────────────────────────
-
-class TestInitSkills:
-    def test_project_md_has_tech_stack_section(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        with patch("sys.argv", ["keeli", "init"]):
-            main()
-
-        content = (tmp_path / "docs" / "project.md").read_text()
-        assert "## Tech Stack" in content
-        assert "### Languages & Frameworks" in content
-        assert "### Infrastructure" in content
-        # Stale defaults must NOT be present in the blank-slate template
-        assert "Java" not in content
-        assert "Spring Framework" not in content
-        assert "Trading systems" not in content
-
-
-# ── keeli feature ──────────────────────────────────────────────────────────
-
-class TestFeature:
-    def test_creates_feature_file(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Dark Mode Support"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "feat-dark-mode-support.md"
-        assert task.exists()
-        content = task.read_text()
-        assert "# Feature: Dark Mode Support" in content
-        assert "**Priority:** P1" in content  # default
-        assert "## User Story" in content
-        assert "## Acceptance Criteria" in content
-        assert "## Design Notes" in content
-        assert "- [ ] @author docs updated" in content
-
-    def test_feature_with_priority(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Payment Gateway", "-p", "P0"]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "feat-payment-gateway.md"
-        assert "**Priority:** P0" in task.read_text()
-
-    def test_feature_with_context(self, initialized_dir):
-        ctx = initialized_dir / "docs" / "requirements" / "payment-spec.md"
-        ctx.write_text("# Payment Spec")
-
-        with patch("sys.argv", ["keeli", "feature", "Checkout Flow", "-c", str(ctx)]):
-            main()
-
-        task = initialized_dir / "docs" / "tasks" / "feat-checkout-flow.md"
-        assert "payment-spec.md" in task.read_text()
-
-    def test_feature_logs_event(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Search Bar"]):
-            main()
-
-        log = (initialized_dir / "docs" / "ai_log.md").read_text()
-        assert "Feature created: Search Bar" in log
-
-    def test_feature_no_overwrite_without_force(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Dup Feature"]):
-            main()
-        marker = "ORIGINAL"
-        (initialized_dir / "docs" / "tasks" / "feat-dup-feature.md").write_text(marker)
-
-        with patch("sys.argv", ["keeli", "feature", "Dup Feature"]):
-            main()
-        assert (initialized_dir / "docs" / "tasks" / "feat-dup-feature.md").read_text() == marker
-
-    def test_feature_force_overwrites(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Overwrite Me"]):
-            main()
-        (initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md").write_text("OLD")
-
-        with patch("sys.argv", ["keeli", "feature", "Overwrite Me", "-f"]):
-            main()
-
-        content = (initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md").read_text()
-        assert "# Feature: Overwrite Me" in content
-
-
-# ── keeli story ────────────────────────────────────────────────────────────
-
-class TestStory:
-    def test_creates_story_file(self, initialized_dir):
-        # First create the epic so the story can be linked
-        with patch("sys.argv", ["keeli", "epic", "My Epic", "-p", "P1",
-                                 "-o", "goal of my epic"]):
-            main()
-        with patch("sys.argv", ["keeli", "story", "Add a widget",
-                                 "--epic", "my-epic",
-                                 "--role", "developer",
-                                 "--goal", "insert a widget",
-                                 "--reason", "complete the feature",
-                                 "-p", "P1"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "story-add-a-widget.md"
-        assert task.exists()
-        content = task.read_text()
-        assert "# Story: Add a widget" in content
-        assert "As a developer" in content
-
-    def test_story_grammar_so_that_i_can(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "epic", "Grammar Epic", "-p", "P1",
-                                 "-o", "grammar test"]):
-            main()
-        with patch("sys.argv", ["keeli", "story", "Grammar check",
-                                 "--epic", "grammar-epic",
-                                 "--role", "user",
-                                 "--goal", "see correct grammar",
-                                 "--reason", "stay organized",
-                                 "-p", "P1"]):
-            main()
-        content = (initialized_dir / "docs" / "tasks" / "story-grammar-check.md").read_text()
-        assert "so that I can stay organized" in content
-        assert "so that stay organized" not in content
-
-    def test_story_ac_flag_populates_criteria(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "epic", "AC Epic", "-p", "P1",
-                                 "-o", "ac test"]):
-            main()
-        with patch("sys.argv", ["keeli", "story", "AC Story",
-                                 "--epic", "ac-epic",
-                                 "--role", "user",
-                                 "--goal", "use the app",
-                                 "--reason", "get work done",
-                                 "--ac", "Can add a todo",
-                                 "--ac", "Persists to disk",
-                                 "-p", "P1"]):
-            main()
-        content = (initialized_dir / "docs" / "tasks" / "story-ac-story.md").read_text()
-        assert "- [ ] Can add a todo" in content
-        assert "- [ ] Persists to disk" in content
-        assert "<!-- Criterion 1 -->" not in content
-
-    def test_story_no_ac_flag_uses_placeholder(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "epic", "NoAC Epic", "-p", "P1",
-                                 "-o", "no ac test"]):
-            main()
-        with patch("sys.argv", ["keeli", "story", "NoAC Story",
-                                 "--epic", "noac-epic",
-                                 "--role", "user",
-                                 "--goal", "use app",
-                                 "--reason", "get work done",
-                                 "-p", "P1"]):
-            main()
-        content = (initialized_dir / "docs" / "tasks" / "story-noac-story.md").read_text()
-        assert "<!-- Criterion 1 -->" in content
-
-
-# ── cross-prefix task resolution ──────────────────────────────────────────
-
-class TestPrefixResolution:
-    """complete / progress / block / reopen should find bug- and feat- files."""
-
-    def test_complete_resolves_bug_prefix(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Some Bug"]):
-            main()
-        # Tick all checklist items so guard passes
-        task = initialized_dir / "docs" / "tasks" / "bug-some-bug.md"
-        task.write_text(task.read_text().replace("- [ ]", "- [x]"))
-        with patch("sys.argv", ["keeli", "complete", "Some Bug"]):
-            main()
-
-        archived = initialized_dir / "docs" / "tasks" / "archive" / "bug-some-bug.md"
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(archived.read_text(), "Status") == "Completed"
-
-    def test_complete_resolves_feat_prefix(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Cool Feature"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "feat-cool-feature.md"
-        task.write_text(task.read_text().replace("- [ ]", "- [x]"))
-        with patch("sys.argv", ["keeli", "complete", "Cool Feature"]):
-            main()
-
-        archived = initialized_dir / "docs" / "tasks" / "archive" / "feat-cool-feature.md"
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(archived.read_text(), "Status") == "Completed"
-
-    def test_progress_resolves_bug_prefix(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "bug", "Flaky Test"]):
-            main()
-        # Bug template has ## Description section with content so guard passes
-        # but Objective section must be filled — update it
-        task = initialized_dir / "docs" / "tasks" / "bug-flaky-test.md"
-        text = task.read_text()
-        # Bug template uses ## Description not ## Objective — guard checks Objective
-        # Bug tasks inherit the general guard but bug template has Description not Objective.
-        # Add a minimal Objective to satisfy guard.
-        text = text.replace("## Description", "## Objective\nFix the flaky test.\n\n## Description")
-        task.write_text(text)
-        with patch("sys.argv", ["keeli", "progress", "Flaky Test"]):
-            main()
-
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
-
-    def test_reopen_resolves_feat_prefix(self, initialized_dir):
-        with patch("sys.argv", ["keeli", "feature", "Dark Theme"]):
-            main()
-        # Complete it first, then reopen
-        task = initialized_dir / "docs" / "tasks" / "feat-dark-theme.md"
-        from keeli.main import _update_task_field, _parse_task_field
-        task.write_text(_update_task_field(task.read_text(), "Status", "Completed"))
-
-        with patch("sys.argv", ["keeli", "reopen", "Dark Theme"]):
-            main()
-        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
-
-
-# ── keeli skill scan ───────────────────────────────────────────────────────
-
-class TestSkillScan:
-    """Unit tests for keeli skill scan (discovery only, no I/O side-effects)."""
-
-    def test_scan_requirements_txt(self, tmp_path):
-        from keeli.main import _scan_manifests
-        (tmp_path / "requirements.txt").write_text(
-            "fastapi>=0.110.0\npydantic==2.7.0\nuvicorn\n# comment line\n"
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "digest"
+        assert payload["data"]["budget"] == 500
+        assert isinstance(payload["data"]["used_tokens"], int)
+        assert isinstance(payload["data"]["context"], str)
+
+
+class TestCustomPrompts:
+    def test_prompt_apply_renders_and_writes_output_file(self, initialized_dir):
+        src = initialized_dir / "trello-template.md"
+        src.write_text(
+            "---\n"
+            "persona: architect\n"
+            "applies_to: connector-management\n"
+            "priority: high\n"
+            "---\n"
+            "{\n"
+            "  \"connector\": \"trello\",\n"
+            "  \"board_id\": \"{{board_id}}\",\n"
+            "  \"list_architect\": \"{{list_architect}}\"\n"
+            "}\n"
         )
-        skills = _scan_manifests(tmp_path)
-        names = [s.name.lower() for s in skills]
-        assert "fastapi"  in names
-        assert "pydantic" in names
-        assert "uvicorn"  in names
 
-    def test_scan_deduplicates(self, tmp_path):
-        from keeli.main import _scan_manifests
-        (tmp_path / "requirements.txt").write_text("fastapi>=0.100\n")
-        (tmp_path / "requirements-dev.txt").write_text("fastapi>=0.100\n")
-        skills = _scan_manifests(tmp_path)
-        names = [s.name.lower() for s in skills]
-        assert names.count("fastapi") == 1
-
-    def test_scan_package_json(self, tmp_path):
-        from keeli.main import _scan_manifests
-        (tmp_path / "package.json").write_text(
-            '{"dependencies": {"react": "^18.0.0", "axios": "^1.6.0"}}'
-        )
-        skills = _scan_manifests(tmp_path)
-        names = [s.name.lower() for s in skills]
-        assert "react" in names
-        assert "axios" in names
-
-    def test_scan_python_version_file(self, tmp_path):
-        from keeli.main import _scan_manifests
-        (tmp_path / ".python-version").write_text("3.12.3\n")
-        skills = _scan_manifests(tmp_path)
-        assert any(s.name == "Python" and s.version == "3.12.3" for s in skills)
-
-    def test_scan_empty_dir(self, tmp_path):
-        from keeli.main import _scan_manifests
-        assert _scan_manifests(tmp_path) == []
-
-    def test_classify_skill_lang(self):
-        from keeli.main import _classify_skill
-        assert _classify_skill("python") == "lang"
-        assert _classify_skill("Go")     == "lang"
-
-    def test_classify_skill_framework(self):
-        from keeli.main import _classify_skill
-        assert _classify_skill("fastapi") == "framework"
-        assert _classify_skill("django")  == "framework"
-
-    def test_classify_skill_tool(self):
-        from keeli.main import _classify_skill
-        assert _classify_skill("requests") == "tool"
-
-    def test_scan_dry_run_output(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "skill", "scan", "--dry-run"]):
+        with patch("sys.argv", ["keeli", "prompt", "add", "trello-manage", "--file", str(src)]):
             main()
-        out = capsys.readouterr().out
-        # Should print scan header without writing to skills.md
-        assert "Scanned" in out or "No recognised manifest" in out
 
-    def test_scan_outputs_table_in_python_project(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.chdir(tmp_path)
-        with patch("sys.argv", ["keeli", "init"]):
+        out_path = initialized_dir / ".keeli" / "connectors" / "trello.json"
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "prompt",
+                "apply",
+                "trello-manage",
+                "--var",
+                "board_id=b-123",
+                "--var",
+                "list_architect=l-arch",
+                "--output",
+                str(out_path),
+            ],
+        ):
             main()
-        (tmp_path / "requirements.txt").write_text("pytest>=8.0\nhttpx>=0.27\n")
-        with patch("sys.argv", ["keeli", "skill", "scan"]):
+
+        assert out_path.exists()
+        rendered = out_path.read_text()
+        assert '{{board_id}}' not in rendered
+        assert '"board_id": "b-123"' in rendered
+        assert '"list_architect": "l-arch"' in rendered
+
+    def test_prompt_apply_prints_rendered_content_without_output(self, initialized_dir, capsys):
+        src = initialized_dir / "simple-template.md"
+        src.write_text("Hello {{name}}")
+
+        with patch("sys.argv", ["keeli", "prompt", "add", "hello-template", "--file", str(src)]):
             main()
-        out = capsys.readouterr().out
-        assert "pytest" in out
-        assert "httpx"  in out
-        assert "--apply" in out  # instruction to user
 
-
-# ── mandatory constraint on skill add ─────────────────────────────────────
-
-class TestSkillAddMandatoryConstraint:
-    """@architect must supply a non-empty constraint — empty is rejected."""
-
-    def test_rejects_empty_constraint_flag(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "skill", "add", "SomeLib", "-t", "tool",
-                                 "-k", "developer", "-c", ""]):
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "prompt", "apply", "hello-template", "--var", "name=Keeli"]):
             main()
-        out = capsys.readouterr().out
-        assert "cannot be empty" in out.lower() or "required" in out.lower()
-        # Skill must NOT have been written
-        from keeli.main import _read_skills
-        names = [n for _, n, _, _ in _read_skills()]
-        assert "SomeLib" not in names
 
-    def test_accepts_non_empty_constraint(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "skill", "add", "requests", "-t", "tool",
-                                 "-k", "developer", "-c", "2.31+; always use timeout=30"]):
+        output = capsys.readouterr().out
+        assert "Hello Keeli" in output
+
+
+class TestValidateTaskState:
+    def test_passes_when_no_leaf_work_items_exist(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "validate-task-state"]):
             main()
-        out = capsys.readouterr().out
-        assert "Added skill" in out
-        from keeli.main import _read_skills
-        names = [n for _, n, _, _ in _read_skills()]
-        assert "requests" in names
 
+        output = capsys.readouterr().out
+        assert "Task state valid" in output
 
-# ── keeli chain ────────────────────────────────────────────────────────────
-
-class TestChainHelpers:
-    """Unit tests for chain infrastructure helpers (no subprocess)."""
-
-    def test_extract_slug_from_output(self):
-        from keeli.main import _extract_slug_from_output
-        out = "✅ Created task: docs/tasks/implement-auth.md [T-0001]"
-        assert _extract_slug_from_output(out) == "implement-auth"
-
-    def test_extract_slug_returns_none_when_missing(self):
-        from keeli.main import _extract_slug_from_output
-        assert _extract_slug_from_output("no slug here") is None
-
-    def test_builtin_chains_defined(self):
-        from keeli.main import BUILTIN_CHAINS
-        assert "new-task"    in BUILTIN_CHAINS
-        assert "close-task"  in BUILTIN_CHAINS
-        assert "onboard"     in BUILTIN_CHAINS
-
-    def test_builtin_chain_steps_have_cmd(self):
-        from keeli.main import BUILTIN_CHAINS
-        for name, defn in BUILTIN_CHAINS.items():
-            for step in defn["steps"]:
-                assert "cmd" in step, f"Step in chain '{name}' missing 'cmd'"
-
-    def test_chain_list_output(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "chain", "list"]):
+    def test_fails_when_leaf_task_exists_but_none_active(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Backlog Task", "-o", "Do the work"]):
             main()
-        out = capsys.readouterr().out
-        assert "new-task"   in out
-        assert "close-task" in out
-        assert "onboard"    in out
 
-    def test_chain_no_args_prints_usage(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "chain"]):
+        with pytest.raises(SystemExit) as exc:
+            with patch("sys.argv", ["keeli", "validate-task-state"]):
+                main()
+
+        assert exc.value.code == 1
+
+    def test_passes_when_task_is_in_progress(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Active Task", "-o", "Do the work"]):
             main()
-        out = capsys.readouterr().out
-        assert "Usage" in out or "chain" in out.lower()
-
-    def test_chain_dry_run_inline(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "chain",
-                                 "start:Chain Dry Run Task",
-                                 "analyze:auto",
-                                 "--dry-run"]):
+        with patch("sys.argv", ["keeli", "progress", "Active Task"]):
             main()
-        out = capsys.readouterr().out
-        assert "dry-run" in out.lower() or "dry_run" in out.lower() or "previewed" in out.lower()
-        # No task file should be created
-        assert not (initialized_dir / "docs" / "tasks" / "chain-dry-run-task.md").exists()
-
-    def test_chain_run_unknown_chain(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "chain", "run", "no-such-chain"]):
+        with patch("sys.argv", ["keeli", "validate-task-state"]):
             main()
-        out = capsys.readouterr().out
-        assert "Unknown chain" in out or "no-such-chain" in out
 
-    def test_chain_inline_executes_steps(self, initialized_dir, capsys):
-        """Inline chain: start (with objective) → progress should create the task and mark it In Progress."""
-        # Create the task with an objective first so the progress guard passes
-        with patch("sys.argv", ["keeli", "start", "Chain Integration Task",
-                                 "-o", "Build the chain integration"]):
+        output = capsys.readouterr().out
+        assert "Task state valid" in output
+        assert "active-task" in output
+
+    def test_fails_on_pii_in_scanned_file(self, initialized_dir):
+        sample = initialized_dir / "sample.txt"
+        sample.write_text("contact me at test@example.com")
+
+        with pytest.raises(SystemExit) as exc:
+            with patch("sys.argv", ["keeli", "validate-task-state", "--paths", str(sample)]):
+                main()
+
+        assert exc.value.code == 1
+
+
+class TestCaptureCommitState:
+    def test_no_active_task_prints_info(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "capture-commit-state"]):
             main()
-        task = initialized_dir / "docs" / "tasks" / "chain-integration-task.md"
-        assert task.exists(), "Task file should have been pre-created"
-        with patch("sys.argv", ["keeli", "progress", "Chain Integration Task"]):
+
+        output = capsys.readouterr().out
+        assert "No active task" in output
+
+    def test_active_task_logs_commit_metadata(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Track Commit", "-o", "Do the work"]):
             main()
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
-
-    def test_chain_run_builtin_new_task(self, initialized_dir, capsys):
-        """keeli chain run new-task --var title=... should create and analyze a task."""
-        with patch("sys.argv", ["keeli", "chain", "run", "new-task",
-                                 "--var", "title=Named Chain Task"]):
+        with patch("sys.argv", ["keeli", "progress", "Track Commit"]):
             main()
-        task = initialized_dir / "docs" / "tasks" / "named-chain-task.md"
-        assert task.exists(), "keeli chain run new-task should have created the task file"
 
-
-# ── _section_is_filled predicate ───────────────────────────────────────────
-
-class TestSectionIsFilled:
-    """Unit tests for the _section_is_filled predicate factory."""
-
-    def test_filled_section_passes(self):
-        from keeli.main import _section_is_filled
-        text = "## Objective\nSome content here\n"
-        assert _section_is_filled("## Objective")(text) is True
-
-    def test_empty_section_fails(self):
-        from keeli.main import _section_is_filled
-        text = "## Objective\n<!-- placeholder -->\n## Next\ncontent"
-        assert _section_is_filled("## Objective")(text) is False
-
-    def test_section_with_only_comment_fails(self):
-        from keeli.main import _section_is_filled
-        text = "## Non-Functional Requirements\n<!-- @architect: TBD -->\n"
-        assert _section_is_filled("## Non-Functional Requirements")(text) is False
-
-    def test_missing_section_fails(self):
-        from keeli.main import _section_is_filled
-        text = "## Objective\nContent\n"
-        assert _section_is_filled("## Non-Functional Requirements")(text) is False
-
-    def test_real_content_after_comment_passes(self):
-        from keeli.main import _section_is_filled
-        text = "## Test Strategy\n<!-- hint -->\nUse pytest with unit tests.\n"
-        assert _section_is_filled("## Test Strategy")(text) is True
-
-
-# ── _validate_transition helper ────────────────────────────────────────────
-
-class TestValidateTransition:
-    """Unit tests for the _validate_transition helper."""
-
-    def test_empty_rules_always_passes(self, tmp_path):
-        from keeli.main import _validate_transition
-        path = tmp_path / "task.md"
-        path.write_text("some content")
-        errors = _validate_transition(path, [])
-        assert errors == []
-
-    def test_passing_rule_returns_no_error(self, tmp_path):
-        from keeli.main import _validate_transition
-        path = tmp_path / "task.md"
-        path.write_text("content with required phrase")
-        rules = [("Must contain required phrase", lambda t: "required phrase" in t)]
-        errors = _validate_transition(path, rules)
-        assert errors == []
-
-    def test_failing_rule_returns_error_message(self, tmp_path):
-        from keeli.main import _validate_transition
-        path = tmp_path / "task.md"
-        path.write_text("no match here")
-        rules = [("Must contain 'required phrase'", lambda t: "required phrase" in t)]
-        errors = _validate_transition(path, rules)
-        assert errors == ["Must contain 'required phrase'"]
-
-    def test_multiple_failures_collected(self, tmp_path):
-        from keeli.main import _validate_transition
-        path = tmp_path / "task.md"
-        path.write_text("")
-        rules = [
-            ("Rule A", lambda t: "A" in t),
-            ("Rule B", lambda t: "B" in t),
-        ]
-        errors = _validate_transition(path, rules)
-        assert "Rule A" in errors
-        assert "Rule B" in errors
-        assert len(errors) == 2
-
-    def test_partial_failure_only_returns_failed(self, tmp_path):
-        from keeli.main import _validate_transition
-        path = tmp_path / "task.md"
-        path.write_text("A is present")
-        rules = [
-            ("Rule A", lambda t: "A" in t),
-            ("Rule B", lambda t: "B" in t),
-        ]
-        errors = _validate_transition(path, rules)
-        assert errors == ["Rule B"]
-
-# ── Transition guard integration (T-0003) ──────────────────────────────────
-
-class TestProgressGuard:
-    """Guard: keeli progress fails if task Objective is unfilled."""
-
-    def test_blocks_when_objective_is_placeholder(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Guard Progress Task"]):
-            main()
-        # Task has placeholder Objective by default
-        task = initialized_dir / "docs" / "tasks" / "guard-progress-task.md"
-        assert "<!-- @architect" in task.read_text()  # placeholder present
-
-        with patch("sys.argv", ["keeli", "progress", "Guard Progress Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Cannot" in out or "❌" in out
-        # Status must NOT have changed
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") != "In Progress"
-
-    def test_passes_when_objective_is_filled(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Filled Obj Task",
-                                 "-o", "Implement rate limiting for the API"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "filled-obj-task.md"
-
-        with patch("sys.argv", ["keeli", "progress", "Filled Obj Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "In Progress" in out
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") == "In Progress"
-
-
-class TestReviewGuard:
-    """Guard: keeli review fails if developer checklist has unchecked items."""
-
-    def test_blocks_when_checklist_has_unchecked_items(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Review Guard Task",
-                                 "-k", "developer",
-                                 "-o", "Build the feature"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "review-guard-task.md"
-        # Default checklist has unchecked items
-        assert "- [ ]" in task.read_text()
-
-        with patch("sys.argv", ["keeli", "review", "Review Guard Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Cannot" in out or "❌" in out
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") != "Review"
-
-    def test_passes_when_all_items_checked(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "All Checked Task",
-                                 "-k", "developer",
-                                 "-o", "Done feature"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "all-checked-task.md"
-        # Tick all checklist boxes
-        text = task.read_text().replace("- [ ]", "- [x]")
-        task.write_text(text)
-
-        with patch("sys.argv", ["keeli", "review", "All Checked Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Review" in out
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") == "Review"
-
-    def test_passes_with_only_gate_items_unchecked(self, initialized_dir, capsys):
-        """Gate items (@security, @author) must NOT block the review transition."""
-        with patch("sys.argv", ["keeli", "start", "Gate Review Task",
-                                 "-k", "developer",
-                                 "-o", "feature with gate"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "gate-review-task.md"
-        # Tick mechanical items; leave gate item untouched
-        lines = task.read_text().splitlines()
-        updated = []
-        for line in lines:
-            if "- [ ]" in line and ("@security" in line or "@author" in line):
-                updated.append(line)  # keep unticked
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "abc123def4567890\n"
             else:
-                updated.append(line.replace("- [ ]", "- [x]"))
-        task.write_text("\n".join(updated))
+                result.stdout = "Add commit capture\n"
+            return result
 
-        with patch("sys.argv", ["keeli", "review", "Gate Review Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Review" in out
-        from keeli.main import _parse_task_field
-        assert _parse_task_field(task.read_text(), "Status") == "Review"
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state"]):
+                main()
 
+        log_text = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert "Commit captured for track-commit" in log_text
+        assert "abc123def456" in log_text
 
-class TestCompleteGuard:
-    """Guard: keeli complete fails if any checklist item is unchecked."""
-
-    def test_blocks_when_checklist_has_unchecked_items(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Complete Guard Task",
-                                 "-k", "security",
-                                 "-o", "Security review item"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "complete-guard-task.md"
-        assert "- [ ]" in task.read_text()
-
-        with patch("sys.argv", ["keeli", "complete", "Complete Guard Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Cannot" in out or "❌" in out
-        assert task.exists(), "Task should NOT have been archived"
-
-    def test_passes_when_all_items_checked(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "All Done Task",
-                                 "-k", "security",
-                                 "-o", "Security approved"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "all-done-task.md"
-        text = task.read_text().replace("- [ ]", "- [x]")
-        task.write_text(text)
-
-        with patch("sys.argv", ["keeli", "complete", "All Done Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Completed" in out
-        archive = initialized_dir / "docs" / "tasks" / "archive" / "all-done-task.md"
-        assert archive.exists()
-
-    def test_passes_with_only_gate_items_unchecked(self, initialized_dir, capsys):
-        """Gate items (@security, @author) must NOT block the complete transition."""
-        with patch("sys.argv", ["keeli", "start", "Gate Complete Task",
-                                 "-k", "security",
-                                 "-o", "Security gate item"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "gate-complete-task.md"
-        lines = task.read_text().splitlines()
-        updated = []
-        for line in lines:
-            if "- [ ]" in line and ("@security" in line or "@author" in line):
-                updated.append(line)  # keep gate items unticked
-            else:
-                updated.append(line.replace("- [ ]", "- [x]"))
-        task.write_text("\n".join(updated))
-
-        with patch("sys.argv", ["keeli", "complete", "Gate Complete Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Completed" in out
-        archive = initialized_dir / "docs" / "tasks" / "archive" / "gate-complete-task.md"
-        assert archive.exists()
-
-
-# ── keeli tick ─────────────────────────────────────────────────────────────
-
-class TestEnsure:
-    """keeli ensure searches or creates a task based on a description."""
-
-    def test_existing_task_reported(self, initialized_dir, capsys):
-        # create a task first
-        with patch("sys.argv", ["keeli", "start", "Existing Task", "-k", "developer", "-o", "something"]):
-            main()
-        with patch("sys.argv", ["keeli", "ensure", "Existing Task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "Found existing task" in out or "Existing Task" in out
-
-    def test_prompt_no_does_not_create(self, initialized_dir, monkeypatch, capsys):
-        # ensure no task and user answers no
-        monkeypatch.setattr("keeli.main._prompt", lambda *args, **kwargs: "n")
-        with patch("sys.argv", ["keeli", "ensure", "New Problem"]):
-            main()
-        # no task file should exist
-        assert not (initialized_dir / "docs" / "tasks" / "story-new-problem.md").exists()
-
-    def test_prompt_yes_creates(self, initialized_dir, monkeypatch, capsys):
-        monkeypatch.setattr("keeli.main._prompt", lambda *args, **kwargs: "y")
-        with patch("sys.argv", ["keeli", "ensure", "Make widget"]):
-            main()
-        # a task file should now exist
-        assert (initialized_dir / "docs" / "tasks" / "task-make-widget.md").exists() or \
-               any(p.stem.startswith("make-widget") for p in (initialized_dir / "docs" / "tasks").glob("*.md"))
-
-    def test_yes_flag_creates_without_prompt(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "ensure", "Auto Task", "-y", "-o", "objective text"]):
-            main()
-        assert (initialized_dir / "docs" / "tasks" / "task-auto-task.md").exists() or \
-               any(p.stem.startswith("auto-task") for p in (initialized_dir / "docs" / "tasks").glob("*.md"))
-
-    def test_no_flag_skips_creation(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "ensure", "Nothing", "--no"]):
-            main()
-        assert not (initialized_dir / "docs" / "tasks" / "task-nothing.md").exists()
-
-
-class TestTick:
-    """keeli tick ticks mechanical checklist items; leaves gate items untouched."""
-
-    def test_ticks_mechanical_items(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Tick Task",
-                                 "-k", "developer", "-o", "build it"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "tick-task.md"
-        assert "- [ ]" in task.read_text()
-
-        with patch("sys.argv", ["keeli", "tick", "Tick Task"]):
-            main()
-
-        content = task.read_text()
-        # All non-gate items must now be ticked
-        for line in content.splitlines():
-            if "- [ ]" in line:
-                assert "@security" in line or "@author" in line, \
-                    f"Non-gate item left unticked: {line}"
-
-    def test_leaves_gate_items_unticked(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Gate Tick Task",
-                                 "-k", "developer", "-o", "feature"]):
-            main()
-        task = initialized_dir / "docs" / "tasks" / "gate-tick-task.md"
-
-        with patch("sys.argv", ["keeli", "tick", "Gate Tick Task"]):
-            main()
-
-        content = task.read_text()
-        gate_items = [l for l in content.splitlines()
-                      if "- [ ]" in l and ("@security" in l or "@author" in l)]
-        assert len(gate_items) > 0, "Expected at least one gate item to remain unticked"
-
-    def test_tick_reports_count(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "start", "Count Task",
-                                 "-k", "developer", "-o", "count items"]):
-            main()
-        with patch("sys.argv", ["keeli", "tick", "Count Task"]):
-            main()
-        out = capsys.readouterr().out
-        # Output should mention how many items were ticked
-        assert "✅" in out or "ticked" in out.lower() or any(c.isdigit() for c in out)
-
-    def test_tick_unknown_task_errors(self, initialized_dir, capsys):
-        with patch("sys.argv", ["keeli", "tick", "no-such-task"]):
-            main()
-        out = capsys.readouterr().out
-        assert "❌" in out or "not found" in out.lower()
-
-
-# ── ADR-008: Hierarchy Enforcement Tests ──────────────────────────────────
-
-class TestADR008HierarchyValidation:
-    """ADR-008: Epic > Story > Task hierarchy validation (unit tests)."""
-
-    def test_task_missing_epic_fails_hierarchy(self, initialized_dir, tmp_path):
-        """A task file without Epic set fails hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-**Epic:** None
-**Story:** my-story
-""")
-        errors = _validate_hierarchy(task_file)
-        assert len(errors) > 0
-        assert any("epic" in e.lower() for e in errors)
-
-    def test_task_missing_story_fails_hierarchy(self, initialized_dir, tmp_path):
-        """A task file without Story set fails hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-**Epic:** my-epic
-**Story:** None
-""")
-        errors = _validate_hierarchy(task_file)
-        assert len(errors) > 0
-        assert any("story" in e.lower() for e in errors)
-
-    def test_task_with_epic_and_story_passes_hierarchy(self, initialized_dir, tmp_path):
-        """A task file with both Epic and Story passes hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-**Epic:** my-epic
-**Story:** my-story
-""")
-        errors = _validate_hierarchy(task_file)
-        assert len(errors) == 0
-
-    def test_story_missing_epic_fails_hierarchy(self, initialized_dir, tmp_path):
-        """A story file without Epic set fails hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        story_file = tmp_path / "story-example.md"
-        story_file.write_text("""# Story: Example
-**Epic:** None
-""")
-        errors = _validate_hierarchy(story_file)
-        assert len(errors) > 0
-        assert any("epic" in e.lower() for e in errors)
-
-    def test_story_with_epic_passes_hierarchy(self, initialized_dir, tmp_path):
-        """A story file with Epic passes hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        story_file = tmp_path / "story-example.md"
-        story_file.write_text("""# Story: Example
-**Epic:** my-epic
-""")
-        errors = _validate_hierarchy(story_file)
-        assert len(errors) == 0
-
-    def test_epic_with_no_parents_passes_hierarchy(self, initialized_dir, tmp_path):
-        """An epic file passes hierarchy check (no parents needed)."""
-        from keeli.main import _validate_hierarchy
-        
-        epic_file = tmp_path / "epic-example.md"
-        epic_file.write_text("""# Epic: Example
-""")
-        errors = _validate_hierarchy(epic_file)
-        assert len(errors) == 0
-
-    def test_epic_with_epic_field_fails_hierarchy(self, initialized_dir, tmp_path):
-        """An epic file with Epic field set fails hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        epic_file = tmp_path / "epic-example.md"
-        epic_file.write_text("""# Epic: Example
-**Epic:** parent-epic
-""")
-        errors = _validate_hierarchy(epic_file)
-        assert len(errors) > 0
-        assert any("epic file cannot have" in e.lower() for e in errors)
-
-    def test_epic_with_story_field_fails_hierarchy(self, initialized_dir, tmp_path):
-        """An epic file with Story field set fails hierarchy check."""
-        from keeli.main import _validate_hierarchy
-        
-        epic_file = tmp_path / "epic-example.md"
-        epic_file.write_text("""# Epic: Example
-**Story:** some-story
-""")
-        errors = _validate_hierarchy(epic_file)
-        assert len(errors) > 0
-        assert any("epic file cannot have" in e.lower() for e in errors)
-
-
-# ── ADR-009: Simplified Handshakes Tests ──────────────────────────────────
-
-class TestADR009HandshakeValidation:
-    """ADR-009: Simplified persona handshakes (file-first, no tool calls)."""
-
-    def test_handshake_all_signed_off_when_all_personas_sign(self, tmp_path):
-        """Task can be marked complete only when all 5 personas have signed."""
-        from keeli.main import _handshake_all_signed_off
-        
-        # Create a task with all personas unsigned
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-
-## Handshakes
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | ☐ pending | — | Waiting |
-| @architect | ☐ pending | — | Waiting |
-| @developer | ☐ pending | — | Waiting |
-| @security | ☐ pending | — | Waiting |
-| @author | ☐ pending | — | Waiting |
-""")
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "Should fail when no one signed"
-
-        # Sign off @po
-        content = content.replace("| @po | ☐ pending", "| @po | ☑ signed")
-        task_file.write_text(content)
-        assert not _handshake_all_signed_off(content), "Should fail when not all signed"
-
-        # Sign off @architect
-        content = content.replace("| @architect | ☐ pending", "| @architect | ☑ signed")
-        task_file.write_text(content)
-        assert not _handshake_all_signed_off(content), "Should fail when not all signed"
-
-        # Sign off @developer
-        content = content.replace("| @developer | ☐ pending", "| @developer | ☑ signed")
-        task_file.write_text(content)
-        assert not _handshake_all_signed_off(content), "Should fail when not all signed"
-
-        # Sign off @security
-        content = content.replace("| @security | ☐ pending", "| @security | ☑ signed")
-        task_file.write_text(content)
-        assert not _handshake_all_signed_off(content), "Should fail when not all signed"
-
-        # Sign off @author (final persona)
-        content = content.replace("| @author | ☐ pending", "| @author | ☑ signed")
-        task_file.write_text(content)
-        assert _handshake_all_signed_off(content), "Should pass when all signed"
-
-    def test_handshake_missing_one_persona_fails(self, tmp_path):
-        """If any one persona is missing signature, handshake validation fails."""
-        from keeli.main import _handshake_all_signed_off
-        
-        task_file = tmp_path / "test-task.md"
-        # 4 personas signed, 1 unsigned
-        task_file.write_text("""# Task: Example
-
-## Handshakes
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | ☑ signed | 2026-03-08T10:00:00Z | OK |
-| @architect | ☑ signed | 2026-03-08T10:05:00Z | OK |
-| @developer | ☑ signed | 2026-03-08T10:10:00Z | OK |
-| @security | ☐ pending | — | Waiting |
-| @author | ☑ signed | 2026-03-08T10:15:00Z | OK |
-""")
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "Should fail even with 4/5 signed"
-
-    def test_handshake_with_checkbox_syntax(self, tmp_path):
-        """Handshakes can use [x] checkbox syntax instead of ☑."""
-        from keeli.main import _handshake_all_signed_off
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-
-## Handshakes
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | [x] signed | 2026-03-08T10:00:00Z | OK |
-| @architect | [x] signed | 2026-03-08T10:05:00Z | OK |
-| @developer | [x] signed | 2026-03-08T10:10:00Z | OK |
-| @security | [x] signed | 2026-03-08T10:15:00Z | OK |
-| @author | [x] signed | 2026-03-08T10:15:00Z | OK |
-""")
-        content = task_file.read_text()
-        assert _handshake_all_signed_off(content), "Should accept [x] checkbox syntax"
-
-    def test_handshake_no_handshakes_section_fails(self, tmp_path):
-        """If the task has no Handshakes section, validation fails."""
-        from keeli.main import _handshake_all_signed_off
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-
-## @po (Goals)
-Nothing here.
-""")
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "Should fail if no Handshakes section"
-
-    def test_handshake_partial_rows_missing_fails(self, tmp_path):
-        """If some persona rows are missing entirely, validation fails."""
-        from keeli.main import _handshake_all_signed_off
-        
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-
-## Handshakes
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | ☑ signed | 2026-03-08T10:00:00Z | OK |
-| @architect | ☑ signed | 2026-03-08T10:05:00Z | OK |
-| @developer | ☑ signed | 2026-03-08T10:10:00Z | OK |
-| @security | ☑ signed | 2026-03-08T10:15:00Z | OK |
-""")
-        # Missing @author
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "Should fail if any persona row is missing"
-
-    def test_handshake_all_empty_before_start(self, tmp_path):
-        """Newly created task has all personas unsigned and validation fails."""
-        from keeli.main import _handshake_all_signed_off
-        from keeli.templates import TASK_TEMPLATE
-        
-        # Create a minimal task file from template
-        task_content = TASK_TEMPLATE.format(
-            task_id="T-0001",
-            title="Test Task",
-            timestamp="2026-03-08T10:00:00Z",
-            context_note="None",
-            priority="P1",
-            depends_on="None",
-            epic="None",
-            story="None",
-            persona="@architect"
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT action, actor, details FROM audit_events WHERE action = 'commit' ORDER BY id DESC LIMIT 1",
         )
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text(task_content)
-        
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "New task should fail handshake check"
-
-    def test_handshake_requires_qa_when_present(self, tmp_path):
-        """If @qa row exists in the handshake table, it must be signed too."""
-        from keeli.main import _handshake_all_signed_off
-
-        task_file = tmp_path / "test-task.md"
-        task_file.write_text("""# Task: Example
-
-## Handshakes
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | ☑ signed | 2026-03-08T10:00:00Z | OK |
-| @architect | ☑ signed | 2026-03-08T10:05:00Z | OK |
-| @developer | ☑ signed | 2026-03-08T10:10:00Z | OK |
-| @qa | ☐ pending | — | Waiting |
-| @security | ☑ signed | 2026-03-08T10:15:00Z | OK |
-| @author | ☑ signed | 2026-03-08T10:15:00Z | OK |
-""")
-        content = task_file.read_text()
-        assert not _handshake_all_signed_off(content), "Should fail if @qa exists but is unsigned"
-
-        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
-        assert _handshake_all_signed_off(content), "Should pass when @qa is also signed"
+        assert row["action"] == "commit"
+        assert row["actor"] == "git"
+        assert "Add commit capture" in row["details"]
 
 
-# ── Phase 4: Integration Testing (E2E Workflows) ───────────────────────────
-
-class TestPhase4IntegrationADRs008And009:
-    """Phase 4: Full e2e workflow testing, integrating ADR-008 + ADR-009."""
-
-    def test_full_epic_story_task_workflow(self, initialized_dir):
-        """Complete workflow: Create epic → story → task, validate hierarchy throughout."""
-        # 1. Create epic
-        with patch("sys.argv", ["keeli", "epic", "Feature: User Auth", "-p", "P1"]):
+class TestOverwriteBehavior:
+    def test_force_overwrite_preserves_existing_id(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "feature", "Overwrite Me", "-o", "First version"]):
             main()
-        epic_file = initialized_dir / "docs" / "tasks" / "epic-feature-user-auth.md"
-        assert epic_file.exists(), "Epic file should exist"
 
-        # 2. Create story linked to epic
-        with patch("sys.argv", ["keeli", "story", "OAuth Integration",
-                                "--epic", "feature-user-auth", "-p", "P1"]):
-            main()
-        story_file = initialized_dir / "docs" / "tasks" / "story-oauth-integration.md"
-        assert story_file.exists(), "Story file should exist"
-        story_content = story_file.read_text()
-        assert "**Epic:** feature-user-auth" in story_content, "Story should link to epic"
+        feature = initialized_dir / "docs" / "tasks" / "feat-overwrite-me.md"
+        original_id = next(line.split()[-1] for line in feature.read_text().splitlines() if line.startswith("**ID:**"))
 
-        # 3. Create task linked to both epic and story
-        with patch("sys.argv", ["keeli", "start", "Implement OAuth Provider",
-                                "--epic", "feature-user-auth",
-                                "--story", "story-oauth-integration",
-                                "-p", "P1", "-k", "developer"]):
+        with patch("sys.argv", ["keeli", "feature", "Overwrite Me", "-o", "Second version", "-f"]):
             main()
-        task_file = initialized_dir / "docs" / "tasks" / "implement-oauth-provider.md"
-        assert task_file.exists(), "Task file should exist"
-        task_content = task_file.read_text()
-        assert "**Epic:** feature-user-auth" in task_content, "Task should link to epic"
-        assert "**Story:** story-oauth-integration" in task_content, "Task should link to story"
 
-    def test_hierarchy_enforced_at_progress(self, initialized_dir, capsys):
-        """ADR-008: Task without proper hierarchy cannot move to In Progress."""
-        # Create task without epic/story links
-        with patch("sys.argv", ["keeli", "start", "Bad Task", "-k", "developer"]):
-            main()
-        
-        # Try to progress (should fail due to hierarchy)
-        with patch("sys.argv", ["keeli", "progress", "Bad Task"]):
-            main()
-        
-        out = capsys.readouterr().out
-        # Should fail due to hierarchy (both epic and story are "None")
-        # But since both are at defaults, hierarchy check is skipped
-        # So it will fail on other validation (missing @po sign-off)
-        assert "❌" in out, "Should fail on some validation"
+        text = feature.read_text()
+        current_id = next(line.split()[-1] for line in text.splitlines() if line.startswith("**ID:**"))
+        assert current_id == original_id
+        assert "Second version" in text
 
-    def test_handshake_required_for_completion(self, initialized_dir, capsys):
-        """ADR-009: Task cannot complete until all required personas sign off."""
-        # Create a task and tick all checklist items
-        with patch("sys.argv", ["keeli", "start", "Handshake Test", "-k", "developer", "-o", "Test feature"]):
-            main()
-        
-        task = initialized_dir / "docs" / "tasks" / "handshake-test.md"
-        content = task.read_text()
-        
-        # Tick all non-gate items
-        content = content.replace("- [ ]", "- [x]", 1000)
-        task.write_text(content)
-        
-        # Try to complete (should fail: no handshakes signed)
-        with patch("sys.argv", ["keeli", "complete", "Handshake Test"]):
-            main()
-        
-        out = capsys.readouterr().out
-        assert "❌" in out, "Should fail without handshakes"
-        assert "sign off" in out.lower() or "handshake" in out.lower(), "Error should mention handshakes"
+        db_path = initialized_dir / "keeli_state.db"
+        count = _db_value(
+            db_path,
+            "SELECT COUNT(*) FROM work_items WHERE slug = ?",
+            ("feat-overwrite-me",),
+        )
+        assert count == 1
 
-    def test_full_handshake_workflow_then_complete(self, initialized_dir, capsys):
-        """ADR-009: Task can complete only after all required personas have signed off."""
-        # Create a task
-        with patch("sys.argv", ["keeli", "start", "Full Handshake Task", "-k", "developer", "-o", "Complete feature"]):
-            main()
-        
-        task = initialized_dir / "docs" / "tasks" / "full-handshake-task.md"
-        content = task.read_text()
-        
-        # Tick all checklist items (except gate items)
-        for line in content.splitlines():
-            if "- [ ]" in line and "@security" not in line and "@author" not in line:
-                content = content.replace(line, line.replace("- [ ]", "- [x]"), 1)
-        
-        # Sign off all required personas (including @qa)
-        content = content.replace("| @po | ☐ pending", "| @po | ☑ signed")
-        content = content.replace("| @architect | ☐ pending", "| @architect | ☑ signed")
-        content = content.replace("| @developer | ☐ pending", "| @developer | ☑ signed")
-        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
-        content = content.replace("| @security | ☐ pending", "| @security | ☑ signed")
-        content = content.replace("| @author | ☐ pending", "| @author | ☑ signed")
-        task.write_text(content)
-        
-        # Now try to complete (should succeed)
-        with patch("sys.argv", ["keeli", "complete", "Full Handshake Task"]):
-            main()
-        
-        out = capsys.readouterr().out
-        assert "Marked as Completed" in out, "Should complete successfully"
 
-    def test_file_first_validation_no_tool_calls(self, initialized_dir):
-        """ADR-011: All validations are file-first (no MCP tool calls for mutations)."""
-        from keeli.main import _validate_hierarchy, _handshake_all_signed_off, _validate_transition
-        
-        # Create a task
-        with patch("sys.argv", ["keeli", "start", "File First Task", "-k", "developer", "-o", "File-first test"]):
-            main()
-        
-        task = initialized_dir / "docs" / "tasks" / "file-first-task.md"
-        
-        # All validations happen on file content (no tool calls)
-        task_content = task.read_text()
-        
-        # ADR-008: Hierarchy validation is file-first
-        hierarchy_errors = _validate_hierarchy(task)
-        # Should pass (both epic/story at "None" defaults)
-        assert hierarchy_errors == [], "Hierarchy check is file-first"
-        
-        # ADR-009: Handshake validation is file-first
-        handshake_status = _handshake_all_signed_off(task_content)
-        # Should fail (no signatures)
-        assert not handshake_status, "Handshake check is file-first"
-        
-        # Both validations complete instantly (no MCP overhead)
+class TestStaleReconciliation:
+    """_db_reconcile_stale_items() should archive rows whose source_path is gone."""
 
-    def test_auto_archival_after_complete(self, initialized_dir):
-        """Task is auto-archived to docs/tasks/archive/ after completion."""
-        # Create and complete a task
-        with patch("sys.argv", ["keeli", "start", "Archive Me", "-k", "developer", "-o", "Test archival"]):
+    def test_stale_in_progress_row_is_archived_on_reinit(self, initialized_dir):
+        # Create a task and mark it In Progress
+        with patch("sys.argv", ["keeli", "start", "Ghost Task", "-o", "Some work"]):
             main()
-        
-        task = initialized_dir / "docs" / "tasks" / "archive-me.md"
-        content = task.read_text()
-        
-        # Sign off all personas and tick all items
-        content = content.replace("- [ ]", "- [x]", 1000)
-        content = content.replace("| @po | ☐ pending", "| @po | ☑ signed")
-        content = content.replace("| @architect | ☐ pending", "| @architect | ☑ signed")
-        content = content.replace("| @developer | ☐ pending", "| @developer | ☑ signed")
-        content = content.replace("| @qa | ☐ pending", "| @qa | ☑ signed")
-        content = content.replace("| @security | ☐ pending", "| @security | ☑ signed")
-        content = content.replace("| @author | ☐ pending", "| @author | ☑ signed")
-        task.write_text(content)
-        
-        # Complete the task
-        with patch("sys.argv", ["keeli", "complete", "Archive Me"]):
+        with patch("sys.argv", ["keeli", "progress", "Ghost Task"]):
             main()
-        
-        # Verify original is gone
-        assert not task.exists(), "Original task file should be moved"
-        
-        # Verify archived copy exists
-        archived = initialized_dir / "docs" / "tasks" / "archive" / "archive-me.md"
-        assert archived.exists(), "Archived copy should exist"
-        
-        archived_content = archived.read_text()
-        assert "**Status:** Completed" in archived_content, "Archived task should have Completed status"
 
-    def test_validation_order_hierarchy_then_handshakes(self, initialized_dir, capsys):
-        """Validation order: hierarchy first, then handshakes, then other checks."""
-        # Create task with missing epic/story
-        with patch("sys.argv", ["keeli", "start", "Validation Order Task", "-k", "developer", "-o", "Test order"]):
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(db_path, "SELECT status, archived FROM work_items WHERE slug = ?", ("ghost-task",))
+        assert row["status"] == "In Progress"
+        assert row["archived"] == 0
+
+        # Wipe docs/ to simulate a --force reinit scenario (file gone, row still in DB)
+        import shutil
+        shutil.rmtree(initialized_dir / "docs")
+
+        # Run sync (called by init internally); do it directly by re-running init --force
+        with patch("sys.argv", ["keeli", "init", "--force"]):
             main()
-        
-        task = initialized_dir / "docs" / "tasks" / "validation-order-task.md"
-        content = task.read_text()
-        
-        # Set one epic but not story (to trigger hierarchy error specifically)
-        content = content.replace("**Epic:** None", "**Epic:** some-epic")
-        task.write_text(content)
-        
-        # Try to complete (should fail on hierarchy, not handshake)
-        with patch("sys.argv", ["keeli", "complete", "Validation Order Task"]):
+
+        # The old ghost-task row should now be archived
+        row = _db_row(db_path, "SELECT status, archived FROM work_items WHERE slug = ?", ("ghost-task",))
+        assert row is not None
+        assert row["archived"] == 1
+        assert row["status"] == "Archived"
+
+    def test_audit_event_written_for_auto_archived_item(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Phantom Work", "-o", "Do it"]):
             main()
-        
-        out = capsys.readouterr().out
-        # Can't easily test exact error order in this test format,
-        # but we verify it errors (which is the point)
-        assert "❌" in out, "Should fail validation"
+
+        import shutil
+        shutil.rmtree(initialized_dir / "docs")
+
+        with patch("sys.argv", ["keeli", "init", "--force"]):
+            main()
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT action, actor FROM audit_events WHERE action = 'auto-archived' ORDER BY id DESC LIMIT 1",
+        )
+        assert row is not None
+        assert row["action"] == "auto-archived"
+        assert row["actor"] == "keeli-init"
+
+
+class TestPiiRedaction:
+    """_redact_pii() should sanitize sensitive data before it reaches the audit trail."""
+
+    def test_email_is_redacted_in_audit_details(self, initialized_dir):
+        from keeli.main import _db_log_event
+
+        _db_log_event("T-0001", "test-action", actor="tester", details="Contact admin@example.com for help")
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(db_path, "SELECT details FROM audit_events WHERE action = 'test-action' ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "admin@example.com" not in row["details"]
+        assert "[REDACTED-EMAIL]" in row["details"]
+
+    def test_aws_key_is_redacted_in_audit_details(self, initialized_dir):
+        from keeli.main import _db_log_event
+
+        _db_log_event("T-0002", "deploy-action", actor="ci", details="Key: AKIAIOSFODNN7EXAMPLE")
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(db_path, "SELECT details FROM audit_events WHERE action = 'deploy-action' ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "AKIAIOSFODNN7EXAMPLE" not in row["details"]
+        assert "[REDACTED-AWS-KEY]" in row["details"]
+
+    def test_secret_assignment_is_redacted_in_audit_details(self, initialized_dir):
+        from keeli.main import _db_log_event
+
+        _db_log_event("T-0003", "config-action", actor="ci", details="token=supersecretvalue123")
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(db_path, "SELECT details FROM audit_events WHERE action = 'config-action' ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "supersecretvalue123" not in row["details"]
+        assert "[REDACTED]" in row["details"]
+
+
+class TestIterationFiveFeatures:
+    def test_validate_auto_stub_creates_active_task(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Backlog Leaf", "-o", "Do work"]):
+            main()
+
+        with patch("sys.argv", ["keeli", "validate-task-state", "--auto-stub"]):
+            main()
+
+        output = capsys.readouterr().out
+        assert "auto-created stub" in output
+
+        db_path = initialized_dir / "keeli_state.db"
+        row = _db_row(
+            db_path,
+            "SELECT status FROM work_items WHERE slug = ?",
+            ("working-on-uncommitted-changes",),
+        )
+        assert row is not None
+        assert row["status"] == "In Progress"
+
+    def test_sync_rebuilds_db_from_markdown(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Sync Target", "-o", "Sync me"]):
+            main()
+
+        db_path = initialized_dir / "keeli_state.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DELETE FROM work_items WHERE slug = ?", ("sync-target",))
+            conn.commit()
+
+        missing = _db_row(db_path, "SELECT slug FROM work_items WHERE slug = ?", ("sync-target",))
+        assert missing is None
+
+        with patch("sys.argv", ["keeli", "sync"]):
+            main()
+
+        restored = _db_row(db_path, "SELECT status FROM work_items WHERE slug = ?", ("sync-target",))
+        assert restored is not None
+        assert restored["status"] == "Backlog"
+
+    def test_capture_commit_transitions_to_review_on_closes_marker(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Commit Semantic", "-o", "Do work"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Commit Semantic"]):
+            main()
+
+        task = initialized_dir / "docs" / "tasks" / "commit-semantic.md"
+        task_text = task.read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
+
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "abc123def4567890\n"
+            else:
+                result.stdout = f"closes {task_id}\n"
+            return result
+
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state"]):
+                main()
+
+        updated = task.read_text()
+        assert "**Status:** Review" in updated
+
+    def test_capture_commit_completes_on_keeli_complete_marker(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Commit Complete", "-o", "Do work"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Commit Complete"]):
+            main()
+
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "f00ba41234123412\n"
+            else:
+                result.stdout = "keeli:complete\n"
+            return result
+
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state"]):
+                main()
+
+        archived = initialized_dir / "docs" / "tasks" / "archive" / "commit-complete.md"
+        assert archived.exists()
+        assert "**Status:** Completed" in archived.read_text()
+
+    def test_test_command_auto_reviews_active_task_on_pass(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Pytest Gate", "-o", "Run tests"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Pytest Gate"]):
+            main()
+
+        class _Completed:
+            returncode = 0
+
+        with patch("keeli.main.subprocess.run", return_value=_Completed()):
+            with pytest.raises(SystemExit) as exc:
+                with patch("sys.argv", ["keeli", "test", "-q"]):
+                    main()
+
+        assert exc.value.code == 0
+        task = initialized_dir / "docs" / "tasks" / "pytest-gate.md"
+        assert "**Status:** Review" in task.read_text()
+
+
+class TestIterationSixFeatures:
+    def test_transition_from_commit_evaluates_multi_close_ids(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "A", "-o", "Work A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "B", "-o", "Work B"]):
+            main()
+
+        a_text = (initialized_dir / "docs" / "tasks" / "a.md").read_text()
+        b_text = (initialized_dir / "docs" / "tasks" / "b.md").read_text()
+        a_id = next(line.split()[-1] for line in a_text.splitlines() if line.startswith("**ID:**"))
+        b_id = next(line.split()[-1] for line in b_text.splitlines() if line.startswith("**ID:**"))
+
+        subject = f"feat: wiring closes {a_id}, {b_id}"
+        with patch("sys.argv", ["keeli", "transition-from-commit", "--subject", subject]):
+            main()
+
+        raw = capsys.readouterr().out
+        json_start = raw.find("{")
+        payload = json.loads(raw[json_start:])
+        assert payload["command"] == "transition-from-commit"
+        assert payload["timestamp"]
+        actions = payload["data"]["evaluation"]["actions"]
+        review_action = next(a for a in actions if a["type"] == "review_ids")
+        assert set(review_action["ids"]) == {a_id, b_id}
+
+    def test_transition_from_commit_apply_moves_all_in_progress_close_ids_to_review(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "First Work", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "Second Work", "-o", "B"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "First Work"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Second Work"]):
+            main()
+
+        first = (initialized_dir / "docs" / "tasks" / "first-work.md").read_text()
+        second = (initialized_dir / "docs" / "tasks" / "second-work.md").read_text()
+        first_id = next(line.split()[-1] for line in first.splitlines() if line.startswith("**ID:**"))
+        second_id = next(line.split()[-1] for line in second.splitlines() if line.startswith("**ID:**"))
+
+        with patch("sys.argv", ["keeli", "transition-from-commit", "--subject", f"chore: closes {first_id}, {second_id}", "--apply"]):
+            main()
+
+        assert "**Status:** Review" in (initialized_dir / "docs" / "tasks" / "first-work.md").read_text()
+        assert "**Status:** Review" in (initialized_dir / "docs" / "tasks" / "second-work.md").read_text()
+
+    def test_sync_dry_run_does_not_mutate_db(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Dry Sync", "-o", "Check"]):
+            main()
+
+        db_path = initialized_dir / "keeli_state.db"
+        before = _db_value(db_path, "SELECT COUNT(*) FROM work_items")
+        with patch("sys.argv", ["keeli", "sync", "--dry-run"]):
+            main()
+        after = _db_value(db_path, "SELECT COUNT(*) FROM work_items")
+
+        assert before == after
+        assert "[dry-run]" in capsys.readouterr().out
+
+    def test_test_dry_run_exits_zero_without_running_pytest(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Dry Test", "-o", "Check"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Dry Test"]):
+            main()
+
+        with patch("keeli.main.subprocess.run") as fake_run:
+            with pytest.raises(SystemExit) as exc:
+                with patch("sys.argv", ["keeli", "test", "--dry-run", "-q"]):
+                    main()
+
+        assert exc.value.code == 0
+        fake_run.assert_not_called()
+        assert "**Status:** In Progress" in (initialized_dir / "docs" / "tasks" / "dry-test.md").read_text()
+
+
+class TestIterationSevenFeatures:
+    def test_transition_from_commit_parses_body_trailers(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Trailer Task", "-o", "A"]):
+            main()
+        task_text = (initialized_dir / "docs" / "tasks" / "trailer-task.md").read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
+
+        capsys.readouterr()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "transition-from-commit",
+                "--subject",
+                "feat: refactor parser",
+                "--body",
+                f"Fixes: {task_id}",
+            ],
+        ):
+            main()
+
+        raw = capsys.readouterr().out
+        payload = json.loads(raw[raw.find("{"):])
+        assert payload["command"] == "transition-from-commit"
+        review_action = next(a for a in payload["data"]["evaluation"]["actions"] if a["type"] == "review_ids")
+        assert task_id in review_action["ids"]
+
+    def test_transition_from_commit_apply_dry_run_returns_preview_without_mutation(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Dry Preview", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Dry Preview"]):
+            main()
+        task_text = (initialized_dir / "docs" / "tasks" / "dry-preview.md").read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
+
+        capsys.readouterr()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "transition-from-commit",
+                "--subject",
+                f"feat: closes {task_id}",
+                "--apply",
+                "--dry-run",
+            ],
+        ):
+            main()
+
+        raw = capsys.readouterr().out
+        payload = json.loads(raw[raw.find("{"):])
+        assert payload["command"] == "transition-from-commit"
+        preview = payload["data"]["preview"]
+        assert preview
+        first = preview[0]
+        assert first["before"] == "In Progress"
+        assert first["after"] == "Review"
+        assert first["would_apply"] is True
+        assert "**Status:** In Progress" in (initialized_dir / "docs" / "tasks" / "dry-preview.md").read_text()
+
+    def test_capture_commit_state_json_output_includes_transitions(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Capture Json", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Capture Json"]):
+            main()
+
+        task_text = (initialized_dir / "docs" / "tasks" / "capture-json.md").read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
+
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "1234567890abcdef\n"
+            elif cmd[1:] == ["log", "-1", "--pretty=%s"]:
+                result.stdout = f"closes {task_id}\n"
+            else:
+                result.stdout = ""
+            return result
+
+        capsys.readouterr()
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state", "--json"]):
+                main()
+
+        raw = capsys.readouterr().out
+        payload = json.loads(raw[raw.find("{"):])
+        assert payload["ok"] is True
+        assert payload["command"] == "capture-commit-state"
+        assert payload["data"]["transitions"]
+        assert any("moved to Review" in line for line in payload["data"]["transitions"])
+
+    def test_capture_commit_state_reports_conflict_for_ambiguous_complete(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Ambiguous A", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "Ambiguous B", "-o", "B"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Ambiguous A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Ambiguous B"]):
+            main()
+
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "cafebabedeadbeef\n"
+            elif cmd[1:] == ["log", "-1", "--pretty=%s"]:
+                result.stdout = "keeli:complete\n"
+            else:
+                result.stdout = ""
+            return result
+
+        capsys.readouterr()
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state", "--json"]):
+                main()
+
+        raw = capsys.readouterr().out
+        payload = json.loads(raw[raw.find("{"):])
+        assert payload["ok"] is False
+        assert payload["command"] == "capture-commit-state"
+        assert "Ambiguous commit intent" in payload["error"]
+        assert "**Status:** In Progress" in (initialized_dir / "docs" / "tasks" / "ambiguous-a.md").read_text()
+        assert "**Status:** In Progress" in (initialized_dir / "docs" / "tasks" / "ambiguous-b.md").read_text()
+
+
+class TestIterationEightFeatures:
+    def test_transition_from_commit_target_id_completes_explicit_task(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Target A", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "Target B", "-o", "B"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Target A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Target B"]):
+            main()
+
+        target_b_text = (initialized_dir / "docs" / "tasks" / "target-b.md").read_text()
+        target_b_id = next(line.split()[-1] for line in target_b_text.splitlines() if line.startswith("**ID:**"))
+
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "transition-from-commit",
+                "--subject",
+                "keeli:complete",
+                "--target-id",
+                target_b_id,
+                "--apply",
+            ],
+        ):
+            main()
+
+        assert "**Status:** In Progress" in (initialized_dir / "docs" / "tasks" / "target-a.md").read_text()
+        archived_b = initialized_dir / "docs" / "tasks" / "archive" / "target-b.md"
+        assert archived_b.exists()
+        assert "**Status:** Completed" in archived_b.read_text()
+
+    def test_capture_commit_state_json_includes_correlated_audit_id(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Audit Trail", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Audit Trail"]):
+            main()
+
+        def fake_run(cmd, check, capture_output, text):
+            result = MagicMock()
+            if cmd[1:] == ["rev-parse", "HEAD"]:
+                result.stdout = "1111222233334444\n"
+            elif cmd[1:] == ["log", "-1", "--pretty=%s"]:
+                result.stdout = "keeli:complete\n"
+            else:
+                result.stdout = "\n"
+            return result
+
+        capsys.readouterr()
+        with patch("keeli.main.subprocess.run", side_effect=fake_run):
+            with patch("sys.argv", ["keeli", "capture-commit-state", "--json"]):
+                main()
+
+        raw = capsys.readouterr().out
+        payload = json.loads(raw[raw.find("{"):])
+        assert payload["ok"] is True
+        assert payload["command"] == "capture-commit-state"
+        assert isinstance(payload["data"]["commit_event_id"], int)
+        assert any("audit_event=" in line for line in payload["data"]["transitions"])
+
+        log_text = (initialized_dir / "docs" / "ai_log.md").read_text()
+        assert f"[audit:{payload['data']['commit_event_id']}]" in log_text
+
+    def test_progress_and_complete_support_json_output(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Flow", "-o", "A"]):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "progress", "Json Flow", "--json"]):
+            main()
+        progress_payload = json.loads(capsys.readouterr().out)
+        assert progress_payload["ok"] is True
+        assert progress_payload["command"] == "progress"
+        assert progress_payload["timestamp"]
+        assert progress_payload["data"]["after"] == "In Progress"
+
+        with patch("sys.argv", ["keeli", "complete", "Json Flow", "--json"]):
+            main()
+        complete_payload = json.loads(capsys.readouterr().out)
+        assert complete_payload["ok"] is True
+        assert complete_payload["command"] == "complete"
+        assert complete_payload["data"]["after"] == "Completed"
+        assert complete_payload["data"]["archived"] is True
+
+    def test_block_review_and_reopen_support_json_output(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Lifecycle", "-o", "A"]):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "block", "Json Lifecycle", "--json"]):
+            main()
+        block_payload = json.loads(capsys.readouterr().out)
+        assert block_payload["ok"] is True
+        assert block_payload["command"] == "block"
+        assert block_payload["data"]["after"] == "Blocked"
+
+        with patch("sys.argv", ["keeli", "review", "Json Lifecycle", "--json"]):
+            main()
+        review_payload = json.loads(capsys.readouterr().out)
+        assert review_payload["ok"] is True
+        assert review_payload["command"] == "review"
+        assert review_payload["data"]["before"] == "Blocked"
+        assert review_payload["data"]["after"] == "Review"
+
+        with patch("sys.argv", ["keeli", "reopen", "Json Lifecycle", "--json"]):
+            main()
+        reopen_payload = json.loads(capsys.readouterr().out)
+        assert reopen_payload["ok"] is True
+        assert reopen_payload["command"] == "reopen"
+        assert reopen_payload["data"]["before"] == "Review"
+        assert reopen_payload["data"]["after"] == "In Progress"
+
+    def test_transition_from_commit_apply_outputs_strict_json(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Strict Json A", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "Strict Json B", "-o", "B"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Strict Json A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Strict Json B"]):
+            main()
+
+        task_text = (initialized_dir / "docs" / "tasks" / "strict-json-b.md").read_text()
+        task_id = next(line.split()[-1] for line in task_text.splitlines() if line.startswith("**ID:**"))
+
+        capsys.readouterr()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "transition-from-commit",
+                "--subject",
+                "keeli:complete",
+                "--target-id",
+                task_id,
+                "--apply",
+            ],
+        ):
+            main()
+
+        raw = capsys.readouterr().out
+        assert raw.lstrip().startswith("{")
+        payload = json.loads(raw)
+        assert payload["command"] == "transition-from-commit"
+        assert payload["data"]["evaluation"]["explicit_target"] == task_id
+        assert payload["data"]["applied"]
+
+    def test_sync_json_dry_run_output(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "sync", "--dry-run", "--json"]):
+            main()
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "sync"
+        assert payload["data"]["dry_run"] is True
+        assert "predicted_items" in payload["data"]
+
+    def test_test_json_dry_run_output(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Test Dry", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Json Test Dry"]):
+            main()
+
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as exc:
+            with patch("sys.argv", ["keeli", "test", "--dry-run", "--json", "-q"]):
+                main()
+        assert exc.value.code == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "test"
+        assert payload["data"]["dry_run"] is True
+        assert payload["data"]["transition_target"]["slug"] == "json-test-dry"
+
+    def test_test_json_success_includes_transition(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Json Test Pass", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Json Test Pass"]):
+            main()
+
+        class _Completed:
+            returncode = 0
+
+        capsys.readouterr()
+        with patch("keeli.main.subprocess.run", return_value=_Completed()):
+            with pytest.raises(SystemExit) as exc:
+                with patch("sys.argv", ["keeli", "test", "--json", "-q"]):
+                    main()
+        assert exc.value.code == 0
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "test"
+        assert payload["data"]["returncode"] == 0
+        assert payload["data"]["transition"]["slug"] == "json-test-pass"
+        assert payload["data"]["transition"]["after"] == "Review"
+

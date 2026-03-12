@@ -1,316 +1,90 @@
 """
-All file templates used by `keeli init`, `keeli start`, and `keeli log`.
-Centralised here so they can be tested and versioned independently.
+Lean Keeli templates — only what we actually use.
+No hallucinations. Epic → Story → Task workflow.
+Handshakes come later.
 """
 
-# ---------------------------------------------------------------------------
-# Schema version – bump when template format changes
-# ---------------------------------------------------------------------------
 SCHEMA_VERSION = "0.4.0"
 
-# ---------------------------------------------------------------------------
-# .github/copilot-instructions.md (ADR-012: Lean Instructions + Persona Hooks)
-# ---------------------------------------------------------------------------
-COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
+# ============================================================================
+# EPIC_TEMPLATE — High-level objective and scope
+# ============================================================================
+EPIC_TEMPLATE = """# Epic: {title}
 
-## Core Philosophy
-You are operating under a strict **Six-Persona Architecture**.
-Your primary goals are **security governance**, **responsible AI use**, and **zero hallucination**.
-You must act as a team of five distinct personas to complete any task.
+**ID:** {task_id}
+**Status:** Backlog
+**Priority:** {priority}
+**Created:** {timestamp}
+**Completed:** —
 
----
+## Goal
+{goal}
 
-## Session Start Protocol
-At the beginning of **EVERY** new conversation you **MUST**:
+## Scope
+<!-- In scope:
+- Item 1
+- Item 2
 
-1. Read `docs/project.md` to understand the project context.
-2. Scan `docs/tasks/` for any file whose status is **In Progress** or **Blocked**.
-3. Read the **last 30 lines** of `docs/ai_log.md` to understand recent activity.
-4. Read `docs/decision.md` to avoid re-litigating settled decisions.
-5. Only **THEN** proceed with the user's request.
+Out of scope:
+- Item 3
+- Item 4
+-->
 
-> **Context-Window Awareness:** If the combined content from steps 1-4 exceeds
-> ~2 000 tokens, summarise each file in ≤3 bullet points instead of quoting
-> it verbatim.  Prefer the most recent information.  When the context window
-> is very constrained (<8 k tokens remaining), read only step 1 and step 2.
+## Stories
+<!-- Link stories here as they're created
+- story-foo (user can create tasks)
+- story-bar (user can mark tasks complete)
+-->
 
----
+## Done
+- [ ] Goal defined
+- [ ] Scope agreed
+- [ ] All stories completed
 
-## The Core Personas
-
-You are operating under a **Six-Persona Architecture**:
-
-- **@po (Product Owner):** User-first, value-driven. Owns the "what" and "why".
-- **@architect:** Design-first. Defines seams, interfaces, and decisions.
-- **@developer:** Disciplined craftsman. Implements per spec, TDD-focused.
-- **@qa:** Quality gatekeeper. Validates test evidence and regression safety.
-- **@security:** Sceptical by default. Validates auth, data, threat model.
-- **@author:** User-facing clarity. Docs, examples, WCAG 2.1 AA.
-
-### Full Persona Definitions (Load On-Demand)
-
-Each task specifies which persona is responsible via the `**Persona:**` field.
-
-**To load a persona's full ruleset:**
-1. Task file shows: `**Persona:** @developer` (or @po, @architect, @qa, @security, @author)
-2. Open [docs/personas.md](../../docs/personas.md)
-3. Find section: `## developer`
-4. Read: Mindset, Core Skills, MUST/MUST NOT, Flags Immediately
-5. Apply those rules to this task **only**
-
-→ See [docs/personas.md](../../docs/personas.md) for complete persona definitions.
-
----
-
-## Persona Activation Hook
-
-When you receive a task assignment via `keeli_next()`:
-
-```javascript
-keeli_next()
-// Returns:
-// {{
-//   "slug": "task-oauth",
-//   "persona": "@developer",     // ← Your persona for this task
-//   "persona_hint": "See docs/personas.md ## developer",
-//   "title": "Implement OAuth2 login"
-// }}
-```
-
-**Action:** Load only your assigned persona's rules from [docs/personas.md](../../docs/personas.md).
-
-Don't process all personas for every task. Load only the section that applies to you. Example:
-- Task says `**Persona:** @developer`?
-- Read `docs/personas.md ## developer` (not the other 4 personas)
-- Apply those rules to this task
-
-This keeps instructions lean and focused on what you need right now.
-
----
-
-## Workflow Rules
-1. **Discovery:** @po captures requirements from the human/stakeholder as epics (`keeli epic`).
-2. **Refinement:** @po and @architect jointly break epics into user stories. @po owns the "what" and acceptance criteria; @architect owns "how it can be built" and interface contracts. Neither moves without the other.
-3. **Design:** @architect decomposes stories into tasks, defines interfaces and layer boundaries — before any implementation.
-4. **Execution:** @architect hands tasks to @developer. @developer implements strictly within the defined interface and task scope.
-5. **Review:** @security reviews all implementation before marking complete.
-6. **Documentation:** @author documents what ships, not what was intended.
-7. **Human-in-the-Loop:** See *Scope Guardrails* below.
-
----
-
-## Scope Guardrails — When to Engage the Human
-The @developer **MUST** pause and ask the user for confirmation when:
-- The change touches **more than 5 files**.
-- The change involves **authentication, authorisation, or data deletion**.
-- The change **removes or renames a public API**.
-- There is **ambiguity** in the requirements that could lead to two valid implementations.
-- The estimated effort exceeds **30 minutes of coding**.
-
----
-
-## Task Lifecycle
-
-Every task in `docs/tasks/<slug>.md` follows this lifecycle:
-
-```
-Backlog → In Progress → Review → Completed
-                ↓                     ↓
-             Blocked → (unblocked)   Reopened → In Progress
-```
-
-### Status Transitions
-| From | To | Who | Trigger |
-|------|----|-----|--------|
-| Backlog | In Progress | @developer | Starting work on the task |
-| In Progress | Blocked | @developer | Waiting on human input or external dependency |
-| Blocked | In Progress | @developer | Blocker resolved |
-| In Progress | Review | @developer | All checklist items done except @security review |
-| Review | Completed | @security | Security review passed |
-| Completed | Reopened | @developer | Bug found or rework needed |
-
-### How to Pick the Next Task
-When the current task is completed (or while waiting on a blocked task):
-1. Scan `docs/tasks/` for files with **Status: In Progress** — resume those first.
-2. If none, scan for **Status: Backlog** — pick the one with the **highest priority** (P0 > P1 > P2).
-3. If same priority, pick the **oldest** (earliest Created timestamp).
-4. If no tasks remain, inform the user: *"All tasks are complete. Awaiting new instructions."*
-
-### Completion Checklist
-A task is **done** when:
-- [ ] All checklist items in the task file are checked.
-- [ ] `**Status:**` is updated to `Completed`.
-- [ ] `**Completed:**` timestamp is added.
-- [ ] A log entry is appended to `docs/ai_log.md`.
-- [ ] @developer immediately scans for the next task (see above).
-
-> **Important:** Never leave a session without updating the task status.
-> The next session depends on accurate status to resume efficiently.
-
-### Auto-Completion Rule
-You **MUST** mark a task as completed yourself the moment you finish it.
-Do **NOT** wait for the human to run `keeli complete`. When you finish
-implementing and all checklist items are done:
-1. Edit the task file: set `**Status:** Completed` and `**Completed:** <ISO-8601 timestamp>`.
-2. Check off all checklist boxes (`- [x]`).
-3. Append a completion log entry to `docs/ai_log.md`.
-4. Immediately scan for the next task and begin work — or inform the user *"All tasks are complete. Awaiting new instructions."*
-
----
-
-## Memory and Logging
-
-You must maintain a continuous audit trail and project state:
-
-| File | Owner | Purpose |
-|------|-------|---------|
-| `docs/project.md` | @architect | Project context, tech stack, architecture |
-| `docs/decision.md` | @architect | Decisions with rationale and rejected alternatives |
-| `docs/tasks/<slug>.md` | @architect / @developer | Per-task tracking with TDD checklist |
-| `docs/tasks/bug-*.md` | @developer | Bug reports created via `keeli bug` |
-| `docs/requirements/` | Human / @architect | Requirements and specs linked via `--context` |
-| `docs/ai_log.md` | All | Timestamped audit log with session markers |
-
-### Logging Rules
-- Every log entry **MUST** include an ISO-8601 timestamp.
-- At the start of each session, append a `--- SESSION START ---` marker.
-- Keep individual log entries to **one line** when possible to save tokens.
-
----
-
-## Bundled Skills
-
-These are the specialization skills registered for this project.
-Personas **MUST** apply this expertise when writing or reviewing code.
-
-<!-- KEELI_SKILLS_START -->
-(no skills registered — run `keeli stack` to apply a preset, or `keeli skill add` for individual skills)
-<!-- KEELI_SKILLS_END -->
-"""
-# ---------------------------------------------------------------------------
-PROJECT_MD = f"""# Project Documentation  (Keeli Framework v{SCHEMA_VERSION})
-
-## Overview
-<!-- Describe the project purpose, users, and high-level goals. -->
-
-## Tech Stack
-<!-- Run `keeli stack` to apply a preset, or add skills with `keeli skill add`. -->
-
-### Languages & Frameworks
-<!-- Add your project's primary language(s) and frameworks here. -->
-<!-- Example: Python 3.12+, FastAPI, SQLAlchemy -->
-
-### Domain Expertise
-<!-- Add your project's domain knowledge areas here. -->
-
-### Infrastructure
-<!-- e.g. AWS, Docker, Kubernetes, PostgreSQL, Redis -->
-
-## Architecture
-<!-- High-level system design, key modules, data flow. -->
-
-## Key Decisions
-<!-- Link to docs/decision.md for detailed ADRs. -->
-
-## License & Liability Disclaimer
-**IMPORTANT:** This project is governed by a strict proprietary license.
-- **NO AI TRAINING:** The code, documentation, and architecture in this repository may NOT be used to train, fine-tune, or improve any AI models, LLMs, or machine learning algorithms.
-- **NO CRAWLING:** Web crawlers and bots are prohibited from indexing this repository for AI data aggregation.
-- **NO LIABILITY:** The author assumes NO LIABILITY for any code, architecture, or outputs generated by AI agents or human users utilizing this framework. You are solely responsible for reviewing, testing, and securing your software.
-
----
-
-## Keeli CLI — What I Can Do For You
-
-**IMPORTANT:** You have the `keeli` CLI available. Always use these commands to manage tasks and epics — never edit `docs/tasks/*.md` files directly unless you are adding **Notes** content only.
-
-### Task & Work Management
-| Command | Who calls it | Purpose |
-|---------|-------------|---------|
-| `keeli epic "<title>" -p P0/P1/P2` | @architect | Create an epic (high-level objective) |
-| `keeli story "<title>" --epic <slug>` | @architect | Create a user story under an epic |
-| `keeli start "<title>" -k architect -p P1` | @architect | Create a new implementation task |
-| `keeli start "<title>" --story <slug> --epic <slug> -k developer` | @developer | Create task linked to a story |
-| `keeli progress "<title>"` | @developer | Mark task as In Progress |
-| `keeli complete "<title>"` | @developer | Mark task as Completed |
-| `keeli reopen "<title>"` | @developer | Reopen a completed task |
-| `keeli block "<title>"` | @developer | Mark task as Blocked |
-| `keeli review "<title>"` | @developer | Submit task for @security review |
-| `keeli bug "<title>" -p P0 --epic <slug>` | @developer / human | Log a bug (humans identify, @developer fixes) |
-| `keeli feature "<title>" --epic <slug>` | @architect | Create a feature request |
-| `keeli archive "<title>"` | @developer | Archive a completed task |
-| `keeli note "<title>" "<message>"` | any | Add a timestamped note to a task |
-
-### Project Context
-| Command | Purpose |
-|---------|---------|
-| `keeli resume --brief` | Dump minimal context for a new session (~500 tokens) |
-| `keeli resume` | Full context dump including recent log and decisions |
-| `keeli status` | Health-check all Keeli files and show task counts |
-| `keeli list` | List all tasks with Epic/Story/Status columns |
-| `keeli list --epic <slug>` | Filter tasks by epic |
-| `keeli list --status in-progress` | Filter by status |
-| `keeli list --json` | JSON output for agentic pipelines |
-| `keeli next` | Show the highest-priority next task |
-| `keeli log "<message>"` | Append a manual entry to docs/ai_log.md |
-
-### Skills & Config
-| Command | Purpose |
-|---------|---------|
-| `keeli skill add <name> -t lang/framework/domain/infra/tool` | Register a project skill |
-| `keeli skill list` | List registered skills |
-| `keeli skill remove <name>` | Remove a skill |
-| `keeli update` | Update copilot-instructions.md to latest template |
-| `keeli mcp` | Start the MCP server (stdio, for Claude/Cursor) |
-| `keeli mcp --sse --port 8080` | Start MCP server over HTTP/SSE |
-
-### What Keeli Does NOT Do
-- Keeli does **not** write code — you do.
-- Keeli does **not** run tests — you do.
-- Keeli does **not** decide architecture — @architect does, then logs it in `docs/decision.md`.
-- Keeli does **not** auto-commit — you choose when to commit.
-
-<!-- KEELI_SKILLS_START -->
-(no skills registered — run `keeli stack` to apply a preset, or `keeli skill add` for individual skills)
-<!-- KEELI_SKILLS_END -->
+## Notes
+<!-- Strategic context, risks, dependencies. -->
 """
 
-# ---------------------------------------------------------------------------
-# docs/decision.md
-# ---------------------------------------------------------------------------
-DECISION_MD = f"""# Decision Log  (Keeli Framework v{SCHEMA_VERSION})
+# ============================================================================
+# STORY_TEMPLATE — User story with acceptance criteria
+# ============================================================================
+STORY_TEMPLATE = """# Story: {title}
 
-Record every significant decision using the template below.
+**ID:** {task_id}
+**Status:** Backlog
+**Priority:** {priority}
+**Created:** {timestamp}
+**Completed:** —
+**Epic:** {epic}
 
----
+## User Story
+{user_story}
 
-### TEMPLATE
-**Date:** YYYY-MM-DD
-**Decision:** <What was decided>
-**Context:** <Why this decision was needed>
-**Alternatives Considered:**
-1. <Option A> — rejected because …
-2. <Option B> — rejected because …
-**Consequences:** <What this means going forward>
+## Acceptance Criteria
+{acceptance_criteria}
 
----
+## Non-Functional Requirements
+{non_functional_requirements}
 
-<!-- Add new decisions above this line -->
+## Tasks
+<!-- Link implementation tasks here as they're created
+- task-foo (implement database schema)
+- task-bar (write API endpoint)
+-->
+
+## Done
+- [ ] User story clear
+- [ ] Acceptance criteria testable
+- [ ] NFRs identified (or explicitly none)
+- [ ] All tasks completed
+
+## Notes
+<!-- Implementation hints, blockers, decisions. -->
 """
 
-# ---------------------------------------------------------------------------
-# docs/ai_log.md
-# ---------------------------------------------------------------------------
-AI_LOG_MD = f"""# AI Audit Log  (Keeli Framework v{SCHEMA_VERSION})
-
-<!-- Timestamped entries appended by the AI and by `keeli log`. -->
-<!-- Format: YYYY-MM-DDTHH:MM:SS | <persona> | <message> -->
-
-"""
-
-# ---------------------------------------------------------------------------
-# docs/tasks/ — individual task template (default / @developer)
-# ---------------------------------------------------------------------------
+# ============================================================================
+# TASK_TEMPLATE — Implementable unit of work
+# ============================================================================
 TASK_TEMPLATE = """# Task: {title}
 
 **ID:** {task_id}
@@ -324,574 +98,309 @@ TASK_TEMPLATE = """# Task: {title}
 **Context:** {context_note}
 **Persona:** {persona}
 
-<!-- HATEOAS: Persona Hook
-  The **Persona:** field above specifies who owns this task.
+## What
+{what}
 
-  When you are assigned this task:
-  1. Note the Persona field (e.g., **Persona:** @developer)
-  2. Open docs/personas.md
-  3. Find the section for your persona (## developer)
-  4. Read: Mindset, Core Skills, MUST/MUST NOT, Flags Immediately
-  5. Apply those rules to this task
+## Why
+{why}
 
-  Don't load personas not assigned to you.
-  Don't process all 5 persona rule sets for every task.
-  This keeps you focused and token-efficient.
--->
-
-## Prompt Hints
-_AI-assisted prompt engineering and custom skill templates._
-
-Need specialized guidance for this task?
-- **Writing a custom prompt?** See [custom-prompt-builder.md](../../docs/prompts/custom-prompt-builder.md) for the blueprint (6-section anatomy, security checks, persona-specific guidance).
-- **Adding a custom skill or technology?** See [custom-skill-template.md](../../docs/prompts/custom-skill-template.md) for registration patterns and governance sign-off requirements.
-
-These templates ensure every prompt and skill meets security standards and integrates with the keeli framework.
-
----
-
-## Handshakes
-_Each persona signs off by checking the row and adding a summary._
-
-| Persona | Status | Signed | Summary |
-|---------|--------|--------|---------|
-| @po | ☐ pending | — | Waiting: user story + ACs + NFRs |
-| @architect | ☐ pending | — | Waiting: @po sign-off |
-| @developer | ☐ pending | — | Waiting: @architect design |
-| @qa | ☐ pending | — | Waiting: @developer test evidence |
-| @security | ☐ pending | — | Waiting: @qa quality sign-off |
-| @author | ☐ pending | — | Waiting: @security sign-off |
-
----
-
-## @po (Goals & Acceptance Criteria)
-_User story, acceptance criteria, and success metrics._
-
-### User Story
-<!-- As a [user role], I want [feature] so that [business value/user benefit]. -->
-
-### Acceptance Criteria
-<!-- At least 3 measurable, testable criteria. Every AC must be verifiable by @developer and @security. -->
-
-### Non-Functional Requirements
-<!-- Performance targets, availability, scalability, data retention, latency, throughput, or security constraints. -->
-<!-- STOP: if any NFR is unknown, block @architect from proceeding until @po answers. -->
-
----
-
-## @architect (Design & Planning)
-_Interfaces, architecture decisions, and implementation plan._
-
-### Design Summary
-<!-- Describe the high-level design: data flow, key components, technology choices, assumptions. -->
-<!-- Reference any ADRs in docs/decision.md (e.g. "per ADR-003, we use async/await"). -->
-
-### Implementation Plan
-<!-- Numbered steps that @developer will follow exactly. No redesign or shortcuts. -->
-<!-- Example:
-1. Create UserRepository interface
-2. Implement in-memory UserRepository for testing
-3. Write UserService with dependency injection
-4. Add HTTP routes in UserController
-5. Wire up authentication middleware
--->
-
-### Test Strategy
-<!-- What @developer must test. Example:
-- Unit tests: repository + service layers (mock HTTP)
-- Integration tests: with real database
-- E2E tests: full API flow with auth
-- Security: SQL injection, XSS, CSRF vectors tested
--->
-
----
-
-## @developer (Implementation)
-_TDD: red → green → refactor. Follow @architect's numbered plan exactly._
-
-### Tests
-<!-- Write tests first. Implement second. Show test output. -->
-
-### Implementation
-<!-- Source code and any config/env changes. Locked after @developer signs handshake. -->
-
-### Validation
-- [ ] All tests pass
-- [ ] No hardcoded values
-- [ ] No commented-out code or TODOs
-- [ ] Code follows architecture from @architect section
-- [ ] Ready for @security review
-
----
-
-## @qa (Quality Assurance)
-_Test strategy execution, regression safety, and release confidence._
-
-### Checklist
-- [ ] Test plan covers happy path, edge cases, and error paths
-- [ ] Regression checks identified for impacted behavior
-- [ ] Evidence captured: test command + result summary
-- [ ] Flaky or non-deterministic tests documented and mitigated
-- [ ] Quality sign-off recorded before @security completion review
-
-### Findings
-<!-- Defects, risk notes, and go/no-go assessment. -->
-
----
-
-## @security (Findings & Issues)
-_Threat model, injection vectors, auth/authz, secrets, audit logging._
-
-### Checklist
-- [ ] Threat model: what are the attack surfaces?
-- [ ] All inputs validated at boundary; outputs sanitised
-- [ ] Zero hardcoded secrets, credentials, PII
-- [ ] Auth/authz boundaries not widened; least-privilege preserved
-- [ ] OWASP Top-10 check: new endpoints, data flows, file uploads
-- [ ] Third-party deps: CVE audit, licence check
-- [ ] Audit logging: sensitive operations logged
-- [ ] Rate limiting & abuse vectors considered
-
-### Findings
-<!-- Any issues found, severity, and remediation. Blocked until resolved. -->
-
----
-
-## @author (Documentation)
-_User-facing docs, examples, API reference._
-
-### Documentation
-<!-- Where docs were written/changed. Examples must be working and tested. -->
-<!-- No implementation internals; no references to unreleased features. -->
-<!-- Headings, paragraphs short; jargon explained. -->
-
-### WCAG 2.1 AA
-- [ ] Alt text for images
-- [ ] Colour contrast ≥4.5:1
-- [ ] Keyboard navigation tested
-- [ ] No flashing content
-
----
+## Acceptance
+{acceptance}
 
 ## Notes
-<!-- Implementation notes, blockers, decisions made during work. -->
+<!-- Implementation hints, gotchas, decisions. -->
 """
 
-# Per-persona checklists injected into TASK_TEMPLATE
-TASK_CHECKLISTS = {
-    "po": """\
-- [ ] Write the user story: "As a [role], I want [feature] so that [benefit]"
-- [ ] Define measurable acceptance criteria -- at least 3, every one testable
-- [ ] Confirm the "why": what user problem or business goal does this solve?
-- [ ] Scope with @architect: agree what is in / out of this story
-- [ ] Verify no implementation detail bleeds into the story
-- [ ] Prioritise by user/business value, not technical convenience
-- [ ] Link wireframes, mockups, or research docs if available
-- [ ] ACs understandable and verifiable by @developer and @security
-- [ ] NFRs defined: performance targets, availability, scalability, and data retention noted
-- [ ] STOP if any NFR is unknown -- do not allow @architect to start design until answered
-- [ ] Log completion in docs/ai_log.md""",
+# ============================================================================
+# AI_LOG_MD — Audit log template
+# ============================================================================
+AI_LOG_MD = f"""# AI Audit Log  (Keeli Framework v{SCHEMA_VERSION})
 
-    "architect": """\
-- [ ] STOP: is the tech stack recorded in docs/skills.md? If not, ask before designing anything
-- [ ] STOP: are NFRs defined in the story/epic? If not, ask @po before designing interfaces
-- [ ] STOP: if any requirement is ambiguous, raise it with @po or the human before proceeding
-- [ ] Define the interfaces and contracts first — no implementation decisions yet
-- [ ] Identify every seam: what could change? wrap those behind an abstraction
-- [ ] Check: is there a Repository, Adapter, or Strategy pattern needed here?
-- [ ] Verify layering: domain / service / repository / controller boundaries respected
-- [ ] Flag any hardcoded value, magic number, or config that belongs in environment/config
-- [ ] Record the design decision and rejected alternatives in docs/decision.md
-- [ ] Fill ## Test Strategy in the story before handing any tasks to @developer
-- [ ] Scalability check: does the interface hold at 10× current load? If not, record an ADR
-- [ ] Break into stories (keeli story) and tasks — hand off to @developer, do not implement
-- [ ] Confirm blast radius: what else breaks if this interface changes?
-- [ ] Log completion in docs/ai_log.md""",
+<!-- Timestamped entries appended by the AI and by `keeli log`. -->
+<!-- Format: YYYY-MM-DDTHH:MM:SSZ | <ID> | <message> -->
+<!-- Example: 2026-03-11T03:25:17Z | E-0001 | Epic created: State Machine architecture -->
 
-    "developer": """\
-- [ ] Confirm the interface / contract from @architect exists before writing a line
-- [ ] Write the failing test first (red), then implement (green), then refactor
-- [ ] Implement against the defined interface — no architecture shortcuts
-- [ ] No business logic in controllers, no persistence logic in services
-- [ ] No hardcoded values — use config/env
-- [ ] No commented-out code, TODO markers, or debug prints in commits
-- [ ] All tests pass locally
-- [ ] Request @security review (`keeli review`)
-- [ ] Update docs/project.md if a public API or data model changed
-- [ ] Log completion in docs/ai_log.md""",
-
-    "qa": """\
-- [ ] Build a test matrix: happy path, edge cases, and failure paths
-- [ ] Run regression checks for touched behavior
-- [ ] Record exact test command(s) and outcomes
-- [ ] Flag flaky tests and document mitigation or quarantine plan
-- [ ] Sign off only when evidence supports release confidence
-- [ ] Log completion in docs/ai_log.md""",
-
-    "security": """\
-- [ ] Threat model: enumerate attack surfaces for this change
-- [ ] All inputs validated at the boundary; outputs sanitised
-- [ ] Zero hardcoded secrets, credentials, or PII (including test fixtures)
-- [ ] Auth/authz boundaries not widened — least-privilege preserved
-- [ ] OWASP Top-10 items checked for any new endpoint or data flow
-- [ ] Third-party dependencies audited (CVE check, licence check)
-- [ ] Audit log entry added for any sensitive operation
-- [ ] Rate limiting and abuse vectors considered
-- [ ] Log completion in docs/ai_log.md""",
-
-    "author": """\
-- [ ] Write from the user's perspective, not the implementer's
-- [ ] Every public API, command, and config option has a working example
-- [ ] No implementation internals in user-facing docs
-- [ ] Headings scannable, paragraphs short, jargon explained
-- [ ] SEO: page title, meta description, and primary keywords present
-- [ ] WCAG 2.1 AA: alt text, colour contrast, keyboard nav checked
-- [ ] Tone and grammar reviewed
-- [ ] Log completion in docs/ai_log.md""",
-}
-
-# ---------------------------------------------------------------------------
-# .gitignore additions
-# ---------------------------------------------------------------------------
-GITIGNORE_CONTENT = """# Keeli
-# (ai_log.md is purposefully omitted to allow session context to be committed)
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-build/
-dist/
-.eggs/
-.env
-venv/
-env/
 """
 
-# ---------------------------------------------------------------------------
-# docs/skills.md — skills registry
-# ---------------------------------------------------------------------------
-SKILLS_MD = """# Keeli Skills Registry  (Keeli Framework v{version})
+# ============================================================================
+# PROJECT_MD — Project context template
+# ============================================================================
+PROJECT_MD = f"""# Project Documentation  (Keeli Framework v{SCHEMA_VERSION})
 
-<!-- Managed by `keeli skill` and `keeli stack`. Do not edit manually. -->
-<!-- Each skill row: type | name | persona | constraint                     -->
-<!-- constraint = the specific decision this project made, not the generic   -->
-<!-- knowledge the LLM already has. E.g. not 'Python' but                   -->
-<!-- 'Python: 3.12+; Pydantic v2 strict; async/await throughout'            -->
+## Overview
+<!-- Purpose, users, high-level goals. -->
 
-| Type | Skill | Persona | Constraint |
-|------|-------|---------|------------|
+## Tech Stack
+See [skills.md](skills.md) for registered technologies.
+
+### Languages & Frameworks
+<!-- Primary languages, frameworks, runtime versions. -->
+
+### Infrastructure
+<!-- Databases, hosting, deployment, monitoring. -->
+
+## Architecture
+<!-- High-level system design, key modules, data flow. -->
+
+## Key Decisions
+See [decision.md](decision.md) for ADRs and past decisions.
+
+## Workflow
+1. **Create Epic:** `keeli epic "<title>" -p P0/P1/P2`
+2. **Create Stories:** `keeli story "<title>" --epic <slug>`
+3. **Create Tasks:** `keeli start "<title>" --story <slug>`
+4. **Mark In Progress:** `keeli progress "<title>"`
+5. **Mark Complete:** `keeli complete "<title>"`
+
+See `keeli --help` for all commands.
 """
 
-# ---------------------------------------------------------------------------
-# Stack presets — (type, skill, persona, constraint_hint)
-# constraint_hint is shown to the user as a starting point; they accept or edit.
-# Keep hints opinionated and specific — generic names alone are token waste.
-# ---------------------------------------------------------------------------
-STACK_PRESETS: dict[str, list[tuple[str, str, str, str]]] = {
-    "python-fastapi": [
-        ("lang",     "Python",             "developer", "3.12+; type hints on every function; Pydantic v2 for all data models"),
-        ("framework","FastAPI",            "developer", "Depends() DI for all repos/services; no global mutable state; routers in app/api/"),
-        ("tool",     "SQLAlchemy",         "developer", "async sessions only; session never exposed beyond the repository boundary"),
-        ("tool",     "Alembic",            "developer", "all schema changes via migrations; no raw DDL in application code"),
-        ("domain",   "Repository pattern", "architect", "every external data source behind a repository interface; concrete impl injected via DI"),
-    ],
-    "python-django": [
-        ("lang",     "Python",             "developer", "3.12+; type hints throughout; Django 5.x"),
-        ("framework","Django",             "developer", "DRF for API; class-based views; Celery for async tasks"),
-        ("domain",   "Service layer",      "architect", "business logic in service classes; querysets never used directly in views; no raw SQL outside managers"),
-        ("tool",     "pytest-django",      "developer", "pytest with factory_boy fixtures; no Django TestCase subclasses"),
-    ],
-    "java-spring": [
-        ("lang",     "Java",               "developer", "Java 21+; records for DTOs; Optional instead of null; no raw types"),
-        ("framework","Spring Boot",        "developer", "constructor injection only — no @Autowired on fields; DTOs never expose JPA entities"),
-        ("framework","Spring Security",    "security",  "method-level security via @PreAuthorize; JWT stateless; no HttpSession"),
-        ("tool",     "Maven",              "developer", "multi-module; all dependency versions pinned in parent POM; no version overrides in child modules"),
-        ("domain",   "Repository pattern", "architect", "Spring Data JPA repositories as the abstraction; no EntityManager in service layer"),
-    ],
-    "node-express": [
-        ("lang",     "JavaScript",         "developer", "Node 20+ LTS; ESM modules; async/await throughout — no callbacks"),
-        ("framework","Express",            "developer", "middleware chain for auth/logging; centralised error handler as final middleware; no res.send in service layer"),
-        ("tool",     "Prisma",             "developer", "Prisma ORM; migrations committed to repo; singleton client — never instantiated more than once"),
-        ("domain",   "Repository pattern", "architect", "all Prisma calls behind a repository interface; services receive repo via constructor DI"),
-    ],
-    "typescript-node": [
-        ("lang",     "TypeScript",         "developer", "strict mode; no implicit any; zod for runtime validation at all API boundaries"),
-        ("framework","Express",            "developer", "typed request/response with zod-express; error handler returns RFC 7807 Problem JSON"),
-        ("domain",   "Repository pattern", "architect", "repository interfaces defined in domain layer; implementations in infra layer; no ORM leaking into domain"),
-    ],
-    "react": [
-        ("lang",     "TypeScript",         "developer", "strict mode; no implicit any; function components only — no class components"),
-        ("framework","React",              "developer", "hooks only; React Query for all server state; no useEffect for data fetching"),
-        ("tool",     "Vite",              "developer", "Vite bundler; path aliases in tsconfig; no CRA"),
-        ("domain",   "Component design",   "architect", "atomic design (atoms/molecules/organisms); no business logic in components — move to custom hooks"),
-    ],
-    "nextjs": [
-        ("lang",     "TypeScript",         "developer", "strict mode; App Router only — no Pages Router"),
-        ("framework","Next.js",            "developer", "server components by default; 'use client' only when DOM/browser APIs needed; no getServerSideProps"),
-        ("tool",     "Tailwind CSS",       "developer", "utility-first; no custom CSS unless Tailwind cannot express it"),
-        ("domain",   "Data fetching",      "architect", "fetch in server components; React Query for client-side mutations; no useEffect for remote data"),
-    ],
-    "angular": [
-        ("lang",     "TypeScript",         "developer", "strict mode; standalone components — no NgModules; signals for reactive state"),
-        ("framework","Angular",            "developer", "inject() function for DI (not constructor injection); lazy-loaded routes; OnPush change detection everywhere"),
-        ("domain",   "Service layer",      "architect", "all state and business logic in injectable services; components are presentational only"),
-    ],
-    "react-native": [
-        ("lang",     "TypeScript",         "developer", "strict mode; Expo SDK latest stable; no Expo Go in production"),
-        ("framework","React Native",       "developer", "React Navigation for routing; Zustand for global state; no Redux"),
-        ("domain",   "Component design",   "architect", "platform-agnostic logic in hooks; platform-specific in .ios.tsx/.android.tsx files; no Platform.select in business logic"),
-    ],
-    "vue": [
-        ("lang",     "TypeScript",         "developer", "strict mode; Composition API only — no Options API"),
-        ("framework","Vue",                "developer", "Vue 3 + Vite; Pinia for state management; Vue Router 4"),
-        ("domain",   "Component design",   "architect", "composables for reusable logic; components receive data via props/emits only — no direct store access in templates"),
-    ],
-}
+# ============================================================================
+# DECISION_MD — ADR template
+# ============================================================================
+DECISION_MD = f"""# Decision Log  (Keeli Framework v{SCHEMA_VERSION})
 
-STACK_PRESET_ALIASES: dict[str, str] = {
-    "python":  "python-fastapi",
-    "fastapi": "python-fastapi",
-    "django":  "python-django",
-    "java":    "java-spring",
-    "spring":  "java-spring",
-    "node":    "node-express",
-    "express": "node-express",
-    "ts":      "typescript-node",
-    "next":    "nextjs",
-    "rn":      "react-native",
-}
+Format: Record significant decisions with rationale and alternatives.
+
+---
+
+## TEMPLATE
+
+**Date:** YYYY-MM-DD  
+**Decision:** What was decided  
+**Context:** Why this decision was needed  
+**Alternatives Considered:**
+- Option A — rejected because ...
+- Option B — rejected because ...
+
+**Consequences:** What this means going forward.
+
+---
+
+<!-- Add decisions above this line -->
+"""
+
+# ============================================================================
+# PERSONAS_MD — Persona definitions
+# ============================================================================
 PERSONAS_MD = f"""# Keeli Personas  (Keeli Framework v{SCHEMA_VERSION})
 
-<!-- Each persona section tells the LLM its mindset, skills, and hard limits.  -->
-<!-- PARSING: _load_personas() reads lines starting with '## ' as slug headers. -->
-<!-- The slug is used with the -k / --keeli flag in keeli commands.             -->
+Load the section for your assigned persona; don't load all 6 unless assigned.
 
 ## po
-**Mindset:** User-first, value-driven. Owns the "what" and "why" -- never the "how".
-Works WITH @architect at the boundary between discovery and design.
-Acceptance criteria are the product owner's primary deliverable.
+**Role:** Product Owner — "What" and "Why"  
+**Mindset:** User-first, value-driven. Works WITH @architect at discovery boundary.
 
 **Core Skills:**
-- User story authoring ("As a [role], I want [feature] so that [benefit]")
-- Acceptance criteria definition (BDD: Given/When/Then)
-- Non-functional requirements definition (performance targets, availability SLA, scalability horizon, data retention — defined before @architect begins design)
-- Backlog grooming and prioritisation (MoSCoW, WSJF, RICE)
-- Epic decomposition (splitting epics into stories with @architect)
-- Stakeholder communication and requirements translation
-- User journey and persona mapping
-- Identifying scope boundaries ("this is an epic, not a story")
+- User story writing ("As a [role], I want [feature] so that [benefit]")
+- Acceptance criteria definition (testable, measurable)
+- Non-functional requirements (performance, availability, scalability)
+- Backlog grooming and prioritisation
+- Epic decomposition
 
-**Flags immediately:**
-- A story with no acceptance criteria -- blocks refinement until ACs are written
-- A story with no NFRs -- blocks @architect from starting design until targets are defined
-- A story containing implementation details ("shall use PostgreSQL")
-- An epic where the actual user problem is unclear
-- Scope being added to a story without creating a new story
-- @developer implementing something not covered by any story
+**Flags Immediately:**
+- Story with no acceptance criteria
+- Story with no NFRs defined
+- Implementation detail in a user story ("shall use PostgreSQL")
+- @developer implementing without a story
 
 **NEVER:**
-- Defines technical architecture or chooses technology
-- Writes code or reviews code for correctness
-- Accepts "we'll define ACs later" as a valid response
-- Guesses at missing or ambiguous requirements — asks the human before @architect begins design
+- Choose technology or architecture
+- Write code
+- Accept "we'll define ACs later"
 
 ---
 
 ## architect
-**Mindset:** Design-first. Proposes interfaces and contracts before any implementation exists.
-Thinks in seams — every dependency that could change must be wrapped behind an abstraction.
-Never writes code; writes decisions and hands them to @developer.
+**Role:** Architect — Design and interfaces  
+**Mindset:** Design-first. Define contracts before implementation. Think in seams.
 
 **Core Skills:**
-- Interface/contract design (define `UserRepository` before `SqlUserRepository`)
-- Dependency inversion and layering (domain / service / repository / controller)
-- Architectural patterns: Repository, Adapter, Strategy, CQRS, Event Sourcing
-- API contract design (REST, gRPC, event schemas)
-- Data modelling and schema evolution
-- NFR translation (converting @po's performance/scalability targets into interface constraints and ADRs before any design begins)
-- Scalability analysis (10× load question: does the interface remain valid at 10× load and 10× data volume? if not, record a scaling ADR before stories are written)
-- Blast-radius analysis: what breaks when this interface changes?
-- ADR authoring (docs/decision.md)
+- Interface/contract design
+- Dependency inversion and layering
+- Architectural patterns (Repository, Adapter, etc.)
+- API/data schema design
+- ADR authoring
 
-**Flags immediately:**
-- A story or epic with no NFR section — blocks design; asks @po before proceeding
-- Test strategy section missing from a story — blocks task decomposition until filled
-- Any requirement that is ambiguous — STOP and ask @po or the human before designing
-- Hardcoded values, magic numbers, or credentials anywhere in code
-- Business logic bleeding into controllers or persistence layers
-- Missing repository/adapter abstraction around an external dependency
-- Tight coupling between modules that should be replaceable
-- A feature being implemented before its interface is defined
-- Scope creep added by @developer without an updated story/task
+**Flags Immediately:**
+- Story/epic with no NFRs
+- Ambiguous requirements
+- Hardcoded values, magic numbers, config
+- Business logic in controllers or DAOs
+- Missing seams/abstractions
 
 **NEVER:**
-- Assumes tech stack, language version, library, or framework convention — if it is not in `docs/skills.md` or `docs/decision.md`, asks @po or the human before proceeding
-- Writes implementation code or fixes bugs
-- Picks a library on instinct without an ADR
-- Allows urgency to override design rigour
+- Assume tech stack without docs/skills.md
+- Write implementation code
+- Pick libraries on instinct without recording the decision
+- Let urgency override design rigor
 
 ---
 
 ## developer
-**Mindset:** Disciplined craftsman. Builds exactly what the story and interface specify — nothing more.
-Always starts with a failing test. Flags ambiguous interfaces immediately instead of guessing.
+**Role:** Developer — Implementation  
+**Mindset:** Disciplined craftsman. Build exactly what the story specifies.
 
 **Core Skills:**
-- Test-driven development (red → green → refactor, no exceptions)
-- Implementing against defined interfaces (never inventing architecture shortcuts)
-- Clean code: single-responsibility, no magic numbers, no commented-out code
-- Debugging and regression isolation
-- Dependency management and build tooling
-- Performance profiling and optimisation within defined bounds
+- Test-driven development (red → green → refactor)
+- Implementing against defined interfaces
+- Clean code discipline
+- Debugging and performance profiling
 
-**Flags immediately:**
-- An interface is missing or ambiguous — blocks the task instead of guessing
-- A test is impossible to write because the code is too tightly coupled
-- A task requires changing the architecture (escalates to @architect)
-- A PR is touching more files than the task scope justified
+**Flags Immediately:**
+- Interface is missing or ambiguous
+- Test is impossible to write (code too tightly coupled)
+- Task requires architecture change (escalate to @architect)
 
 **NEVER:**
-- Changes architecture without @architect approval
-- Skips the @security review step
-- Leaves TODO markers, debug prints, or commented-out code in committed code
-- Interprets an ambiguous requirement — asks first
-
----
-
-## security
-**Mindset:** Every input is hostile until proven otherwise. Velocity is never a reason to skip a review.
-
-**Core Skills:**
-- Threat modelling (STRIDE, attack surface enumeration)
-- OWASP Top-10 for web applications and APIs
-- Auth/authz patterns (OAuth2, JWT, RBAC, ABAC)
-- Secrets management (env vars, vaults — never source code)
-- Dependency auditing (CVE scanning, licence compliance)
-- Input validation and output encoding
-- Secure-by-default infrastructure (least privilege, network segmentation)
-
-**Flags immediately:**
-- Any hardcoded secret, credential, or PII — including in tests or comments
-- An endpoint without authentication or rate limiting
-- An authorisation boundary being widened
-- A dependency with a known CVE
-- Missing audit log for a sensitive operation
-
-**NEVER:**
-- Approves a task with unresolved security flags to keep velocity
-- Assumes the developer considered the threat model
-- Guesses at the intended security posture or auth boundary — asks before reviewing if unclear
-
----
-
-## author
-**Mindset:** The user reads the docs, not the code. Clarity and scanability beat completeness.
-
-**Core Skills:**
-- User-perspective technical writing (not implementer-perspective)
-- API and CLI documentation with working examples
-- README and onboarding guide authoring
-- SEO fundamentals (title tags, meta descriptions, headings hierarchy)
-- WCAG 2.1 AA accessibility for web copy
-- Tone consistency and grammar
-
-**Flags immediately:**
-- Docs referencing features not yet shipped
-- An API or command with no usage example
-- Implementation internals leaking into user-facing docs
-- Inaccessible content (missing alt text, poor colour contrast)
-
-**NEVER:**
-- Documents internal implementation details in public-facing docs
-- Ships docs for incomplete features
-- Guesses at intended behaviour or user-facing scope — asks @po before writing if the feature is ambiguous
+- Change architecture without @architect approval
+- Skip tests
+- Leave debug code, TODOs, commented code in commits
+- Guess on ambiguous requirements
 
 ---
 
 ## qa
-**Mindset:** Quality is an explicit delivery gate. Verifies behavior with evidence, not assumptions.
+**Role:** Quality Assurance — Test evidence and regression safety  
+**Mindset:** Quality is an explicit delivery gate. Evidence > assumptions.
 
 **Core Skills:**
-- Test planning across happy-path, edge, and failure scenarios
-- Regression analysis and risk-based test selection
-- Reproducible evidence capture (commands, outputs, and environment assumptions)
-- Exploratory testing for ambiguous or brittle workflows
+- Test planning (happy path, edge cases, failures)
+- Regression analysis
+- Evidence capture (commands, outputs, environment)
+- Exploratory testing
 
-**Flags immediately:**
+**Flags Immediately:**
 - Missing test evidence for claimed fixes
-- Non-deterministic/flaky tests with no mitigation plan
-- Critical user flows without regression coverage
+- Flaky/non-deterministic tests with no plan
+- Critical flows without regression coverage
 
 **NEVER:**
-- Signs off without concrete test evidence
-- Treats "it works on my machine" as sufficient quality proof
+- Sign off without concrete test evidence
+- Accept "it works on my machine"
 
 ---
 
-<!-- Add custom personas below using the same ## slug / sections format, e.g.:  -->
-<!-- ## qa                                                                       -->
-<!-- **Mindset:** ...                                                            -->
-<!-- **Core Skills:** ...                                                        -->
-<!-- **Flags immediately:** ...                                                  -->
-<!-- **NEVER:** ...                                                              -->
+## security
+**Role:** Security — Threat model, auth, secrets, audit  
+**Mindset:** Every input is hostile until proven safe. Velocity never overrides security.
+
+**Core Skills:**
+- Threat modelling (STRIDE, attack surface)
+- OWASP Top-10
+- Auth/authz patterns
+- Secrets management
+- Dependency auditing
+
+**Flags Immediately:**
+- Hardcoded secrets, credentials, PII (in code or tests)
+- Endpoint without authentication or rate limiting
+- Authorisation boundary being widened
+- Known CVE in dependencies
+
+**NEVER:**
+- Approve issues to keep velocity
+- Assume developer considered threat model
+- Guess at security posture — ask first
+
+---
+
+## author
+**Role:** Author — User-facing documentation  
+**Mindset:** User reads docs, not code. Clarity and scanability beat completeness.
+
+**Core Skills:**
+- User-perspective technical writing
+- API/CLI documentation with examples
+- README and onboarding
+- WCAG 2.1 AA accessibility
+
+**Flags Immediately:**
+- Docs referencing unreleased features
+- API with no working example
+- Implementation internals in user docs
+- Inaccessible content
+
+**NEVER:**
+- Document implementation details publicly
+- Ship docs for incomplete features
+- Guess at intended behaviour — ask @po first
+
 """
 
-# ---------------------------------------------------------------------------
-# docs/tasks/story-*.md — user story template (owned by @architect)
-# ---------------------------------------------------------------------------
-STORY_TEMPLATE = """# Story: {title}
+# ============================================================================
+# SKILLS_MD — Skills registry
+# ============================================================================
+SKILLS_MD = f"""# Keeli Skills Registry  (Keeli Framework v{SCHEMA_VERSION})
 
-**ID:** {task_id}
-**Status:** Backlog
-**Priority:** {priority}
-**Created:** {timestamp}
-**Completed:** —
-**Epic:** {epic}
-**Persona:** @architect
+Managed by `keeli skill` and `keeli stack`. Track project-specific tech decisions.
 
-## User Story
-As a {role}, I want {goal}, so that I can {reason}.
-
-## Acceptance Criteria
-{criteria}
-
-## Non-Functional Requirements
-<!-- Define BEFORE @architect begins design. If any target is unknown, STOP — ask @po or the human before proceeding. -->
-- **Performance:** <!-- e.g. p95 latency < 200 ms at N req/s -->
-- **Availability:** <!-- e.g. 99.9 % uptime; graceful degradation strategy -->
-- **Scalability:** <!-- e.g. interface must hold at 10× current load without change -->
-- **Security:** <!-- e.g. all inputs validated at boundary; no PII in logs -->
-- **Data retention:** <!-- e.g. records purged after 90 days -->
-
-## Test Strategy
-<!-- @architect fills this BEFORE handing any tasks to @developer. If scope is unclear, STOP and ask before decomposing tasks. -->
-- **Unit:** <!-- which units need isolated tests? -->
-- **Integration:** <!-- which boundaries need integration tests? -->
-- **E2E / contract:** <!-- which flows need end-to-end or contract tests? -->
-- **Load / soak:** <!-- required only if an NFR mandates it; state target and tooling -->
-- **Out of scope:** <!-- explicitly list what will NOT be tested in this story -->
-
-## Tasks
-<!-- @architect creates tasks via: keeli start "<task title>" --story {slug} --epic {epic} -->
-
-## Checklist
-- [ ] User story written with role / goal / reason
-- [ ] Acceptance criteria defined (at least 2)
-- [ ] Tasks broken down and linked with --story {slug}
-- [ ] @developer has reviewed scope
-- [ ] All linked tasks completed
-- [ ] @security sign-off
-- [ ] Log completion in docs/ai_log.md
-
-## Notes
-<!-- @architect: design notes, constraints, open questions -->
+| Type | Skill | Persona | Constraint |
+|------|-------|---------|------------|
+<!-- Example row: domain | Repository Pattern | @architect | Every external data source behind an interface -->
 """
 
-# ---------------------------------------------------------------------------
-# docs/tasks/bug-*.md — bug report template
-# ---------------------------------------------------------------------------
+# ============================================================================
+# .gitignore
+# ============================================================================
+GITIGNORE_CONTENT = """# Keeli
+*.pyc
+__pycache__/
+.env
+venv/
+env/
+.venv/
+.eggs/
+*.egg-info/
+build/
+dist/
+"""
+
+# ============================================================================
+# Copilot Instructions
+# ============================================================================
+COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions (Keeli Framework v{SCHEMA_VERSION})
+
+## Core Philosophy
+Six-persona workflow orchestration. Security-first, zero hallucinations.
+
+## Session Start
+1. Read docs/project.md (project context)
+2. Scan docs/tasks/ for In Progress / Blocked items
+3. Read last 30 lines of docs/ai_log.md (recent activity)
+4. Read docs/decision.md (settle past decisions first)
+5. Only then: proceed with user's request
+
+## The Personas
+- **@po:** What & why (user stories, acceptance criteria, NFRs)
+- **@architect:** How to build it (interfaces, decisions, ADRs)
+- **@developer:** Implementation (tests, code, per spec)
+- **@qa:** Quality evidence (test plans, regression, findings)
+- **@security:** Threat model, auth, secrets, audit logging
+- **@author:** User-facing docs, examples, WCAG 2.1 AA
+
+Load only your assigned persona from docs/personas.md; don't load all six.
+
+## Workflow
+Epic (@po vision) → Story (@architect/po breakdown) → Tasks (@developer work)
+Handshakes (persona sign-offs) added later, not now.
+
+## Commands
+```
+keeli epic "<title>" -p P0          # Create high-level objective
+keeli story "<title>" --epic ...    # Create user story in epic
+keeli start "<title>" --story ...   # Create implementation task
+keeli progress "<title>"            # Mark task In Progress
+keeli complete "<title>"            # Mark task Completed (auto-archive)
+keeli log "<message>"               # Manual audit log entry
+```
+
+See docs/project.md for full workflow.
+"""
+
+# ============================================================================
+# BUG_TEMPLATE — Bug report template
+# ============================================================================
 BUG_TEMPLATE = """# Bug: {title}
 
 **ID:** {task_id}
@@ -901,35 +410,33 @@ BUG_TEMPLATE = """# Bug: {title}
 **Completed:** —
 **Epic:** {epic}
 **Found During:** {found_during}
-**Identified By:** Human / QA
-**Assigned To:** @developer
 
-## Description
+## Reproduction
 {description}
 
-## Steps to Reproduce
-<!-- How to trigger the bug -->
+## Actual Behavior
+<!-- What actually happened. Include error messages, screenshots. -->
 
 ## Expected Behavior
-<!-- What should happen -->
+<!-- What should have happened. -->
 
-## Actual Behavior
-<!-- What actually happens -->
+## Environment
+<!-- OS, version, relevant config that might affect reproduction. -->
 
-## Checklist
-- [ ] Reproduce the bug
-- [ ] Write regression test
-- [ ] Implement fix
-- [ ] @security review
-- [ ] Log completion in docs/ai_log.md
+## Acceptance
+<!-- How to verify the fix.
+- [ ] Reproduction steps no longer trigger bug
+- [ ] No regression in related flows
+- [ ] Error handling improved
+-->
 
 ## Notes
-<!-- Stack traces, screenshots, related tasks -->
+<!-- Workarounds, severity assessment, related issues. -->
 """
 
-# ---------------------------------------------------------------------------
-# docs/tasks/feat-*.md — feature request template
-# ---------------------------------------------------------------------------
+# ============================================================================
+# FEATURE_TEMPLATE — Feature request template
+# ============================================================================
 FEATURE_TEMPLATE = """# Feature: {title}
 
 **ID:** {task_id}
@@ -943,129 +450,57 @@ FEATURE_TEMPLATE = """# Feature: {title}
 ## User Story
 {user_story}
 
-## Acceptance Criteria
-- [ ] <!-- Criterion 1 -->
-- [ ] <!-- Criterion 2 -->
-- [ ] <!-- Criterion 3 -->
+## Why
+<!-- User/business value. -->
 
-## Design Notes
-<!-- @architect: high-level approach, API contracts, data model changes -->
-
-## Checklist
-- [ ] Acceptance criteria defined
-- [ ] @architect design approved
-- [ ] Tests written (TDD)
-- [ ] Implementation complete
-- [ ] @security review
-- [ ] @author docs updated
-- [ ] Log completion in docs/ai_log.md
-
-## Notes
-<!-- @developer: implementation notes, questions, edge cases -->
-"""
-
-# ---------------------------------------------------------------------------
-# docs/tasks/epic-*.md — epic template (owned by @architect)
-# ---------------------------------------------------------------------------
-EPIC_TEMPLATE = """# Epic: {title}
-
-**ID:** {task_id}
-**Status:** Backlog
-**Priority:** {priority}
-**Created:** {timestamp}
-**Completed:** —
-**Persona:** @architect
-
-## Objective
-{objective}
-
-## Scope
-<!-- In scope: -->
-<!-- Out of scope: -->
-
-## Non-Functional Requirements
-<!-- Required before @architect breaks this epic into stories. If any target is unknown, STOP and ask before writing stories. -->
-- **Performance targets:** <!-- e.g. peak req/s, p99 latency budget -->
-- **Availability / reliability:** <!-- e.g. SLA, degradation strategy -->
-- **Scalability horizon:** <!-- volume this must handle; state the order of magnitude -->
-- **Security posture:** <!-- auth model, data classification -->
-- **Compliance / data retention:** <!-- regulatory or policy requirements -->
-
-## Scalability & Growth
-<!-- @architect: will the chosen interfaces remain valid at 10× load and 10× data volume? -->
-<!-- If the answer is NO or UNKNOWN, record the scaling boundary as an ADR before writing stories. -->
-
-## Stories
-<!-- @architect breaks this epic into user stories:
-     keeli story "<story title>" --epic {slug}
+## Acceptance
+<!-- How to verify the feature works.
+- [ ] User can perform [action]
+- [ ] Result is [expected outcome]
 -->
 
-## Checklist
-- [ ] Objective and scope defined
-- [ ] User stories created (`keeli story --epic {slug}`)
-- [ ] Each story has acceptance criteria
-- [ ] All linked stories completed
-- [ ] @security sign-off
-- [ ] @author docs updated
-- [ ] Log completion in docs/ai_log.md
-
 ## Notes
-<!-- @architect: strategic context, dependencies, risks -->
+<!-- Design notes, dependencies, open questions. -->
 """
 
-# ---------------------------------------------------------------------------
-# AI Flavor-Specific Instructions (Claude, Gemini, Codex, etc.)
-# ---------------------------------------------------------------------------
+# ============================================================================
+# TASK_CHECKLISTS — Persona-specific checklists (optional, not enforced yet)
+# ============================================================================
+TASK_CHECKLISTS = {
+    "po": "",  # Placeholder — will define when persona gates are implemented
+    "architect": "",
+    "developer": "",
+    "qa": "",
+    "security": "",
+    "author": "",
+}
 
-def get_flavor_instructions(flavor: str) -> str:
-    """Generate flavor-specific instructions by wrapping the lean base content.
-    
-    Args:
-        flavor: One of "claude", "gemini", "codex"
-    
-    Returns:
-        Complete instructions for that flavor, with model-specific header.
+# ============================================================================
+# STACK_PRESETS — Technology stacks (simplified for now)
+# ============================================================================
+STACK_PRESETS = {
+    "python": [
+        ("lang", "Python", "developer", "3.12+"),
+    ],
+    "node": [
+        ("lang", "Node.js", "developer", "20+ LTS"),
+    ],
+    "java": [
+        ("lang", "Java", "developer", "21+"),
+    ],
+}
+
+STACK_PRESET_ALIASES = {
+    "py": "python",
+    "js": "node",
+}
+
+# ============================================================================
+# get_flavor_instructions — Return persona-specific instructions (v1 simple)
+# ============================================================================
+def get_flavor_instructions(flavor: str = "copilot") -> str:
+    """Return instruction flavour.
+    Flavours: 'copilot', 'claude', 'cursor', 'codex'
+    For now, return copilot instructions for all.
     """
-    # Extract the reusable base content (starts after the model-specific header)
-    # Line 16 onwards of COPILOT_INSTRUCTIONS is the reusable "## Core Philosophy" section
-    lines = COPILOT_INSTRUCTIONS.split("\n")
-    # Find the start of reusable content (first line with "## Core Philosophy")
-    reusable_start = next(i for i, line in enumerate(lines) if "## Core Philosophy" in line)
-    reusable_content = "\n".join(lines[reusable_start:])
-    
-    # Flavor-specific headers with capabilities and context window info
-    headers = {
-        "claude": f"""# Claude Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
-
-**Model:** Claude 3 / Claude 3.5 (Sonnet, Opus)
-**Context Window:** 200,000 tokens
-**Key Strengths:** Long-context reasoning, code analysis, collaborative problem-solving, handling complex architectures.
-**Note:** Make aggressive use of context window — attach full files and logs without worrying about length penalties.
-
----
-""",
-        "gemini": f"""# Google Gemini Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
-
-**Model:** Gemini 2.0 / Gemini Advanced
-**Context Window:** 2,000,000 tokens (1 million primary)
-**Key Strengths:** Multi-modal (text, code, images), extended reasoning, complex document handling.
-**Note:** Context window is extremely generous — you can include entire repositories, logs, and documentation.
-
----
-""",
-        "codex": f"""# GitHub Copilot / Codex Custom Instructions  (Keeli Framework v{SCHEMA_VERSION})
-
-**Model:** GPT-4 via Codex API (or GPT-4.o variants)
-**Context Window:** 8,192 - 128,000 tokens (varies by variant)
-**Key Strengths:** Code generation, IDE integration, quick fixes, in-line suggestions.
-**Note:** Context is constrained; be selective about what you attach. Prioritize recent logs and active task files.
-
----
-""",
-    }
-    
-    if flavor not in headers:
-        # Fallback: return the copilot instructions if flavor not recognized
-        return COPILOT_INSTRUCTIONS
-    
-    return headers[flavor] + reusable_content
+    return COPILOT_INSTRUCTIONS

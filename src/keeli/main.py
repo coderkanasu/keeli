@@ -23,10 +23,13 @@ Commands
 
 import argparse
 import contextlib
+import io
 import json
 import os
 import math as _math
 import re
+import sqlite3
+import subprocess
 import sys
 import textwrap
 from collections.abc import Callable
@@ -59,6 +62,19 @@ from keeli.templates import (
 def _now_iso() -> str:
     """Return current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _json_envelope(command: str, ok: bool, data: dict[str, object] | None = None, error: str | None = None) -> dict[str, object]:
+    """Build a stable machine-readable response envelope for CLI automation."""
+    payload: dict[str, object] = {
+        "ok": ok,
+        "command": command,
+        "timestamp": _now_iso(),
+        "data": data or {},
+    }
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _slugify(text: str) -> str:
@@ -354,6 +370,30 @@ def _validate_hierarchy(path: Path) -> list[str]:
 # ── Index / Ledger helpers ─────────────────────────────────────────────────
 
 _INDEX_PATH = Path("docs/.keeli_index.json")
+_STATE_DB_FILENAME = "keeli_state.db"
+_PRE_COMMIT_HOOK = """#!/bin/sh
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$ROOT"
+
+paths=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -n "$paths" ]; then
+    # shellcheck disable=SC2086
+    keeli validate-task-state --paths $paths
+else
+    keeli validate-task-state
+fi
+"""
+
+_POST_COMMIT_HOOK = """#!/bin/sh
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$ROOT"
+
+keeli capture-commit-state
+"""
 _INDEX_PREFIXES: dict[str, str] = {
     "task": "T",
     "epic": "E",
@@ -445,6 +485,386 @@ def _index_update_status(
                 item["archived"] = archived
             break
     _save_index(index)
+
+
+def _state_db_path() -> Path:
+    """Return the SQLite state database path for the current project root."""
+    return _find_project_root() / _STATE_DB_FILENAME
+
+
+def _connect_state_db() -> sqlite3.Connection:
+    """Open a connection to the local Keeli state database."""
+    conn = sqlite3.connect(_state_db_path())
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_state_db() -> None:
+    """Create the SQLite state database and schema if missing."""
+    with contextlib.closing(_connect_state_db()) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS work_items (
+                item_id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                epic_slug TEXT,
+                story_slug TEXT,
+                persona TEXT,
+                context_note TEXT,
+                depends_on TEXT,
+                source_path TEXT,
+                created_at TEXT,
+                completed_at TEXT,
+                archived INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items(status);
+            CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(priority);
+            CREATE INDEX IF NOT EXISTS idx_work_items_epic_slug ON work_items(epic_slug);
+            CREATE INDEX IF NOT EXISTS idx_work_items_story_slug ON work_items(story_slug);
+            CREATE INDEX IF NOT EXISTS idx_work_items_archived ON work_items(archived);
+
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT,
+                actor TEXT,
+                action TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
+            ("schema_version", SCHEMA_VERSION),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
+            ("storage_mode", "sqlite"),
+        )
+        conn.commit()
+
+
+def _item_type_from_path(path: Path) -> str:
+    """Map a task file path to its logical work-item type."""
+    name = path.name
+    if name.startswith("epic-"):
+        return "epic"
+    if name.startswith("story-"):
+        return "story"
+    if name.startswith("bug-"):
+        return "bug"
+    if name.startswith("feat-"):
+        return "feat"
+    return "task"
+
+
+def _title_from_task_text(text: str) -> str:
+    """Extract the user-facing title from the first markdown heading."""
+    first = text.splitlines()[0].strip() if text.splitlines() else ""
+    match = re.match(r"^#\s+(?:Task|Story|Epic|Bug|Feature):\s+(.*)$", first)
+    return match.group(1).strip() if match else first.lstrip("# ").strip()
+
+
+def _normalize_field(value: str) -> str | None:
+    """Normalize empty/None-ish markdown field values to None."""
+    stripped = value.strip()
+    if not stripped or stripped.lower() == "none" or stripped == "—":
+        return None
+    return stripped
+
+
+def _db_upsert_work_item(
+    *,
+    item_id: str,
+    item_type: str,
+    slug: str,
+    title: str,
+    status: str,
+    priority: str,
+    epic_slug: str | None,
+    story_slug: str | None,
+    persona: str | None,
+    context_note: str | None,
+    depends_on: str | None,
+    source_path: str,
+    created_at: str | None,
+    completed_at: str | None,
+    archived: bool,
+) -> None:
+    """Insert or update a work item in SQLite."""
+    _init_state_db()
+    now = _now_iso()
+    with contextlib.closing(_connect_state_db()) as conn:
+        conn.execute(
+            """
+            INSERT INTO work_items (
+                item_id, item_type, slug, title, status, priority,
+                epic_slug, story_slug, persona, context_note, depends_on,
+                source_path, created_at, completed_at, archived, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(item_id) DO UPDATE SET
+                item_type = excluded.item_type,
+                slug = excluded.slug,
+                title = excluded.title,
+                status = excluded.status,
+                priority = excluded.priority,
+                epic_slug = excluded.epic_slug,
+                story_slug = excluded.story_slug,
+                persona = excluded.persona,
+                context_note = excluded.context_note,
+                depends_on = excluded.depends_on,
+                source_path = excluded.source_path,
+                created_at = COALESCE(work_items.created_at, excluded.created_at),
+                completed_at = excluded.completed_at,
+                archived = excluded.archived,
+                updated_at = excluded.updated_at
+            """,
+            (
+                item_id,
+                item_type,
+                slug,
+                title,
+                status,
+                priority,
+                epic_slug,
+                story_slug,
+                persona,
+                context_note,
+                depends_on,
+                source_path,
+                created_at,
+                completed_at,
+                1 if archived else 0,
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def _redact_pii(text: str | None) -> str | None:
+    """Replace obvious PII patterns with redacted placeholders before writing to the audit trail."""
+    if not text:
+        return text
+    # email addresses
+    text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[REDACTED-EMAIL]", text)
+    # AWS access key IDs
+    text = re.sub(r"AKIA[0-9A-Z]{16}", "[REDACTED-AWS-KEY]", text)
+    # secret-like key=value patterns
+    text = re.sub(
+        r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{6,}",
+        r"\1=[REDACTED]",
+        text,
+    )
+    return text
+
+
+def _db_log_event(item_id: str | None, action: str, *, actor: str | None = None, details: str | None = None) -> int:
+    """Append one event to the SQLite audit trail (PII is redacted before writing)."""
+    _init_state_db()
+    with contextlib.closing(_connect_state_db()) as conn:
+        cursor = conn.execute(
+            "INSERT INTO audit_events(item_id, actor, action, details, created_at) VALUES (?, ?, ?, ?, ?)",
+            (item_id, actor, action, _redact_pii(details), _now_iso()),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def _log_correlated_event(
+    item_id: str | None,
+    action: str,
+    *,
+    actor: str,
+    details: str | None,
+    message: str,
+) -> int:
+    """Write one correlated event to SQLite and ai_log.md, returning the audit event id."""
+    event_id = _db_log_event(item_id, action, actor=actor, details=details)
+    prefix = f"[audit:{event_id}] "
+    _append_log(f"@{actor} | {prefix}{message}", task_id=item_id)
+    return event_id
+
+
+def _db_sync_task_file(task_file: Path) -> None:
+    """Mirror one markdown work item into SQLite state."""
+    text = task_file.read_text()
+    item_id = _parse_task_field(text, "ID")
+    if not item_id:
+        return
+    _db_upsert_work_item(
+        item_id=item_id,
+        item_type=_item_type_from_path(task_file),
+        slug=task_file.stem,
+        title=_title_from_task_text(text),
+        status=_parse_task_field(text, "Status") or "Backlog",
+        priority=_parse_task_field(text, "Priority") or "P1",
+        epic_slug=_normalize_field(_parse_task_field(text, "Epic")),
+        story_slug=_normalize_field(_parse_task_field(text, "Story")),
+        persona=_normalize_field(_parse_task_field(text, "Persona")) or None,
+        context_note=_normalize_field(_parse_task_field(text, "Context")),
+        depends_on=_normalize_field(_parse_task_field(text, "Depends On")),
+        source_path=str(task_file),
+        created_at=_normalize_field(_parse_task_field(text, "Created")),
+        completed_at=_normalize_field(_parse_task_field(text, "Completed")),
+        archived=task_file.parent.name == "archive",
+    )
+
+
+def _db_sync_all_task_files() -> None:
+    """Backfill SQLite from all current markdown work items, then reconcile stale rows."""
+    root = _find_project_root()
+    tasks_dir = root / "docs" / "tasks"
+    if not tasks_dir.exists():
+        return
+    for candidate in sorted(tasks_dir.glob("*.md")):
+        if candidate.name == ".gitkeep":
+            continue
+        _db_sync_task_file(candidate)
+    archive_dir = tasks_dir / "archive"
+    if archive_dir.exists():
+        for candidate in sorted(archive_dir.glob("*.md")):
+            _db_sync_task_file(candidate)
+    _db_reconcile_stale_items()
+
+
+def _db_reconcile_stale_items() -> None:
+    """Archive SQLite rows whose source_path no longer exists on disk.
+
+    This prevents ghost 'In Progress' items surfacing after a forced reinit that
+    regenerates docs/ from scratch — the old markdown files are gone but the
+    SQLite rows would otherwise persist with stale active status.
+    """
+    if not _state_db_path().exists():
+        return
+    with contextlib.closing(_connect_state_db()) as conn:
+        rows = conn.execute(
+            "SELECT item_id, source_path FROM work_items WHERE archived = 0 AND source_path IS NOT NULL"
+        ).fetchall()
+        stale_ids = [row["item_id"] for row in rows if not Path(row["source_path"]).exists()]
+        if stale_ids:
+            placeholders = ",".join("?" for _ in stale_ids)
+            conn.execute(
+                f"UPDATE work_items SET archived = 1, status = 'Archived', updated_at = ? WHERE item_id IN ({placeholders})",
+                [_now_iso(), *stale_ids],
+            )
+            conn.commit()
+    for item_id in stale_ids:
+        _db_log_event(item_id, "auto-archived", actor="keeli-init", details="source file missing after reinit")
+
+
+def _install_git_hooks(*, force: bool = False) -> bool:
+    """Install the default pre-commit hook when inside a git repository."""
+    git_hooks_dir = Path(".git") / "hooks"
+    if not git_hooks_dir.exists():
+        return False
+    git_hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks = {
+        "pre-commit": _PRE_COMMIT_HOOK,
+        "post-commit": _POST_COMMIT_HOOK,
+    }
+    for filename, content in hooks.items():
+        hook_path = git_hooks_dir / filename
+        if hook_path.exists() and not force:
+            continue
+        hook_path.write_text(content)
+        hook_path.chmod(0o755)
+    return True
+
+
+def _scan_paths_for_pii(paths: list[str]) -> list[str]:
+    """Return human-readable PII or secret findings for the given file paths."""
+    findings: list[str] = []
+    patterns = [
+        (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "email address"),
+        (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS access key"),
+        (re.compile(r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{6,}"), "secret-like assignment"),
+    ]
+
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists() or path.is_dir():
+            continue
+        try:
+            content = path.read_text(errors="ignore")
+        except OSError:
+            continue
+        for regex, label in patterns:
+            if regex.search(content):
+                findings.append(f"{path}: potential {label}")
+                break
+    return findings
+
+
+def _active_leaf_items() -> list[sqlite3.Row]:
+    """Return active leaf work items from SQLite."""
+    if not _state_db_path().exists():
+        return []
+    with contextlib.closing(_connect_state_db()) as conn:
+        return conn.execute(
+            """
+            SELECT item_id, slug, item_type, status, epic_slug, story_slug, persona
+            FROM work_items
+            WHERE archived = 0
+              AND item_type IN ('task', 'bug', 'feat')
+              AND status IN ('In Progress', 'Review')
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        ).fetchall()
+
+
+def _in_progress_leaf_items() -> list[sqlite3.Row]:
+    """Return In Progress leaf work items from SQLite."""
+    if not _state_db_path().exists():
+        return []
+    with contextlib.closing(_connect_state_db()) as conn:
+        return conn.execute(
+            """
+            SELECT item_id, slug, item_type, status, epic_slug, story_slug, persona
+            FROM work_items
+            WHERE archived = 0
+              AND item_type IN ('task', 'bug', 'feat')
+              AND status = 'In Progress'
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        ).fetchall()
+
+
+def _pending_leaf_item_count() -> int:
+    """Return the number of non-archived leaf work items in the local state DB."""
+    if not _state_db_path().exists():
+        return 0
+    with contextlib.closing(_connect_state_db()) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM work_items
+            WHERE archived = 0
+              AND item_type IN ('task', 'bug', 'feat')
+            """
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _git_output(args: list[str]) -> str:
+    """Run a git command and return stripped stdout."""
+    completed = subprocess.run(
+        ["git", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
 
 
 # ── Interactive prompt (Angular-CLI style) ─────────────────────────────────
@@ -948,6 +1368,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/ai_log.md"), AI_LOG_MD, force=force)
         _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
         _write_file(Path("docs/personas.md"), PERSONAS_MD, force=force)
+        _init_state_db()
+        _db_sync_all_task_files()
+        hooks_installed = _install_git_hooks(force=force)
 
         # Flavor-specific AI instructions (claude, gemini, codex)
         if args.ai:
@@ -971,6 +1394,9 @@ def cmd_init(args: argparse.Namespace) -> None:
             print(f"  ✅ Created {gitignore}")
 
         print("\n🎉 Initialization complete!")
+        print(f"   State database ready: {_STATE_DB_FILENAME}")
+        if hooks_installed:
+            print("   Git hooks installed: .git/hooks/pre-commit, .git/hooks/post-commit")
         if args.ai:
             print(f"   Flavor-specific instructions created for: {', '.join(args.ai)}")
         print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
@@ -994,6 +1420,8 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     slug = _slugify(args.task_name)
     task_file = tasks_dir / f"{slug}.md"
+
+    existing_text = task_file.read_text() if task_file.exists() else ""
 
     if task_file.exists() and not args.force:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
@@ -1021,11 +1449,13 @@ def cmd_start(args: argparse.Namespace) -> None:
     epic = getattr(args, "epic", None) or "None"
     story = getattr(args, "story", None) or "None"
 
-    task_id = _allocate_id(
-        "task", args.task_name, slug, priority=priority,
-        epic=epic if epic != "None" else None,
-        story=story if story != "None" else None,
-    )
+    task_id = _parse_task_field(existing_text, "ID") if existing_text else ""
+    if not task_id:
+        task_id = _allocate_id(
+            "task", args.task_name, slug, priority=priority,
+            epic=epic if epic != "None" else None,
+            story=story if story != "None" else None,
+        )
     content = TASK_TEMPLATE.format(
         task_id=task_id,
         title=args.task_name,
@@ -1036,18 +1466,600 @@ def cmd_start(args: argparse.Namespace) -> None:
         epic=epic,
         story=story,
         persona=f"@{persona}",
+        what=objective_text or "<!-- Be specific about the implementation work. -->",
+        why="<!-- Explain the user or business impact. -->",
+        acceptance="<!-- Add verification steps or test evidence here. -->",
     )
     task_file.write_text(content)
+    _db_sync_task_file(task_file)
     print(f"✅ Created task: {task_file} [{task_id}]")
 
     # Auto-log the event
     _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}", task_id=task_id)
+    _db_log_event(task_id, "created", actor=persona, details=args.task_name)
 
 
 def cmd_log(args: argparse.Namespace) -> None:
     """Append a timestamped entry to docs/ai_log.md."""
     _append_log(args.message)
     print(f"✅ Logged to docs/ai_log.md")
+
+
+def cmd_validate_task_state(args: argparse.Namespace) -> None:
+    """Validate local task state and optional file paths for passive guardrails."""
+    _init_state_db()
+
+    findings = _scan_paths_for_pii(getattr(args, "paths", None) or [])
+    if findings:
+        print("❌ PII / secret scan failed:")
+        for finding in findings:
+            print(f"   • {finding}")
+        raise SystemExit(1)
+
+    pending_leaf_items = _pending_leaf_item_count()
+    active_leaf_items = _active_leaf_items()
+
+    if pending_leaf_items and not active_leaf_items:
+        if getattr(args, "auto_stub", False):
+            stub_task = _ensure_validate_stub_task()
+            print(f"ℹ️  No active task found; auto-created stub: {stub_task}")
+            active_leaf_items = _active_leaf_items()
+        else:
+            print("❌ No active task is In Progress or Review.")
+            print("   → Start work explicitly with `keeli progress <task>` before committing.")
+            print("   → Or rerun with `keeli validate-task-state --auto-stub` to create a temporary active stub task.")
+            raise SystemExit(1)
+
+    hierarchy_errors: list[str] = []
+    for row in active_leaf_items:
+        item_type = row["item_type"]
+        if item_type == "task":
+            if row["epic_slug"] and not row["story_slug"]:
+                hierarchy_errors.append(
+                    f"{row['slug']}: task is linked to epic '{row['epic_slug']}' but has no story; run `keeli story` first"
+                )
+            if row["story_slug"] and not row["epic_slug"]:
+                hierarchy_errors.append(
+                    f"{row['slug']}: task has story '{row['story_slug']}' but no epic"
+                )
+
+    if hierarchy_errors:
+        print("❌ Task state validation failed:")
+        for error in hierarchy_errors:
+            print(f"   • {error}")
+        raise SystemExit(1)
+
+    print("✅ Task state valid")
+    if active_leaf_items:
+        print("   Active items:")
+        for row in active_leaf_items:
+            print(f"   • {row['slug']} [{row['status']}] {row['persona'] or ''}".rstrip())
+
+
+def cmd_capture_commit_state(args: argparse.Namespace) -> None:
+    """Capture the latest git commit against the current active task state."""
+    _init_state_db()
+    active_leaf_items = _active_leaf_items()
+    target_id = getattr(args, "target_id", "").strip() or None
+    
+    if not active_leaf_items and not target_id:
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "capture-commit-state",
+                True,
+                {"message": "No active task to attach commit metadata to.", "transitions": []},
+            ), indent=2))
+        else:
+            print("ℹ️  No active task to attach commit metadata to.")
+        return
+
+    try:
+        commit_hash = _git_output(["rev-parse", "HEAD"])
+        commit_subject = _git_output(["log", "-1", "--pretty=%s"])
+        commit_body = _git_output(["log", "-1", "--pretty=%b"])
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "capture-commit-state",
+                False,
+                {"transitions": []},
+                error="Unable to capture git commit metadata.",
+            ), indent=2))
+        else:
+            print("ℹ️  Unable to capture git commit metadata.")
+        return
+
+    active_item = _resolve_transition_target(active_leaf_items, target_id)
+    
+    if not active_item:
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "capture-commit-state",
+                False,
+                {"transitions": []},
+                error="Target task not found.",
+            ), indent=2))
+        else:
+            print("❌ Target task not found.")
+        return
+    
+    evaluation = _evaluate_commit_transitions(commit_subject, active_item["item_id"], commit_body, target_id)
+    conflict = _transition_conflict_reason(evaluation, active_leaf_items)
+    if conflict:
+        payload = _json_envelope(
+            "capture-commit-state",
+            False,
+            {
+                "active_items": [{"item_id": row["item_id"], "slug": row["slug"], "status": row["status"]} for row in active_leaf_items],
+                "transitions": [],
+            },
+            error=conflict,
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"❌ {conflict}")
+            print("   Active items:")
+            for row in active_leaf_items:
+                print(f"   • {row['item_id']} {row['slug']} [{row['status']}]")
+            print("   → Use explicit closes markers or reduce active tasks before capture.")
+        return
+
+    details = json.dumps({
+        "commit": commit_hash,
+        "subject": commit_subject,
+        "body": commit_body,
+        "task": active_item["slug"],
+    })
+    commit_event_id = _log_correlated_event(
+        active_item["item_id"],
+        "commit",
+        actor="git",
+        details=details,
+        message=f"Commit captured for {active_item['slug']}: {commit_hash[:12]} {commit_subject}",
+    )
+    transitions = _apply_commit_transitions(active_item, commit_subject, commit_body, target_id)
+    payload = _json_envelope(
+        "capture-commit-state",
+        True,
+        {
+            "commit": {"hash": commit_hash, "subject": commit_subject, "body": commit_body},
+            "active_item": {"item_id": active_item["item_id"], "slug": active_item["slug"]},
+            "commit_event_id": commit_event_id,
+            "evaluation": evaluation,
+            "transitions": transitions,
+        },
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"✅ Commit captured for {active_item['slug']}: {commit_hash[:12]}")
+        if transitions:
+            print("   🔄 Commit semantic transitions:")
+            for transition in transitions:
+                print(f"   • {transition}")
+
+
+def _ensure_validate_stub_task() -> str:
+    """Create or restore a temporary active task used by validate-task-state."""
+    tasks_dir = Path("docs/tasks")
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+
+    title = "Working on uncommitted changes"
+    slug = _slugify(title)
+    task_file = _resolve_task_file(tasks_dir, slug)
+    if task_file is None:
+        task_file = tasks_dir / f"{slug}.md"
+        task_id = _allocate_id("task", title, slug, priority="P1")
+        content = TASK_TEMPLATE.format(
+            task_id=task_id,
+            title=title,
+            timestamp=_now_iso(),
+            context_note="Auto-created by validate-task-state",
+            priority="P1",
+            depends_on="None",
+            epic="None",
+            story="None",
+            persona="@developer",
+            what="Investigate and reconcile untracked ongoing work.",
+            why="Validation found pending leaf work without an active task.",
+            acceptance="Validation passes with one active task; replace this stub with a real task.",
+        )
+        task_file.write_text(content)
+    else:
+        if task_file.parent.name == "archive":
+            live_dest = tasks_dir / task_file.name
+            task_file.rename(live_dest)
+            task_file = live_dest
+        content = task_file.read_text()
+        task_id = _parse_task_field(content, "ID")
+
+    text = task_file.read_text()
+    text = _update_task_field(text, "Status", "In Progress")
+    text = _update_task_field(text, "Completed", "—")
+    task_file.write_text(text)
+    _db_sync_task_file(task_file)
+    _index_update_status(task_id, status="In Progress", completed=None, archived=False)
+    _append_log(f"@system | Auto-stub activated: {title} → {task_file}", task_id=task_id)
+    _db_log_event(task_id, "auto_stub_activated", actor="system", details=title)
+    return task_file.stem
+
+
+def _evaluate_commit_transitions(subject: str, active_item_id: str | None = None, body: str | None = None, target_id: str | None = None) -> dict[str, object]:
+    """Pure evaluator for commit-driven transitions.
+
+    Returns a deterministic payload that can be used by CLI, CI, and MCP callers
+    without mutating state.
+
+    Args:
+        subject: Commit subject line
+        active_item_id: Current active item ID (used as baseline context)
+        body: Commit body with trailers
+        target_id: Explicit target for keeli:complete (overrides active_item_id)
+    """
+    commit_subject = subject or ""
+    commit_body = body or ""
+    normalized_subject = commit_subject.strip()
+    normalized_body = commit_body.strip()
+    explicit_target = (target_id or "").upper() if target_id else None
+    active_upper = (active_item_id or "").upper()
+    commit_text = "\n".join(part for part in (normalized_subject, normalized_body) if part)
+
+    close_ids: list[str] = []
+    for chunk in re.findall(r"(?i)\b(?:closes?|fixes?|resolves?)\s+([A-Z0-9\-_,\s]+)", commit_text):
+        for token in re.findall(r"(?i)\bT-\d{4}\b", chunk):
+            token_u = token.upper()
+            if token_u not in close_ids:
+                close_ids.append(token_u)
+    for trailer in re.findall(r"(?im)^(?:closes?|fixes?|resolves?)\s*:?\s*(.+)$", commit_text):
+        for token in re.findall(r"(?i)\bT-\d{4}\b", trailer):
+            token_u = token.upper()
+            if token_u not in close_ids:
+                close_ids.append(token_u)
+
+    actions: list[dict[str, object]] = []
+    if re.search(r"(?i)\bkeeli:complete\b", commit_text):
+        if explicit_target:
+            actions.append({"type": "complete_explicit", "target": explicit_target, "reason": "keeli:complete with explicit --target-id"})
+        else:
+            actions.append({"type": "complete_active", "reason": "keeli:complete marker"})
+
+    if close_ids:
+        actions.append({"type": "review_ids", "ids": close_ids, "reason": "closes marker"})
+
+    return {
+        "subject": normalized_subject,
+        "body": normalized_body,
+        "active_item_id": active_upper or None,
+        "explicit_target": explicit_target,
+        "actions": actions,
+    }
+
+
+def _transition_conflict_reason(evaluation: dict[str, object], active_items: list[sqlite3.Row]) -> str | None:
+    """Return a conflict reason when transition intent is ambiguous."""
+    if len(active_items) <= 1:
+        return None
+    actions = evaluation.get("actions", [])
+    has_review_ids = any(a.get("type") == "review_ids" for a in actions if isinstance(a, dict))
+    has_complete_active = any(a.get("type") == "complete_active" for a in actions if isinstance(a, dict))
+    if has_complete_active and not has_review_ids:
+        return "Ambiguous commit intent: multiple active tasks and `keeli:complete` has no explicit target."
+    return None
+
+
+def _build_commit_transition_preview(active_item: sqlite3.Row, subject: str, body: str | None = None, target_id: str | None = None) -> list[dict[str, object]]:
+    """Build a per-item transition preview with before/after statuses."""
+    item_id = (active_item["item_id"] or "").upper()
+    evaluation = _evaluate_commit_transitions(subject, item_id, body, target_id)
+    preview: list[dict[str, object]] = []
+    did_complete = False
+
+    for action in evaluation["actions"]:  # type: ignore[index]
+        if action.get("type") != "complete_active":
+            continue
+        preview.append(
+            {
+                "item_id": item_id,
+                "slug": active_item["slug"],
+                "before": active_item["status"],
+                "after": "Completed",
+                "action": "complete_active",
+                "would_apply": True,
+                "reason": action.get("reason"),
+            }
+        )
+        did_complete = True
+
+    for action in evaluation["actions"]:  # type: ignore[index]
+        if action.get("type") != "review_ids":
+            continue
+        close_ids = [str(i).upper() for i in action.get("ids", [])]
+        with contextlib.closing(_connect_state_db()) as conn:
+            for close_id in close_ids:
+                row = conn.execute(
+                    "SELECT item_id, slug, status, archived, item_type FROM work_items WHERE item_id = ?",
+                    (close_id,),
+                ).fetchone()
+                if row is None:
+                    preview.append({"item_id": close_id, "slug": None, "before": None, "after": None, "action": "review", "would_apply": False, "reason": "not found"})
+                    continue
+                if int(row["archived"] or 0) == 1:
+                    preview.append({"item_id": close_id, "slug": row["slug"], "before": row["status"], "after": row["status"], "action": "review", "would_apply": False, "reason": "archived"})
+                    continue
+                if row["item_type"] not in ("task", "bug", "feat"):
+                    preview.append({"item_id": close_id, "slug": row["slug"], "before": row["status"], "after": row["status"], "action": "review", "would_apply": False, "reason": "not a leaf item"})
+                    continue
+                if str(row["status"]).lower() != "in progress":
+                    preview.append({"item_id": close_id, "slug": row["slug"], "before": row["status"], "after": row["status"], "action": "review", "would_apply": False, "reason": f"status={row['status']}"})
+                    continue
+                if did_complete and close_id == item_id:
+                    preview.append({"item_id": close_id, "slug": row["slug"], "before": row["status"], "after": "Completed", "action": "review", "would_apply": False, "reason": "already completed by marker"})
+                    continue
+                preview.append({"item_id": close_id, "slug": row["slug"], "before": row["status"], "after": "Review", "action": "review", "would_apply": True, "reason": action.get("reason")})
+
+    return preview
+
+
+def _resolve_transition_target(active_leaf_items: list[sqlite3.Row], target_id: str | None = None) -> sqlite3.Row | None:
+    """Resolve the row that should anchor a commit transition action."""
+    explicit_target = (target_id or "").strip().upper()
+    if explicit_target:
+        with contextlib.closing(_connect_state_db()) as conn:
+            row = conn.execute(
+                "SELECT item_id, slug, status, archived, item_type FROM work_items WHERE item_id = ?",
+                (explicit_target,),
+            ).fetchone()
+        if row is not None:
+            return row
+    return active_leaf_items[0] if active_leaf_items else None
+
+
+def _apply_commit_transitions(active_item: sqlite3.Row, commit_subject: str, commit_body: str | None = None, target_id: str | None = None) -> list[str]:
+    """Apply evaluated commit transitions and return human-readable event lines."""
+    item_id = (active_item["item_id"] or "").upper()
+    slug = active_item["slug"]
+    evaluation = _evaluate_commit_transitions(commit_subject, item_id, commit_body, target_id)
+    events: list[str] = []
+    did_complete = False
+
+    for action in evaluation["actions"]:  # type: ignore[index]
+        action_type = action.get("type")
+        if action_type == "complete_active":
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_complete(argparse.Namespace(task_name=slug, keeli="system"))
+            event_id = _log_correlated_event(
+                item_id,
+                "auto_completed_from_commit",
+                actor="system",
+                details=commit_subject,
+                message=f"Transition applied: {item_id} completed from keeli:complete marker",
+            )
+            events.append(f"{item_id}: Completed from keeli:complete marker")
+            events.append(f"{item_id}: audit_event={event_id}")
+            did_complete = True
+        elif action_type == "complete_explicit":
+            target = action.get("target", "")
+            with contextlib.closing(_connect_state_db()) as conn:
+                row = conn.execute(
+                    "SELECT item_id, slug FROM work_items WHERE item_id = ?",
+                    (target,),
+                ).fetchone()
+                if row:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        cmd_complete(argparse.Namespace(task_name=row["slug"], keeli="system"))
+                    event_id = _log_correlated_event(
+                        target,
+                        "auto_completed_from_commit",
+                        actor="system",
+                        details=commit_subject,
+                        message=f"Transition applied: {target} completed from keeli:complete explicit target",
+                    )
+                    events.append(f"{target}: Completed from keeli:complete with explicit target")
+                    events.append(f"{target}: audit_event={event_id}")
+                    did_complete = True
+                else:
+                    events.append(f"{target}: skipped (not found)")
+
+    for action in evaluation["actions"]:  # type: ignore[index]
+        action_type = action.get("type")
+        if action_type != "review_ids":
+            continue
+        close_ids = [str(i).upper() for i in action.get("ids", [])]
+        if not close_ids:
+            continue
+        with contextlib.closing(_connect_state_db()) as conn:
+            for close_id in close_ids:
+                row = conn.execute(
+                    "SELECT item_id, slug, status, archived, item_type FROM work_items WHERE item_id = ?",
+                    (close_id,),
+                ).fetchone()
+                if row is None:
+                    events.append(f"{close_id}: skipped (not found)")
+                    continue
+                if int(row["archived"] or 0) == 1:
+                    events.append(f"{close_id}: skipped (archived)")
+                    continue
+                if row["item_type"] not in ("task", "bug", "feat"):
+                    events.append(f"{close_id}: skipped (not a leaf item)")
+                    continue
+                if str(row["status"]).lower() != "in progress":
+                    events.append(f"{close_id}: skipped (status={row['status']})")
+                    continue
+                if did_complete and close_id == item_id:
+                    events.append(f"{close_id}: skipped (already completed by marker)")
+                    continue
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cmd_review(argparse.Namespace(task_name=row["slug"], keeli="system"))
+                event_id = _log_correlated_event(
+                    close_id,
+                    "auto_review_from_commit",
+                    actor="system",
+                    details=commit_subject,
+                    message=f"Transition applied: {close_id} moved to Review from closes marker",
+                )
+                events.append(f"{close_id}: moved to Review from closes marker")
+                events.append(f"{close_id}: audit_event={event_id}")
+
+    return events
+
+
+def cmd_transition_from_commit(args: argparse.Namespace) -> None:
+    """Evaluate commit transition semantics without mutating task state by default."""
+    _init_state_db()
+    active_leaf_items = _active_leaf_items()
+    target_id = getattr(args, "target_id", "").strip() or None
+    active_item = _resolve_transition_target(active_leaf_items, target_id)
+    active_item_id = active_item["item_id"] if active_item else None
+
+    evaluation = _evaluate_commit_transitions(args.subject, active_item_id, getattr(args, "body", None), target_id)
+    output: dict[str, object] = {"evaluation": evaluation, "applied": []}
+    conflict = _transition_conflict_reason(evaluation, active_leaf_items)
+    if conflict:
+        output["conflict"] = conflict
+
+    if getattr(args, "apply", False) and getattr(args, "dry_run", False):
+        if active_item is None and not target_id:
+            output["preview"] = []
+            print(json.dumps(_json_envelope("transition-from-commit", True, output), indent=2))
+            return
+        item_to_preview = active_item
+        if item_to_preview:
+            output["preview"] = _build_commit_transition_preview(item_to_preview, args.subject, getattr(args, "body", None), target_id)
+        else:
+            output["preview"] = []
+        print(json.dumps(_json_envelope("transition-from-commit", True, output), indent=2))
+        return
+
+    if getattr(args, "apply", False):
+        if active_item is None and not target_id:
+            print("ℹ️  No active task to apply commit transitions to.")
+            print(json.dumps(_json_envelope("transition-from-commit", True, output), indent=2))
+            return
+        if conflict:
+            print(json.dumps(_json_envelope("transition-from-commit", False, output, error=conflict), indent=2))
+            return
+        item_to_apply = active_item
+        if item_to_apply:
+            output["applied"] = _apply_commit_transitions(item_to_apply, args.subject, getattr(args, "body", None), target_id)
+
+    print(json.dumps(_json_envelope("transition-from-commit", True, output), indent=2))
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Rebuild SQLite work item state from markdown task files."""
+    if getattr(args, "dry_run", False):
+        tasks_dir = Path("docs/tasks")
+        active_items = [p for p in sorted(tasks_dir.glob("*.md")) if p.name != ".gitkeep"] if tasks_dir.exists() else []
+        archived_items = sorted((tasks_dir / "archive").glob("*.md")) if (tasks_dir / "archive").exists() else []
+        predicted = len(active_items) + len(archived_items)
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "sync",
+                True,
+                {"dry_run": True, "predicted_items": predicted},
+            ), indent=2))
+        else:
+            print(f"[dry-run] Would rebuild SQLite state from markdown files ({predicted} item(s)).")
+        return
+    _init_state_db()
+    with contextlib.closing(_connect_state_db()) as conn:
+        conn.execute("DELETE FROM work_items")
+        conn.commit()
+    _db_sync_all_task_files()
+    with contextlib.closing(_connect_state_db()) as conn:
+        row = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()
+    item_count = int(row[0]) if row else 0
+    event_id = _db_log_event(None, "sync", actor="system", details=f"rebuild={item_count}")
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope(
+            "sync",
+            True,
+            {"dry_run": False, "item_count": item_count, "audit_event_id": event_id},
+        ), indent=2))
+    else:
+        print(f"✅ Synced SQLite state from markdown files ({item_count} item(s)).")
+
+
+def cmd_test(args: argparse.Namespace) -> None:
+    """Run pytest and auto-transition active In Progress work to Review on pass."""
+    _init_state_db()
+    pytest_args = list(getattr(args, "pytest_args", []) or [])
+    cmd = ["pytest", *pytest_args]
+
+    if getattr(args, "dry_run", False):
+        active_in_progress = _in_progress_leaf_items()
+        target_slug = active_in_progress[0]["slug"] if active_in_progress else None
+        target_item_id = active_in_progress[0]["item_id"] if active_in_progress else None
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    _json_envelope(
+                        "test",
+                        True,
+                        {
+                            "dry_run": True,
+                            "pytest_command": cmd,
+                            "transition_target": {
+                                "item_id": target_item_id,
+                                "slug": target_slug,
+                                "after": "Review" if target_slug else None,
+                            },
+                        },
+                    ),
+                    indent=2,
+                )
+            )
+            raise SystemExit(0)
+        if active_in_progress:
+            print(f"[dry-run] Would run: {' '.join(cmd)}")
+            print(f"[dry-run] On success, would move '{active_in_progress[0]['slug']}' to Review.")
+        else:
+            print(f"[dry-run] Would run: {' '.join(cmd)}")
+            print("[dry-run] No In Progress task currently available for auto-transition.")
+        raise SystemExit(0)
+
+    if not getattr(args, "json", False):
+        print(f"▶ Running: {' '.join(cmd)}")
+    completed = subprocess.run(cmd)
+
+    transition = None
+    if completed.returncode == 0:
+        active_in_progress = _in_progress_leaf_items()
+        if active_in_progress:
+            active_item = active_in_progress[0]
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_review(argparse.Namespace(task_name=active_item["slug"], keeli="system", json=False))
+            event_id = _db_log_event(active_item["item_id"], "auto_review_from_tests", actor="system", details="pytest passed")
+            transition = {
+                "item_id": active_item["item_id"],
+                "slug": active_item["slug"],
+                "before": "In Progress",
+                "after": "Review",
+                "audit_event_id": event_id,
+            }
+            if not getattr(args, "json", False):
+                print(f"✅ Tests passed; moved {active_item['slug']} to Review.")
+        else:
+            if not getattr(args, "json", False):
+                print("ℹ️  Tests passed; no In Progress task found to auto-transition.")
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                _json_envelope(
+                    "test",
+                    completed.returncode == 0,
+                    {
+                        "returncode": completed.returncode,
+                        "pytest_command": cmd,
+                        "transition": transition,
+                    },
+                ),
+                indent=2,
+            )
+        )
+    raise SystemExit(completed.returncode)
 
 
 def _append_log(message: str, *, task_id: "str | None" = None) -> None:
@@ -1168,162 +2180,116 @@ def _get_next_task() -> tuple[Path | None, str | None]:
     return None, None
 
 
-def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str) -> None:
-    """Generic helper to transition a task to a new status."""
+def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str, command_name: str) -> dict[str, object] | None:
+    """Generic helper to transition a task to a new status. Returns transition dict or None on error."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
-        return
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(command_name, False, error="docs/tasks/ not found")))
+        else:
+            print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        return None
 
     slug = _slugify(args.task_name)
     task_file = _resolve_task_file(tasks_dir, slug)
-
     if task_file is None:
-        print(f"❌ Task file for '{args.task_name}' not found.")
-        return
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(command_name, False, error=f"Task '{args.task_name}' not found")))
+        else:
+            print(f"❌ Task file for '{args.task_name}' not found.")
+        return None
 
     text = task_file.read_text()
     current = _parse_task_field(text, "Status")
-
     if current.lower() == new_status.lower():
-        print(f"⚠️  {task_file} is already {new_status}.")
-        return
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(command_name, False, error=f"Already {new_status}")))
+        else:
+            print(f"⚠️  {task_file} is already {new_status}.")
+        return None
 
     task_id = _parse_task_field(text, "ID")
     text = _update_task_field(text, "Status", new_status)
     task_file.write_text(text)
-    print(f"✅ Marked as {new_status}: {task_file}")
-
+    _db_sync_task_file(task_file)
     _index_update_status(task_id, status=new_status)
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task {log_verb}: {args.task_name} → {task_file}", task_id=task_id)
+    _db_log_event(task_id, new_status.lower().replace(" ", "_"), actor=persona, details=args.task_name)
+
+    result = {"task_id": task_id, "slug": slug, "before": current, "after": new_status, "actor": persona}
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope(command_name, True, result), indent=2))
+    else:
+        print(f"✅ Marked as {new_status}: {task_file}")
+    return _json_envelope(command_name, True, result)
 
 
 def cmd_progress(args: argparse.Namespace) -> None:
     """Mark a task as In Progress."""
-    tasks_dir = Path("docs/tasks")
-    if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
-        return
-
-    slug = _slugify(args.task_name)
-    task_file = _resolve_task_file(tasks_dir, slug)
-    if task_file is None:
-        print(f"❌ Task file for '{args.task_name}' not found.")
-        return
-
-    # ADR-008: Check hierarchy before other validations
-    hierarchy_errors = _validate_hierarchy(task_file)
-    if hierarchy_errors:
-        print("❌ Cannot move to In Progress — fix hierarchy issues first:")
-        for e in hierarchy_errors:
-            print(f"   • {e}")
-        return
-
-    errors = _validate_transition(task_file, [
-        ("@po handshake must be signed before @architect can start design",
-         _handshake_signed("po")),
-        ("@po (Goals & Acceptance Criteria) section must be filled",
-         _section_is_filled("## @po (Goals & Acceptance Criteria)")),
-        ("@architect (Design & Planning) section must be filled with at least a Design Summary",
-         _section_is_filled("## @architect (Design & Planning)")),
-    ])
-    if errors:
-        print("❌ Cannot move to In Progress — fix these issues first:")
-        for e in errors:
-            print(f"   • {e}")
-        return
-
-    _transition_task(args, "In Progress", "started")
+    _transition_task(args, "In Progress", "started", "progress")
 
 
 def cmd_block(args: argparse.Namespace) -> None:
     """Mark a task as Blocked."""
-    _transition_task(args, "Blocked", "blocked")
+    _transition_task(args, "Blocked", "blocked", "block")
 
 
 def cmd_review(args: argparse.Namespace) -> None:
     """Mark a task as In Review (ready for @security sign-off)."""
-    tasks_dir = Path("docs/tasks")
-    if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
-        return
-
-    slug = _slugify(args.task_name)
-    task_file = _resolve_task_file(tasks_dir, slug)
-
-    if task_file is None:
-        print(f"❌ Task file for '{args.task_name}' not found.")
-        return
-
-    text = task_file.read_text()
-    current = _parse_task_field(text, "Status")
-
-    if current.lower() == "review":
-        print(f"⚠️  {task_file} is already In Review.")
-        return
-
-    errors = _validate_transition(task_file, [
-        ("Checklist has unchecked items — tick all boxes (or run `keeli tick`) before requesting review",
-         lambda t: not any(
-             line.strip().startswith("- [ ]")
-             and not _is_gate_item(line)
-             for line in t.splitlines()
-         )),
-    ])
-    if errors:
-        print("❌ Cannot move to Review — fix these issues first:")
-        for e in errors:
-            print(f"   • {e}")
-        return
-
-    text = _update_task_field(text, "Status", "Review")
-    task_file.write_text(text)
-    print(f"✅ Marked as Review: {task_file}")
-    print("   → Awaiting @security sign-off. Run `keeli complete` when approved.")
-
-    persona = getattr(args, "keeli", "developer") or "developer"
-    _append_log(f"@{persona} | Task in review: {args.task_name} → {task_file}")
+    _transition_task(args, "Review", "in review", "review")
 
 
 def cmd_reopen(args: argparse.Namespace) -> None:
     """Reopen a completed task (move it back to In Progress)."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("reopen", False, error="docs/tasks/ not found")))
+        else:
+            print("❌ docs/tasks/ not found. Run `keeli init` first.")
         return
 
     slug = _slugify(args.task_name)
     task_file = _resolve_task_file(tasks_dir, slug)
-
     if task_file is None:
-        print(f"❌ Task file for '{args.task_name}' not found.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("reopen", False, error=f"Task '{args.task_name}' not found")))
+        else:
+            print(f"❌ Task file for '{args.task_name}' not found.")
         return
 
     text = task_file.read_text()
     status = _parse_task_field(text, "Status")
-
     if status.lower() not in ("completed", "review"):
-        print(f"⚠️  {task_file} is currently '{status}' — reopen only works on Completed or Review tasks.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("reopen", False, error=f"Cannot reopen task in status: {status}")))
+        else:
+            print(f"⚠️  {task_file} is currently '{status}' — reopen only works on Completed or Review tasks.")
         return
 
     task_id = _parse_task_field(text, "ID")
-
-    # Move back to live tasks_dir if it was in archive
     if task_file.parent.name == "archive":
         live_dest = tasks_dir / task_file.name
         task_file.rename(live_dest)
         task_file = live_dest
-        print(f"   📤 Restored from archive → {task_file}")
+        if not getattr(args, "json", False):
+            print(f"   📤 Restored from archive → {task_file}")
 
     text = _update_task_field(text, "Status", "In Progress")
     text = _update_task_field(text, "Completed", "—")
     task_file.write_text(text)
-    print(f"✅ Reopened: {task_file} (now In Progress)")
-
+    _db_sync_task_file(task_file)
     _index_update_status(task_id, status="In Progress", completed=None, archived=False)
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task reopened: {args.task_name} → {task_file}", task_id=task_id)
+    _db_log_event(task_id, "reopened", actor=persona, details=args.task_name)
+
+    result = {"task_id": task_id, "slug": slug, "before": status, "after": "In Progress", "actor": persona}
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope("reopen", True, result), indent=2))
+    else:
+        print(f"✅ Reopened: {task_file} (now In Progress)")
 
 
 def cmd_bug(args: argparse.Namespace) -> None:
@@ -1335,6 +2301,8 @@ def cmd_bug(args: argparse.Namespace) -> None:
 
     slug = _slugify(args.title)
     task_file = tasks_dir / f"bug-{slug}.md"
+
+    existing_text = task_file.read_text() if task_file.exists() else ""
 
     if task_file.exists() and not args.force:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
@@ -1349,10 +2317,12 @@ def cmd_bug(args: argparse.Namespace) -> None:
     ) or "<!-- Describe the bug here -->"
     epic = getattr(args, "epic", None) or "None"
 
-    bug_id = _allocate_id(
-        "bug", args.title, f"bug-{slug}", priority=priority,
-        epic=epic if epic != "None" else None,
-    )
+    bug_id = _parse_task_field(existing_text, "ID") if existing_text else ""
+    if not bug_id:
+        bug_id = _allocate_id(
+            "bug", args.title, f"bug-{slug}", priority=priority,
+            epic=epic if epic != "None" else None,
+        )
     content = BUG_TEMPLATE.format(
         task_id=bug_id,
         title=args.title,
@@ -1363,9 +2333,11 @@ def cmd_bug(args: argparse.Namespace) -> None:
         description=description,
     )
     task_file.write_text(content)
+    _db_sync_task_file(task_file)
     print(f"🐛 Created bug report: {task_file} [{bug_id}]")
 
     _append_log(f"@developer | Bug reported: {args.title} [{priority}] → {task_file}", task_id=bug_id)
+    _db_log_event(bug_id, "created", actor="developer", details=args.title)
 
 
 def cmd_feature(args: argparse.Namespace) -> None:
@@ -1377,6 +2349,8 @@ def cmd_feature(args: argparse.Namespace) -> None:
 
     slug = _slugify(args.title)
     task_file = tasks_dir / f"feat-{slug}.md"
+
+    existing_text = task_file.read_text() if task_file.exists() else ""
 
     if task_file.exists() and not args.force:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
@@ -1396,10 +2370,12 @@ def cmd_feature(args: argparse.Namespace) -> None:
     )
     epic = getattr(args, "epic", None) or "None"
 
-    feat_id = _allocate_id(
-        "feat", args.title, f"feat-{slug}", priority=priority,
-        epic=epic if epic != "None" else None,
-    )
+    feat_id = _parse_task_field(existing_text, "ID") if existing_text else ""
+    if not feat_id:
+        feat_id = _allocate_id(
+            "feat", args.title, f"feat-{slug}", priority=priority,
+            epic=epic if epic != "None" else None,
+        )
     user_story_text = _resolve_objective(getattr(args, "objective", None))
     if not user_story_text:
         print(_OBJECTIVE_HINT)
@@ -1413,9 +2389,11 @@ def cmd_feature(args: argparse.Namespace) -> None:
         user_story=user_story_text or "<!-- As a <user>, I want <goal>, so that <reason>. -->",
     )
     task_file.write_text(content)
+    _db_sync_task_file(task_file)
     print(f"✨ Created feature: {task_file} [{feat_id}]")
 
     _append_log(f"@architect | Feature created: {args.title} [{priority}] → {task_file}", task_id=feat_id)
+    _db_log_event(feat_id, "created", actor="architect", details=args.title)
 
 
 def cmd_skill(args: argparse.Namespace) -> None:
@@ -1849,6 +2827,8 @@ def cmd_story(args: argparse.Namespace) -> None:
     slug = _slugify(args.title)
     task_file = tasks_dir / f"story-{slug}.md"
 
+    existing_text = task_file.read_text() if task_file.exists() else ""
+
     if task_file.exists() and not args.force:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
         return
@@ -1859,9 +2839,9 @@ def cmd_story(args: argparse.Namespace) -> None:
     priority = args.priority or _prompt(
         "Story priority", default="P1", choices=["P0", "P1", "P2"]
     )
-    role   = getattr(args, "role", None)   or _prompt("Role (e.g. 'developer')", default="user")
-    goal   = getattr(args, "goal", None)   or _prompt("Goal (e.g. 'create a task')"        )
-    reason = getattr(args, "reason", None) or _prompt("Reason (e.g. 'track my work')", default="...")
+    role = getattr(args, "role", None)
+    goal = getattr(args, "goal", None)
+    reason = getattr(args, "reason", None)
 
     # Build acceptance criteria block from --ac flags or placeholder comments
     raw_acs: list[str] = getattr(args, "ac", None) or []
@@ -1874,29 +2854,38 @@ def cmd_story(args: argparse.Namespace) -> None:
             "- [ ] <!-- Criterion 3 -->"
         )
 
-    story_id = _allocate_id(
-        "story", args.title, f"story-{slug}", priority=priority,
-        epic=epic if epic != "None" else None,
-    )
+    if role and goal and reason:
+        user_story = f"As a {role}, I want {goal} so that I can {reason}."
+    else:
+        user_story = "<!-- As a [role], I want [feature] so that [benefit]. -->"
+
+    nfr_block = "None"
+
+    story_id = _parse_task_field(existing_text, "ID") if existing_text else ""
+    if not story_id:
+        story_id = _allocate_id(
+            "story", args.title, f"story-{slug}", priority=priority,
+            epic=epic if epic != "None" else None,
+        )
     content = STORY_TEMPLATE.format(
         task_id=story_id,
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
         epic=epic,
-        slug=slug,
-        role=role,
-        goal=goal,
-        reason=reason,
-        criteria=criteria_lines,
+        user_story=user_story,
+        acceptance_criteria=criteria_lines,
+        non_functional_requirements=nfr_block,
     )
     task_file.write_text(content)
+    _db_sync_task_file(task_file)
     print(f"📖 Created story: {task_file} [{story_id}]")
     if epic != "None":
         print(f"   → Linked to epic: {epic}")
     print(f"   → Add tasks with: keeli start \"<title>\" --story {slug} --epic {epic}")
 
     _append_log(f"@architect | Story created: {args.title} [{priority}] epic={epic} → {task_file}", task_id=story_id)
+    _db_log_event(story_id, "created", actor="architect", details=args.title)
 
 
 def cmd_epic(args: argparse.Namespace) -> None:
@@ -1909,6 +2898,8 @@ def cmd_epic(args: argparse.Namespace) -> None:
     slug = _slugify(args.title)
     task_file = tasks_dir / f"epic-{slug}.md"
 
+    existing_text = task_file.read_text() if task_file.exists() else ""
+
     if task_file.exists() and not args.force:
         print(f"⚠️  {task_file} already exists. Use --force to overwrite.")
         return
@@ -1917,7 +2908,9 @@ def cmd_epic(args: argparse.Namespace) -> None:
         "Epic priority", default="P1", choices=["P0", "P1", "P2"]
     )
 
-    epic_id = _allocate_id("epic", args.title, f"epic-{slug}", priority=priority)
+    epic_id = _parse_task_field(existing_text, "ID") if existing_text else ""
+    if not epic_id:
+        epic_id = _allocate_id("epic", args.title, f"epic-{slug}", priority=priority)
     objective_text = _resolve_objective(getattr(args, "objective", None))
     if not objective_text:
         print(_OBJECTIVE_HINT)
@@ -1926,66 +2919,45 @@ def cmd_epic(args: argparse.Namespace) -> None:
         title=args.title,
         priority=priority,
         timestamp=_now_iso(),
-        slug=slug,
-        objective=objective_text or "<!-- @architect: high-level goal — what user/business outcome does this deliver? -->",
+        goal=objective_text or "<!-- What business/user outcome does this epic deliver? -->",
     )
     task_file.write_text(content)
+    _db_sync_task_file(task_file)
     print(f"🚀 Created epic: {task_file} [{epic_id}]")
     print(f"   → @architect: define objective/scope, then run: keeli story \"<title>\" --epic {slug}")
 
     _append_log(f"@architect | Epic created: {args.title} [{priority}] → {task_file}", task_id=epic_id)
+    _db_log_event(epic_id, "created", actor="architect", details=args.title)
 
 
 def cmd_complete(args: argparse.Namespace) -> None:
     """Mark a task as completed, auto-archive it, and suggest the next one."""
     tasks_dir = Path("docs/tasks")
     if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("complete", False, error="docs/tasks/ not found")))
+        else:
+            print("❌ docs/tasks/ not found. Run `keeli init` first.")
         return
 
     slug = _slugify(args.task_name)
     task_file = _resolve_task_file(tasks_dir, slug)
 
     if task_file is None:
-        print(f"❌ Task file for '{args.task_name}' not found.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("complete", False, error=f"Task '{args.task_name}' not found")))
+        else:
+            print(f"❌ Task file for '{args.task_name}' not found.")
         return
 
     text = task_file.read_text()
     status = _parse_task_field(text, "Status")
 
     if status.lower() == "completed":
-        print(f"⚠️  {task_file} is already marked as Completed.")
-        return
-
-    # ADR-008: Check hierarchy before other validations
-    hierarchy_errors = _validate_hierarchy(task_file)
-    if hierarchy_errors:
-        print("❌ Cannot mark as Completed — fix hierarchy issues first:")
-        for e in hierarchy_errors:
-            print(f"   • {e}")
-        return
-
-    # ADR-009: Check handshakes (file-first validation, no tool calls)
-    if not _handshake_all_signed_off(text):
-        print("❌ Cannot mark as Completed — all personas must sign off first:")
-        personas = _handshake_personas_in_text(text) or ["po", "architect", "developer", "security", "author"]
-        for persona in personas:
-            if not _handshake_signed(persona)(text):
-                print(f"   • @{persona} has not signed off (missing ☑ in Handshakes table)")
-        return
-
-    errors = _validate_transition(task_file, [
-        ("Checklist has unchecked items — tick all boxes (or run `keeli tick`) before marking complete",
-         lambda t: not any(
-             line.strip().startswith("- [ ]")
-             and not _is_gate_item(line)
-             for line in t.splitlines()
-         )),
-    ])
-    if errors:
-        print("❌ Cannot mark as Completed — fix these issues first:")
-        for e in errors:
-            print(f"   • {e}")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("complete", False, error="Task is already marked as Completed")))
+        else:
+            print(f"⚠️  {task_file} is already marked as Completed.")
         return
 
     now = _now_iso()
@@ -1995,14 +2967,17 @@ def cmd_complete(args: argparse.Namespace) -> None:
     text = _update_task_field(text, "Status", "Completed")
     text = _update_task_field(text, "Completed", now)
     task_file.write_text(text)
-    print(f"✅ Marked as Completed: {task_file}")
+    if not getattr(args, "json", False):
+        print(f"✅ Marked as Completed: {task_file}")
 
     # Auto-archive to docs/tasks/archive/
     archive_dir = tasks_dir / "archive"
     archive_dir.mkdir(exist_ok=True)
     dest = archive_dir / task_file.name
     task_file.rename(dest)
-    print(f"   📦 Auto-archived → {dest}")
+    _db_sync_task_file(dest)
+    if not getattr(args, "json", False):
+        print(f"   📦 Auto-archived → {dest}")
 
     # Update index
     _index_update_status(task_id, status="Completed", completed=now, archived=True)
@@ -2010,17 +2985,34 @@ def cmd_complete(args: argparse.Namespace) -> None:
     # Auto-log
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task completed: {args.task_name} → {dest}", task_id=task_id)
+    _db_log_event(task_id, "completed", actor=persona, details=args.task_name)
 
     # Suggest next task
     next_path, next_slug = _get_next_task()
+    next_task = None
     if next_path:
         next_text = next_path.read_text()
         next_status = _parse_task_field(next_text, "Status")
         next_priority = _parse_task_field(next_text, "Priority")
-        print(f"\n📋 Next task: {next_slug} [{next_priority}] ({next_status})")
-        print(f"   → {next_path}")
+        next_task = next_slug
+        if not getattr(args, "json", False):
+            print(f"\n📋 Next task: {next_slug} [{next_priority}] ({next_status})")
+            print(f"   → {next_path}")
     else:
-        print("\n🎉 All tasks are complete. Awaiting new instructions.")
+        if not getattr(args, "json", False):
+            print("\n🎉 All tasks are complete. Awaiting new instructions.")
+
+    result = {
+        "task_id": task_id,
+        "slug": slug,
+        "before": status,
+        "after": "Completed",
+        "actor": persona,
+        "archived": True,
+        "next_task": next_task,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope("complete", True, result), indent=2))
 
 
 def cmd_ensure(args: argparse.Namespace) -> None:
@@ -2113,14 +3105,17 @@ def cmd_next(args: argparse.Namespace) -> None:
         next_priority = _parse_task_field(next_text, "Priority")
         
         if getattr(args, "json", False):
-            import json
-            print(json.dumps({
-                "task": next_slug,
-                "priority": next_priority,
-                "status": next_status,
-                "path": str(next_path),
-                "content": next_text
-            }, indent=2))
+            print(json.dumps(_json_envelope(
+                "next",
+                True,
+                {
+                    "task": next_slug,
+                    "priority": next_priority,
+                    "status": next_status,
+                    "path": str(next_path),
+                    "content": next_text,
+                },
+            ), indent=2))
             return
 
         print(f"📋 Next task: {next_slug} [{next_priority}] ({next_status})")
@@ -2145,19 +3140,13 @@ def cmd_next(args: argparse.Namespace) -> None:
                 pass  # never let analysis errors break `keeli next`
     else:
         if getattr(args, "json", False):
-            import json
-            print(json.dumps({"task": None}))
+            print(json.dumps(_json_envelope("next", True, {"task": None}), indent=2))
             return
         print("🎉 All tasks are complete. Awaiting new instructions.")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
     """List all tasks with status, priority, and creation date."""
-    tasks_dir = Path("docs/tasks")
-    if not tasks_dir.exists():
-        print("❌ docs/tasks/ not found. Run `keeli init` first.")
-        return
-
     filter_status = getattr(args, "status", None)
     filter_epic = getattr(args, "epic", None)
     STATUS_ICON = {
@@ -2169,27 +3158,51 @@ def cmd_list(args: argparse.Namespace) -> None:
     }
 
     rows = []
-    for tf in sorted(tasks_dir.glob("*.md")):
-        if tf.name == ".gitkeep":
-            continue
-        text = tf.read_text()
-        status   = _parse_task_field(text, "Status")
-        priority = _parse_task_field(text, "Priority") or "P1"
-        created  = (_parse_task_field(text, "Created") or "?")[:10]
-        epic     = _parse_task_field(text, "Epic") or "None"
-        
-        if filter_status and status.lower() != filter_status.lower():
-            continue
-        if filter_epic and epic.lower() != filter_epic.lower():
-            continue
-            
-        icon = STATUS_ICON.get(status.lower(), "❓")
-        rows.append((priority, created, icon, status, tf.stem, epic))
+    db_path = _state_db_path()
+    if db_path.exists():
+        with contextlib.closing(_connect_state_db()) as conn:
+            query = (
+                "SELECT priority, substr(COALESCE(created_at, ''), 1, 10) AS created, "
+                "status, slug, COALESCE(epic_slug, 'None') AS epic "
+                "FROM work_items WHERE archived = 0"
+            )
+            params: list[str] = []
+            clauses: list[str] = []
+            if filter_status:
+                clauses.append("lower(status) = lower(?)")
+                params.append(filter_status)
+            if filter_epic:
+                clauses.append("lower(COALESCE(epic_slug, 'None')) = lower(?)")
+                params.append(filter_epic)
+            if clauses:
+                query += " AND " + " AND ".join(clauses)
+            query += " ORDER BY priority, created_at"
+            for row in conn.execute(query, params):
+                icon = STATUS_ICON.get((row["status"] or "").lower(), "❓")
+                rows.append((row["priority"] or "P1", row["created"] or "?", icon, row["status"] or "", row["slug"], row["epic"]))
+    else:
+        tasks_dir = Path("docs/tasks")
+        if not tasks_dir.exists():
+            print("❌ docs/tasks/ not found. Run `keeli init` first.")
+            return
+        for tf in sorted(tasks_dir.glob("*.md")):
+            if tf.name == ".gitkeep":
+                continue
+            text = tf.read_text()
+            status = _parse_task_field(text, "Status")
+            priority = _parse_task_field(text, "Priority") or "P1"
+            created = (_parse_task_field(text, "Created") or "?")[:10]
+            epic = _parse_task_field(text, "Epic") or "None"
+            if filter_status and status.lower() != filter_status.lower():
+                continue
+            if filter_epic and epic.lower() != filter_epic.lower():
+                continue
+            icon = STATUS_ICON.get(status.lower(), "❓")
+            rows.append((priority, created, icon, status, tf.stem, epic))
 
     if not rows:
         if getattr(args, "json", False):
-            import json
-            print(json.dumps([]))
+            print(json.dumps(_json_envelope("list", True, {"items": [], "count": 0}), indent=2))
             return
         msg = "No tasks found matching criteria."
         print(msg)
@@ -2198,9 +3211,8 @@ def cmd_list(args: argparse.Namespace) -> None:
     rows.sort(key=lambda r: (r[0], r[1]))
     
     if getattr(args, "json", False):
-        import json
         out = [{"priority": r[0], "created": r[1], "status": r[3], "task": r[4], "epic": r[5]} for r in rows]
-        print(json.dumps(out, indent=2))
+        print(json.dumps(_json_envelope("list", True, {"items": out, "count": len(out)}), indent=2))
         return
 
     print(f"\n  {'Pri':<4} {'Created':<12} {'Status':<14} {'Epic':<15} Task")
@@ -2272,11 +3284,13 @@ def cmd_archive(args: argparse.Namespace) -> None:
     task_id = _parse_task_field(text, "ID")
     dest_file = archive_dir / task_file.name
     task_file.rename(dest_file)
+    _db_sync_task_file(dest_file)
     print(f"✅ Archived: {task_file.name} → {dest_file}")
 
     _index_update_status(task_id, archived=True)
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task archived: {args.task_name} → {dest_file}", task_id=task_id)
+    _db_log_event(task_id, "archived", actor=persona, details=args.task_name)
 
 
 def cmd_handoff(args: argparse.Namespace) -> None:
@@ -2473,6 +3487,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         Path("docs/personas.md"),
         Path("docs/tasks"),
         Path("docs/requirements"),
+        Path(_STATE_DB_FILENAME),
     ]
 
     all_ok = True
@@ -2484,8 +3499,22 @@ def cmd_status(args: argparse.Namespace) -> None:
             all_ok = False
 
     # Count tasks by status
+    db_path = _state_db_path()
+    if db_path.exists():
+        with contextlib.closing(_connect_state_db()) as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM work_items WHERE archived = 0 GROUP BY status"
+            ).fetchall()
+        status_counts = {row["status"].lower(): row["count"] for row in rows if row["status"]}
+        total = sum(status_counts.values())
+        print(f"\n  🗄️  State DB: {_STATE_DB_FILENAME}")
+        print(f"     Mode: sqlite")
+        print(f"     Items: {total}")
+    else:
+        status_counts = {}
+
     tasks_dir = Path("docs/tasks")
-    if tasks_dir.exists():
+    if tasks_dir.exists() and not status_counts:
         from collections import Counter
         status_counts: Counter = Counter()
         for tf in tasks_dir.glob("*.md"):
@@ -2745,7 +3774,15 @@ def cmd_find(args: argparse.Namespace) -> None:
         keeli find "auth login"    # keyword search
     """
     if not _INDEX_PATH.exists():
-        print("❌ Index not found. Create some tasks first (keeli start / epic / story / bug).")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "find",
+                False,
+                {"query": args.query.strip(), "results": []},
+                error="Index not found. Create some tasks first (keeli start / epic / story / bug).",
+            ), indent=2))
+        else:
+            print("❌ Index not found. Create some tasks first (keeli start / epic / story / bug).")
         return
 
     index = _load_index()
@@ -2756,7 +3793,14 @@ def cmd_find(args: argparse.Namespace) -> None:
     # Exact ID match first (e.g. T-0001, BUG-0003)
     id_matches = [i for i in items if i.get("id", "").upper() == query_upper]
     if id_matches:
-        _print_index_results(id_matches, label=f"ID: {query_upper}")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope(
+                "find",
+                True,
+                {"query": query, "mode": "id", "results": id_matches},
+            ), indent=2))
+        else:
+            _print_index_results(id_matches, label=f"ID: {query_upper}")
         return
 
     # Keyword match across title + slug
@@ -2765,16 +3809,22 @@ def cmd_find(args: argparse.Namespace) -> None:
         i for i in items
         if q_lower in i.get("title", "").lower() or q_lower in i.get("slug", "").lower()
     ]
+    status_filter = getattr(args, "status", None)
+    if status_filter:
+        kw_matches = [i for i in kw_matches if i.get("status", "").lower() == status_filter.lower()]
+
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope(
+            "find",
+            True,
+            {"query": query, "mode": "keyword", "results": kw_matches},
+        ), indent=2))
+        return
+
     if kw_matches:
-        status_filter = getattr(args, "status", None)
-        if status_filter:
-            kw_matches = [i for i in kw_matches if i.get("status", "").lower() == status_filter.lower()]
         _print_index_results(kw_matches, label=f"Keyword: '{query}'")
     else:
         print(f"No results for '{query}'.")
-    if getattr(args, "json", False):
-        import json
-        print("\n" + json.dumps(id_matches or kw_matches, indent=2))
 
 
 def cmd_history(args: argparse.Namespace) -> None:
@@ -2786,12 +3836,20 @@ def cmd_history(args: argparse.Namespace) -> None:
     """
     log_file = Path("docs/ai_log.md")
     if not log_file.exists():
-        print("❌ docs/ai_log.md not found.")
+        if getattr(args, "json", False):
+            print(json.dumps(_json_envelope("history", False, {"query": args.task_id.strip(), "entries": [], "count": 0}, error="docs/ai_log.md not found."), indent=2))
+        else:
+            print("❌ docs/ai_log.md not found.")
         return
 
-    target = args.task_id.strip().upper()
+    query = args.task_id.strip()
+    target = query.upper()
     lines = log_file.read_text().splitlines()
     matches = [line for line in lines if target in line.upper()]
+
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope("history", True, {"query": query, "entries": matches, "count": len(matches)}), indent=2))
+        return
 
     if not matches:
         print(f"No log entries found for '{target}'.")
@@ -2895,6 +3953,9 @@ def cmd_digest(args: argparse.Namespace) -> None:
             used += _tokens(sec)
 
     output = "\n\n".join(sections) if sections else "No Keeli context found."
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope("digest", True, {"context": output, "used_tokens": used, "budget": budget}), indent=2))
+        return
     print(output)
     print(f"\n📊 ~{used} tokens (budget: {budget})")
 
@@ -3168,6 +4229,8 @@ def cmd_prompt(args: argparse.Namespace) -> None:
     
     if action == "add":
         cmd_prompt_add(args)
+    elif action == "apply":
+        cmd_prompt_apply(args)
     elif action == "list":
         cmd_prompt_list(args)
     elif action == "show":
@@ -3175,7 +4238,54 @@ def cmd_prompt(args: argparse.Namespace) -> None:
     elif action == "remove":
         cmd_prompt_remove(args)
     else:
-        print("Usage: keeli prompt {add|list|show|remove}")
+        print("Usage: keeli prompt {add|apply|list|show|remove}")
+
+
+def _parse_prompt_vars(raw_vars: list[str] | None) -> dict[str, str]:
+    """Parse repeated --var KEY=VALUE flags into a dict."""
+    out: dict[str, str] = {}
+    for pair in raw_vars or []:
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        if not k:
+            continue
+        out[k] = v
+    return out
+
+
+def _render_prompt_template(body: str, variables: dict[str, str]) -> str:
+    """Render a prompt body by substituting {{key}} placeholders."""
+    rendered = body
+    for key, value in variables.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    return rendered
+
+
+def cmd_prompt_apply(args: argparse.Namespace) -> None:
+    """Render a custom prompt template with variables and optionally write output."""
+    slug = args.slug
+    prompts = _load_all_prompts()
+
+    if slug not in prompts:
+        print(f"❌ Prompt '{slug}' not found.")
+        return
+
+    variables = _parse_prompt_vars(getattr(args, "vars", None))
+    body = prompts[slug]["body"]
+    rendered = _render_prompt_template(body, variables)
+
+    output_path = getattr(args, "output", None)
+    if output_path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rendered)
+        print(f"✅ Applied prompt '{slug}' → {path}")
+        _append_log(f"@developer | Prompt applied: {slug} → {path}")
+        return
+
+    print(rendered)
 
 
 def cmd_prompt_add(args: argparse.Namespace) -> None:
@@ -3206,9 +4316,9 @@ def cmd_prompt_add(args: argparse.Namespace) -> None:
     
     # If not already frontmatter'd, add defaults
     if not content.strip().startswith("---"):
-        persona = getattr(args, "persona", "").lower() or "developer"
-        applies_to = getattr(args, "applies_to", "").lower() or "all"
-        priority = getattr(args, "priority", "").lower() or "medium"
+        persona = (getattr(args, "persona", "") or "").lower() or "developer"
+        applies_to = (getattr(args, "applies_to", "") or "").lower() or "all"
+        priority = (getattr(args, "priority", "") or "").lower() or "medium"
         
         frontmatter = f"""---
 persona: {persona}
@@ -3340,6 +4450,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_complete = sub.add_parser("complete", help="Mark a task as completed and show next task.")
     p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
     p_complete.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona completing the task.")
+    p_complete.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # tick
     p_tick = sub.add_parser("tick", help="Tick all mechanical checklist items (skips @security/@author gate items).")
@@ -3381,6 +4492,38 @@ def build_parser() -> argparse.ArgumentParser:
     # status
     sub.add_parser("status", help="Health-check all Keeli files.")
 
+    # validate-task-state
+    p_validate = sub.add_parser("validate-task-state", help="Validate passive task guardrails for hooks and local automation.")
+    p_validate.add_argument("--paths", nargs="*", default=[], help="Optional file paths to scan for PII or secrets.")
+    p_validate.add_argument("--auto-stub", action="store_true", help="Auto-create a temporary active task when pending leaf work exists but no task is active.")
+
+    # capture-commit-state
+    p_capture = sub.add_parser("capture-commit-state", help="Record the latest git commit against the current active task.")
+    p_capture.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
+    p_capture.add_argument("--target-id", default="", help="Explicit target task ID for keeli:complete (overrides active task).")
+
+    # transition-from-commit
+    p_transition_from_commit = sub.add_parser(
+        "transition-from-commit",
+        help="Evaluate commit transition semantics from a subject line (optionally apply).",
+    )
+    p_transition_from_commit.add_argument("--subject", required=True, help="Commit subject to evaluate.")
+    p_transition_from_commit.add_argument("--body", default="", help="Optional commit body/trailers to include in evaluation.")
+    p_transition_from_commit.add_argument("--target-id", default="", help="Explicit target task ID for keeli:complete (overrides active task).")
+    p_transition_from_commit.add_argument("--apply", action="store_true", help="Apply evaluated transitions to current task state.")
+    p_transition_from_commit.add_argument("--dry-run", action="store_true", dest="dry_run", help="Preview per-item before/after transitions without mutating state (use with --apply).")
+
+    # sync
+    p_sync = sub.add_parser("sync", help="Rebuild SQLite work item state from markdown files.")
+    p_sync.add_argument("--dry-run", action="store_true", dest="dry_run", help="Preview sync effect without mutating SQLite state.")
+    p_sync.add_argument("--json", action="store_true", help="Output sync details as JSON.")
+
+    # test
+    p_test = sub.add_parser("test", help="Run pytest and auto-transition active In Progress work to Review on pass.")
+    p_test.add_argument("--dry-run", action="store_true", dest="dry_run", help="Preview the test command and transition target without running pytest.")
+    p_test.add_argument("--json", action="store_true", help="Output test result and transition details as JSON.")
+    p_test.add_argument("pytest_args", nargs=argparse.REMAINDER, help="Arguments forwarded directly to pytest.")
+
     # clear-log
     sub.add_parser("clear-log", help="Reset the AI audit log.")
 
@@ -3388,11 +4531,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_progress = sub.add_parser("progress", help="Mark a task as In Progress.")
     p_progress.add_argument("task_name", help="Task title or slug.")
     p_progress.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona making the transition.")
+    p_progress.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # block
     p_block = sub.add_parser("block", help="Mark a task as Blocked.")
     p_block.add_argument("task_name", help="Task title or slug.")
     p_block.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona making the transition.")
+    p_block.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # update
     p_update = sub.add_parser("update", help="Update copilot-instructions.md to latest template.")
@@ -3402,11 +4547,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_reopen = sub.add_parser("reopen", help="Reopen a completed task (back to In Progress).")
     p_reopen.add_argument("task_name", help="Task title or slug to reopen.")
     p_reopen.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona reopening the task.")
+    p_reopen.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # review
     p_review = sub.add_parser("review", help="Mark a task as In Review (ready for @security sign-off).")
     p_review.add_argument("task_name", help="Task title or slug.")
     p_review.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona requesting the review.")
+    p_review.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # bug
     p_bug = sub.add_parser("bug", help="Log a bug report as a tracked task.")
@@ -3531,11 +4678,13 @@ def build_parser() -> argparse.ArgumentParser:
     # history
     p_history = sub.add_parser("history", help="Show all ai_log entries for a task ID.")
     p_history.add_argument("task_id", help="Task ID (e.g. T-0001) or keyword.")
+    p_history.add_argument("--json", action="store_true", help="Output as JSON.")
 
     # digest
     p_digest = sub.add_parser("digest", help="Machine-optimised token-budgeted context dump.")
     p_digest.add_argument("--budget", type=int, default=2000,
                           help="Token budget (default: 2000).")
+    p_digest.add_argument("--json", action="store_true", help="Output as JSON.")
 
     # chain
     p_chain = sub.add_parser(
@@ -3582,6 +4731,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_prompt_add.add_argument("--applies-to", help="When prompt applies (all, domain, task-type, etc.). Prompted if omitted.")
     p_prompt_add.add_argument("--priority", help="Prompt priority (high, medium, low). Prompted if omitted.")
     p_prompt_add.add_argument("-f", "--force", action="store_true", help="Overwrite existing prompt.")
+
+    # prompt apply
+    p_prompt_apply = prompt_sub.add_parser(
+        "apply",
+        help="Render a custom prompt with variables and optionally write it to a file.",
+    )
+    p_prompt_apply.add_argument("slug", help="Slug of the prompt to apply.")
+    p_prompt_apply.add_argument(
+        "--var",
+        action="append",
+        dest="vars",
+        metavar="KEY=VALUE",
+        help="Template variable substitution (repeatable).",
+    )
+    p_prompt_apply.add_argument(
+        "--output",
+        help="Optional output file path. If omitted, rendered content is printed.",
+    )
     
     # prompt list
     prompt_sub.add_parser("list", help="List all custom prompts with metadata.")
@@ -3618,7 +4785,15 @@ def cmd_mcp(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+
+    if unknown:
+        if getattr(args, "command", None) == "test":
+            forwarded = list(getattr(args, "pytest_args", []) or [])
+            forwarded.extend(unknown)
+            args.pytest_args = forwarded
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
 
     # Resolve project root so commands work from any subdirectory and the MCP
     # server works even when launched from a parent of the project directory.
@@ -3639,6 +4814,11 @@ def main() -> None:
         "log": cmd_log,
         "resume": cmd_resume,
         "status": cmd_status,
+        "validate-task-state": cmd_validate_task_state,
+        "capture-commit-state": cmd_capture_commit_state,
+        "transition-from-commit": cmd_transition_from_commit,
+        "sync": cmd_sync,
+        "test": cmd_test,
         "clear-log": cmd_clear_log,
         "progress": cmd_progress,
         "block": cmd_block,

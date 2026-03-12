@@ -25,13 +25,15 @@ from keeli.main import (
     _score_task, _format_hints_block, _build_corpus,
     _load_index, _allocate_id, _index_update_status,
     _parse_task_field, _resolve_task_file, _append_log,
-    _INDEX_PATH, _tail, _find_project_root,
+    _db_log_event, _db_sync_task_file,
+    _evaluate_commit_transitions, _active_leaf_items, _apply_commit_transitions,
+    _INDEX_PATH, _tail, _find_project_root, _git_output, _transition_conflict_reason,
+    _resolve_transition_target,
     _HINTS_MARKER_START,
     _scan_manifests, _run_chain_inline, BUILTIN_CHAINS,
-    _section_is_filled, _validate_transition,
     cmd_start,
 )
-from keeli.templates import TASK_TEMPLATE, TASK_CHECKLISTS
+from keeli.templates import TASK_TEMPLATE
 
 # ── HATEOAS: next-action suggestions ──────────────────────────────────────────
 # Each entry is a callable: ctx dict → list of {tool, args, why} dicts.
@@ -586,6 +588,49 @@ async def list_tools() -> list[Tool]:
                 "required": ["slug"],
             },
         ),
+        Tool(
+            name="keeli_transition_from_commit",
+            description="Evaluate commit-transition semantics and optionally apply them to active work state.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Commit subject to evaluate."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional commit body or trailers.",
+                        "default": ""
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "Explicit task ID target for keeli:complete semantics.",
+                        "default": ""
+                    },
+                    "apply": {
+                        "type": "boolean",
+                        "description": "If true, apply transitions to active state.",
+                        "default": False
+                    }
+                },
+                "required": ["subject"],
+            },
+        ),
+        Tool(
+            name="keeli_capture_commit_state",
+            description="Capture the latest git commit and apply/evaluate commit-driven task transitions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_id": {
+                        "type": "string",
+                        "description": "Explicit task ID target for keeli:complete semantics.",
+                        "default": ""
+                    }
+                },
+            },
+        ),
     ]
 
 @app.call_tool()
@@ -651,13 +696,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not task_path:
             return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
 
-        errors = _validate_transition(task_path, [
-            ("Checklist has unchecked items — all items must be checked before marking complete",
-             lambda t: "- [ ]" not in t),
-        ])
-        if errors:
-            return [TextContent(type="text", text="\n".join(["Error: Cannot mark as Completed:"] + [f"  • {e}" for e in errors]))]
-
         content = task_path.read_text()
         for old_status in ("In Progress", "Backlog", "Review", "Blocked"):
             content = content.replace(f"**Status:** {old_status}", "**Status:** Completed")
@@ -670,13 +708,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         archive_dir.mkdir(exist_ok=True)
         dest = archive_dir / task_path.name
         task_path.rename(dest)
+        _db_sync_task_file(dest)
 
         task_id = _parse_task_field(content, "ID") or None
         _index_update_status(task_id, status="Completed", completed=now, archived=True)
         _append_log(f"Task completed: {slug}", task_id=task_id)
+        _db_log_event(task_id, "completed", actor="mcp", details=slug)
+        transition_events = [{"type": "completed", "task_id": task_id, "slug": slug}]
 
         await _mcp_log("info", f"Task completed and archived: {slug} [{task_id}]")
-        return [TextContent(type="text", text=_with_next(f"Marked {slug} as Completed and archived → archive/{task_path.name}.", "keeli_complete", {"slug": slug}))]
+        result_text = f"Marked {slug} as Completed and archived → archive/{task_path.name}.\n\nTransition events:\n```json\n{json.dumps(transition_events, indent=2)}\n```"
+        return [TextContent(type="text", text=_with_next(result_text, "keeli_complete", {"slug": slug}))]
 
     elif name == "keeli_progress":
         slug = arguments.get("task_slug", "").strip()
@@ -687,13 +729,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not task_path:
             return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
 
-        errors = _validate_transition(task_path, [
-            ("Objective section is empty or contains only a placeholder comment",
-             _section_is_filled("## Objective")),
-        ])
-        if errors:
-            return [TextContent(type="text", text="\n".join(["Error: Cannot move to In Progress:"] + [f"  • {e}" for e in errors]))]
-
         content = task_path.read_text()
         current = _parse_task_field(content, "Status")
         if current.lower() == "in progress":
@@ -701,11 +736,87 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         content = re.sub(r"\*\*Status:\*\*.*", "**Status:** In Progress", content)
         task_path.write_text(content)
+        _db_sync_task_file(task_path)
         task_id = _parse_task_field(content, "ID") or None
         _index_update_status(task_id, status="In Progress")
         _append_log(f"Task started: {slug}", task_id=task_id)
+        _db_log_event(task_id, "in_progress", actor="mcp", details=slug)
+        transition_events = [{"type": "in_progress", "task_id": task_id, "slug": slug}]
         await _mcp_log("info", f"Task marked In Progress: {slug}")
-        return [TextContent(type="text", text=_with_next(f"Marked {slug} as In Progress.", "keeli_progress", {"slug": slug}))]
+        result_text = f"Marked {slug} as In Progress.\n\nTransition events:\n```json\n{json.dumps(transition_events, indent=2)}\n```"
+        return [TextContent(type="text", text=_with_next(result_text, "keeli_progress", {"slug": slug}))]
+
+    elif name == "keeli_transition_from_commit":
+        subject = arguments.get("subject", "")
+        body = arguments.get("body", "")
+        target_id = (arguments.get("target_id", "") or "").strip() or None
+        apply_changes = bool(arguments.get("apply", False))
+        if not subject:
+            return [TextContent(type="text", text="Error: subject is required.")]
+
+        active_items = _active_leaf_items()
+        active = _resolve_transition_target(active_items, target_id)
+        evaluation = _evaluate_commit_transitions(subject, active["item_id"] if active else None, body, target_id)
+        conflict = _transition_conflict_reason(evaluation, active_items)
+        applied: list[str] = []
+        if apply_changes:
+            if active is None:
+                return [TextContent(type="text", text="No active task available to apply transitions.")]
+            if conflict:
+                return [TextContent(type="text", text=json.dumps({"evaluation": evaluation, "applied": [], "conflict": conflict}, indent=2))]
+            applied = _apply_commit_transitions(active, subject, body, target_id)
+
+        payload = {
+            "evaluation": evaluation,
+            "applied": applied,
+        }
+        if conflict:
+            payload["conflict"] = conflict
+        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+    elif name == "keeli_capture_commit_state":
+        target_id = (arguments.get("target_id", "") or "").strip() or None
+        active_items = _active_leaf_items()
+        active = _resolve_transition_target(active_items, target_id)
+        if active is None:
+            return [TextContent(type="text", text=json.dumps({"ok": True, "message": "No active task to attach commit metadata to.", "transitions": []}, indent=2))]
+
+        try:
+            commit_hash = _git_output(["rev-parse", "HEAD"])
+            commit_subject = _git_output(["log", "-1", "--pretty=%s"])
+            commit_body = _git_output(["log", "-1", "--pretty=%b"])
+        except Exception:
+            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "Unable to capture git commit metadata.", "transitions": []}, indent=2))]
+
+        evaluation = _evaluate_commit_transitions(commit_subject, active["item_id"], commit_body, target_id)
+        conflict = _transition_conflict_reason(evaluation, active_items)
+        if conflict:
+            payload = {
+                "ok": False,
+                "error": conflict,
+                "active_items": [{"item_id": row["item_id"], "slug": row["slug"], "status": row["status"]} for row in active_items],
+                "transitions": [],
+            }
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+        details = json.dumps({
+            "commit": commit_hash,
+            "subject": commit_subject,
+            "body": commit_body,
+            "task": active["slug"],
+        })
+        commit_event_id = _db_log_event(active["item_id"], "commit", actor="mcp", details=details)
+        _append_log(f"@mcp | [audit:{commit_event_id}] Commit captured for {active['slug']}: {commit_hash[:12]} {commit_subject}", task_id=active["item_id"])
+        transitions = _apply_commit_transitions(active, commit_subject, commit_body, target_id)
+        payload = {
+            "ok": True,
+            "commit": {"hash": commit_hash, "subject": commit_subject, "body": commit_body},
+            "active_item": {"item_id": active["item_id"], "slug": active["slug"]},
+            "commit_event_id": commit_event_id,
+            "evaluation": evaluation,
+            "transitions": transitions,
+        }
+        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
 
     elif name == "keeli_ensure":
         title = arguments.get("title")
@@ -753,7 +864,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if task_path.exists():
             return [TextContent(type="text", text=f"Error: Task {slug} already exists.")]
 
-        checklist = TASK_CHECKLISTS.get(persona, TASK_CHECKLISTS["developer"])
         task_id = _allocate_id("task", title, slug, priority=priority, epic=epic or None, story=story or None)
 
         content = TASK_TEMPLATE.format(
@@ -764,14 +874,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             depends_on=depends_on,
             context_note="",
             persona=f"@{persona}",
-            checklist=checklist,
             epic=epic,
             story=story,
-            objective=objective,
+            what=objective or "<!-- Be specific about the implementation work. -->",
+            why="<!-- Explain the user or business impact. -->",
+            acceptance="<!-- Add verification steps or test evidence here. -->",
         )
 
         task_path.write_text(content)
+        _db_sync_task_file(task_path)
         _append_log(f"Created task: {slug}", task_id=task_id)
+        _db_log_event(task_id, "created", actor=persona, details=title)
 
         await _mcp_log("info", f"Task created: {slug} [{task_id}] priority={priority}")
         return [TextContent(type="text", text=_with_next(f"Successfully created task {slug} [{task_id}].", "keeli_start", {"slug": slug, "task_id": task_id}))]

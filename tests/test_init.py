@@ -50,7 +50,7 @@ class TestInit:
 
         content = (clean_dir / ".github" / "copilot-instructions.md").read_text()
         assert content != marker
-        assert "Five-Persona Architecture" in content
+        assert "Six-persona workflow orchestration" in content
 
     def test_gitignore_appends_if_exists(self, clean_dir):
         (clean_dir / ".gitignore").write_text("node_modules/\n")
@@ -72,3 +72,31 @@ class TestInit:
         for f in ["docs/project.md", "docs/decision.md", ".github/copilot-instructions.md"]:
             content = (clean_dir / f).read_text()
             assert SCHEMA_VERSION in content, f"{f} missing schema version"
+
+    def test_creates_state_db(self, clean_dir):
+        with patch("sys.argv", ["keeli", "init"]):
+            main()
+
+        assert (clean_dir / "keeli_state.db").exists()
+
+    def test_installs_pre_commit_hook_when_git_dir_exists(self, clean_dir):
+        hooks_dir = clean_dir / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True)
+
+        with patch("sys.argv", ["keeli", "init"]):
+            main()
+
+        hook = hooks_dir / "pre-commit"
+        assert hook.exists()
+        assert "keeli validate-task-state" in hook.read_text()
+
+    def test_installs_post_commit_hook_when_git_dir_exists(self, clean_dir):
+        hooks_dir = clean_dir / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True)
+
+        with patch("sys.argv", ["keeli", "init"]):
+            main()
+
+        hook = hooks_dir / "post-commit"
+        assert hook.exists()
+        assert "keeli capture-commit-state" in hook.read_text()

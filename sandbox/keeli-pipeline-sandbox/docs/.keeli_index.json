@@ -1,0 +1,25 @@
+{
+  "schema": "1.0",
+  "counters": {
+    "T": 1,
+    "E": 0,
+    "S": 0,
+    "BUG": 0,
+    "FEAT": 0
+  },
+  "items": [
+    {
+      "id": "T-0001",
+      "type": "task",
+      "title": "Sandbox Gate Trial",
+      "slug": "sandbox-gate-trial",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-12T13:23:21Z",
+      "completed": null,
+      "archived": false
+    }
+  ]
+}
