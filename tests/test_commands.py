@@ -265,6 +265,104 @@ class TestLifecycle:
         assert row["status"] == "In Progress"
         assert row["archived"] == 0
 
+    def test_complete_syncs_parent_story_to_completed(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "epic", "Auth Epic", "-p", "P1", "-o", "Auth goal"]):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "story",
+                "User can login",
+                "--epic",
+                "auth-epic",
+                "--role",
+                "user",
+                "--goal",
+                "log in",
+                "--reason",
+                "access the app",
+                "--ac",
+                "Login succeeds with valid credentials",
+            ],
+        ):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "start",
+                "Implement login flow",
+                "--epic",
+                "auth-epic",
+                "--story",
+                "user-can-login",
+                "-o",
+                "Implement the login flow",
+            ],
+        ):
+            main()
+
+        task_path = initialized_dir / "docs" / "tasks" / "implement-login-flow.md"
+        _add_completion_evidence(task_path)
+        with patch("sys.argv", ["keeli", "complete", "Implement login flow"]):
+            main()
+
+        story_path = initialized_dir / "docs" / "tasks" / "story-user-can-login.md"
+        story_text = story_path.read_text()
+        assert "**Status:** Completed" in story_text
+        assert "**Completed:** —" not in story_text
+
+    def test_reopen_syncs_parent_story_back_to_in_progress(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "epic", "Auth Epic", "-p", "P1", "-o", "Auth goal"]):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "story",
+                "User can login",
+                "--epic",
+                "auth-epic",
+                "--role",
+                "user",
+                "--goal",
+                "log in",
+                "--reason",
+                "access the app",
+                "--ac",
+                "Login succeeds with valid credentials",
+            ],
+        ):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "start",
+                "Implement login flow",
+                "--epic",
+                "auth-epic",
+                "--story",
+                "user-can-login",
+                "-o",
+                "Implement the login flow",
+            ],
+        ):
+            main()
+
+        task_path = initialized_dir / "docs" / "tasks" / "implement-login-flow.md"
+        _add_completion_evidence(task_path)
+        with patch("sys.argv", ["keeli", "complete", "Implement login flow"]):
+            main()
+        with patch("sys.argv", ["keeli", "reopen", "Implement login flow"]):
+            main()
+
+        story_path = initialized_dir / "docs" / "tasks" / "story-user-can-login.md"
+        story_text = story_path.read_text()
+        assert "**Status:** In Progress" in story_text
+        assert "**Completed:** —" in story_text
+
 
 class TestListingAndStatus:
     def test_list_reads_from_db_backed_state(self, initialized_dir, capsys):
@@ -362,6 +460,60 @@ class TestListingAndStatus:
         assert payload["data"]["budget"] == 500
         assert isinstance(payload["data"]["used_tokens"], int)
         assert isinstance(payload["data"]["context"], str)
+
+    def test_snapshot_json_includes_kpi_metrics(self, initialized_dir, capsys):
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "epic",
+                "Governance Epic",
+                "-p",
+                "P1",
+                "-o",
+                "Governance objective",
+            ],
+        ):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "story",
+                "Quality Story",
+                "--epic",
+                "governance-epic",
+                "--role",
+                "lead",
+                "--goal",
+                "stabilize quality",
+                "--reason",
+                "reduce defects",
+                "--ac",
+                "Quality checks are explicit",
+            ],
+        ):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "snapshot", "--json"]):
+            main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "snapshot"
+        assert "kpi_metrics" in payload["data"]
+        assert any(metric["name"] == "Hallucination rework rate" for metric in payload["data"]["kpi_metrics"])
+
+    def test_snapshot_json_out_writes_file(self, initialized_dir):
+        target = initialized_dir / "reports" / "snapshot.json"
+        with patch("sys.argv", ["keeli", "snapshot", "--json-out", str(target)]):
+            main()
+
+        assert target.exists()
+        payload = json.loads(target.read_text())
+        assert payload["ok"] is True
+        assert payload["command"] == "snapshot"
 
 
 class TestCustomPrompts:
@@ -1120,4 +1272,127 @@ class TestIterationEightFeatures:
         assert payload["data"]["returncode"] == 0
         assert payload["data"]["transition"]["slug"] == "json-test-pass"
         assert payload["data"]["transition"]["after"] == "Review"
+
+
+class TestArchitectImprovements:
+    def test_list_and_find_accept_in_progress_alias(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Alias Match", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Alias Match"]):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "list", "--status", "in-progress", "--json"]):
+            main()
+        list_payload = json.loads(capsys.readouterr().out)
+        assert list_payload["ok"] is True
+        assert any(item["task"] == "alias-match" for item in list_payload["data"]["items"])
+
+        with patch("sys.argv", ["keeli", "find", "alias-match", "--status", "in-progress", "--json"]):
+            main()
+        find_payload = json.loads(capsys.readouterr().out)
+        assert find_payload["ok"] is True
+        assert any(item["slug"] == "alias-match" for item in find_payload["data"]["results"])
+
+    def test_list_refreshes_db_after_manual_markdown_edit(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Needs Refresh", "-o", "A"]):
+            main()
+
+        task_path = initialized_dir / "docs" / "tasks" / "needs-refresh.md"
+        task_text = task_path.read_text().replace("**Status:** Backlog", "**Status:** Blocked")
+        task_path.write_text(task_text)
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "list", "--status", "blocked", "--json"]):
+            main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert any(item["task"] == "needs-refresh" for item in payload["data"]["items"])
+
+    def test_complete_scaffold_missing_populates_placeholders(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Evidence Scaffold", "-o", "A"]):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "complete", "Evidence Scaffold", "--scaffold-missing", "--json"]):
+            main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "complete"
+        assert payload["data"]["archived"] is True
+
+        task_text = (initialized_dir / "docs" / "tasks" / "archive" / "evidence-scaffold.md").read_text()
+        assert "- Delivery artifact: docs/ai_log.md" in task_text
+        assert "- Test command: pytest -q" in task_text
+
+    def test_progress_json_includes_story_rollup(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "epic", "Rollup Epic", "-p", "P1", "-o", "Goal"]):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "story",
+                "Rollup Story",
+                "--epic",
+                "rollup-epic",
+                "--role",
+                "user",
+                "--goal",
+                "ship",
+                "--reason",
+                "value",
+                "--ac",
+                "Done",
+            ],
+        ):
+            main()
+        with patch(
+            "sys.argv",
+            [
+                "keeli",
+                "start",
+                "Rollup Child",
+                "--epic",
+                "rollup-epic",
+                "--story",
+                "rollup-story",
+                "-o",
+                "Implement",
+            ],
+        ):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "progress", "Rollup Child", "--json"]):
+            main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        rollup = payload["data"]["story_rollup"]
+        assert rollup is not None
+        assert rollup["updated"] is True
+        assert rollup["after"] == "In Progress"
+
+    def test_doctor_json_reports_multiple_in_progress(self, initialized_dir, capsys):
+        with patch("sys.argv", ["keeli", "start", "Hung A", "-o", "A"]):
+            main()
+        with patch("sys.argv", ["keeli", "start", "Hung B", "-o", "B"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Hung A"]):
+            main()
+        with patch("sys.argv", ["keeli", "progress", "Hung B"]):
+            main()
+
+        capsys.readouterr()
+        with patch("sys.argv", ["keeli", "doctor", "--json"]):
+            main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+        assert payload["command"] == "doctor"
+        assert payload["data"]["in_progress_count"] == 2
+        assert len(payload["data"]["in_progress_items"]) == 2
 
