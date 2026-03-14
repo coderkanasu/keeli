@@ -84,6 +84,42 @@ def _slugify(text: str) -> str:
     return slug.strip("-")
 
 
+_STATUS_CANONICAL_MAP: dict[str, str] = {
+    "backlog": "Backlog",
+    "todo": "Backlog",
+    "in progress": "In Progress",
+    "in-progress": "In Progress",
+    "progress": "In Progress",
+    "review": "Review",
+    "in review": "Review",
+    "in-review": "Review",
+    "blocked": "Blocked",
+    "complete": "Completed",
+    "completed": "Completed",
+    "done": "Completed",
+    "archived": "Archived",
+}
+
+
+def _canonical_status(value: str | None) -> str | None:
+    """Normalize user status input and stored status labels to canonical values."""
+    if value is None:
+        return None
+    key = str(value).strip().lower()
+    if not key:
+        return None
+    return _STATUS_CANONICAL_MAP.get(key, str(value).strip())
+
+
+def _refresh_state_from_markdown() -> None:
+    """Best-effort read-side sync so list/find/status reflect latest markdown edits."""
+    tasks_dir = Path("docs/tasks")
+    if not tasks_dir.exists():
+        return
+    _init_state_db()
+    _db_sync_all_task_files()
+
+
 def _write_file(path: Path, content: str, *, force: bool = False) -> None:
     """Write *content* to *path*, respecting the force flag."""
     if path.exists() and not force:
@@ -290,6 +326,64 @@ def _completion_evidence_errors(text: str) -> list[str]:
         errors.append("## Verification must include at least one concrete link/reference to validation artifacts")
 
     return errors
+
+
+def _upsert_section_stub(text: str, section_header: str, stub_lines: list[str]) -> tuple[str, bool]:
+    """Replace or create a section body with scaffold lines when evidence is missing."""
+    lines = text.splitlines()
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == section_header.strip():
+            start_idx = idx
+            break
+
+    if start_idx is None:
+        suffix = "\n" if text.endswith("\n") else "\n\n"
+        block = "\n".join([section_header, *stub_lines])
+        return text + suffix + block + "\n", True
+
+    end_idx = len(lines)
+    for idx in range(start_idx + 1, len(lines)):
+        if lines[idx].startswith("## "):
+            end_idx = idx
+            break
+
+    existing = [l.strip() for l in lines[start_idx + 1:end_idx] if l.strip()]
+    if existing and _section_has_reference(existing):
+        return text, False
+
+    new_lines = [*lines[: start_idx + 1], *stub_lines, *lines[end_idx:]]
+    return "\n".join(new_lines), True
+
+
+def _scaffold_completion_sections(text: str) -> tuple[str, list[str]]:
+    """Inject pragmatic Evidence/Verification placeholders for completion readiness."""
+    scaffolded: list[str] = []
+    updated = text
+
+    updated, changed_evidence = _upsert_section_stub(
+        updated,
+        _SEC_EVIDENCE,
+        [
+            "- Delivery artifact: docs/ai_log.md",
+            "- Commit: <git-sha>",
+        ],
+    )
+    if changed_evidence:
+        scaffolded.append("Evidence")
+
+    updated, changed_verification = _upsert_section_stub(
+        updated,
+        _SEC_VERIFICATION,
+        [
+            "- Test command: pytest -q",
+            "- Validation report: tests/<file>.py",
+        ],
+    )
+    if changed_verification:
+        scaffolded.append("Verification")
+
+    return updated, scaffolded
 
 
 def _handshake_signed(persona: str) -> Callable[[str], bool]:
@@ -2193,6 +2287,104 @@ def _resolve_task_file(tasks_dir: Path, slug: str) -> "Path | None":
     return None
 
 
+def _normalize_story_slug(value: str) -> str | None:
+    """Normalize story references to a canonical slug."""
+    raw = (value or "").strip()
+    if not raw or raw.lower() == "none":
+        return None
+    if raw.startswith("story-"):
+        raw = raw[6:]
+    return _slugify(raw)
+
+
+def _story_target_status_from_children(child_statuses: list[str]) -> str | None:
+    """Compute story status from child task statuses."""
+    if not child_statuses:
+        return None
+    normalized = [status.strip().lower() for status in child_statuses]
+    if normalized and all(status == "completed" for status in normalized):
+        return "Completed"
+    if any(status in ("in progress", "review") for status in normalized):
+        return "In Progress"
+    if any(status == "blocked" for status in normalized):
+        return "Blocked"
+    return "Backlog"
+
+
+def _sync_parent_story_status(tasks_dir: Path, story_slug: str, *, actor: str = "system") -> dict[str, object] | None:
+    """Sync a live story's status with aggregate child task state."""
+    canonical_story = _normalize_story_slug(story_slug)
+    if not canonical_story:
+        return None
+
+    story_file = tasks_dir / f"story-{canonical_story}.md"
+    if not story_file.exists():
+        return None
+
+    child_statuses: list[str] = []
+    for base in (tasks_dir, tasks_dir / "archive"):
+        if not base.exists():
+            continue
+        for candidate in sorted(base.glob("*.md")):
+            if candidate.name == ".gitkeep" or candidate.name.startswith(("story-", "epic-")):
+                continue
+            child_text = candidate.read_text()
+            child_story = _normalize_story_slug(_parse_task_field(child_text, "Story"))
+            if child_story == canonical_story:
+                child_statuses.append(_parse_task_field(child_text, "Status") or "Backlog")
+
+    target_status = _story_target_status_from_children(child_statuses)
+    if target_status is None:
+        return None
+
+    story_text = story_file.read_text()
+    story_id = _parse_task_field(story_text, "ID")
+    current_status = _parse_task_field(story_text, "Status") or "Backlog"
+    updated = False
+
+    if current_status.lower() != target_status.lower():
+        story_text = _update_task_field(story_text, "Status", target_status)
+        updated = True
+
+    if target_status == "Completed":
+        completed_value = _parse_task_field(story_text, "Completed")
+        if completed_value in ("", "—"):
+            story_text = _update_task_field(story_text, "Completed", _now_iso())
+            updated = True
+    else:
+        completed_value = _parse_task_field(story_text, "Completed")
+        if completed_value not in ("", "—"):
+            story_text = _update_task_field(story_text, "Completed", "—")
+            updated = True
+
+    if not updated:
+        return {
+            "story_slug": canonical_story,
+            "updated": False,
+            "status": current_status,
+        }
+
+    story_file.write_text(story_text)
+    _db_sync_task_file(story_file)
+    _index_update_status(story_id, status=target_status)
+    _append_log(
+        f"@{actor} | Story status synced from child tasks: {canonical_story} {current_status} → {target_status}",
+        task_id=story_id,
+    )
+    _db_log_event(
+        story_id,
+        "story_status_synced",
+        actor=actor,
+        details=f"{canonical_story}:{current_status}->{target_status}",
+    )
+    return {
+        "story_slug": canonical_story,
+        "updated": True,
+        "before": current_status,
+        "after": target_status,
+    }
+
+
 def _is_task_completed(tasks_dir: Path, slug: str) -> bool:
     """Check if a task is completed or archived."""
     # Check archive first
@@ -2289,6 +2481,7 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str, c
         return None
 
     task_id = _parse_task_field(text, "ID")
+    story_slug = _normalize_story_slug(_parse_task_field(text, "Story"))
     text = _update_task_field(text, "Status", new_status)
     task_file.write_text(text)
     _db_sync_task_file(task_file)
@@ -2296,12 +2489,25 @@ def _transition_task(args: argparse.Namespace, new_status: str, log_verb: str, c
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task {log_verb}: {args.task_name} → {task_file}", task_id=task_id)
     _db_log_event(task_id, new_status.lower().replace(" ", "_"), actor=persona, details=args.task_name)
+    story_rollup = _sync_parent_story_status(tasks_dir, story_slug, actor=persona) if story_slug else None
 
-    result = {"task_id": task_id, "slug": slug, "before": current, "after": new_status, "actor": persona}
+    result = {
+        "task_id": task_id,
+        "slug": slug,
+        "before": current,
+        "after": new_status,
+        "actor": persona,
+        "story_rollup": story_rollup,
+    }
     if getattr(args, "json", False):
         print(json.dumps(_json_envelope(command_name, True, result), indent=2))
     else:
         print(f"✅ Marked as {new_status}: {task_file}")
+        if story_rollup and story_rollup.get("updated"):
+            print(
+                f"   ↳ Story rollup: {story_rollup.get('story_slug')} "
+                f"{story_rollup.get('before')} -> {story_rollup.get('after')}"
+            )
     return _json_envelope(command_name, True, result)
 
 
@@ -2349,6 +2555,7 @@ def cmd_reopen(args: argparse.Namespace) -> None:
         return
 
     task_id = _parse_task_field(text, "ID")
+    story_slug = _normalize_story_slug(_parse_task_field(text, "Story"))
     if task_file.parent.name == "archive":
         live_dest = tasks_dir / task_file.name
         task_file.rename(live_dest)
@@ -2364,6 +2571,8 @@ def cmd_reopen(args: argparse.Namespace) -> None:
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task reopened: {args.task_name} → {task_file}", task_id=task_id)
     _db_log_event(task_id, "reopened", actor=persona, details=args.task_name)
+    if story_slug:
+        _sync_parent_story_status(tasks_dir, story_slug, actor=persona)
 
     result = {"task_id": task_id, "slug": slug, "before": status, "after": "In Progress", "actor": persona}
     if getattr(args, "json", False):
@@ -3034,14 +3243,29 @@ def cmd_complete(args: argparse.Namespace) -> None:
     status = _parse_task_field(text, "Status")
 
     evidence_errors = _completion_evidence_errors(text)
+    scaffolded_sections: list[str] = []
+    if evidence_errors and getattr(args, "scaffold_missing", False):
+        text, scaffolded_sections = _scaffold_completion_sections(text)
+        task_file.write_text(text)
+        _db_sync_task_file(task_file)
+        evidence_errors = _completion_evidence_errors(text)
+
     if evidence_errors:
         msg = "Task is missing required completion evidence"
         if getattr(args, "json", False):
-            print(json.dumps(_json_envelope("complete", False, error=msg, data={"errors": evidence_errors}), indent=2))
+            payload: dict[str, object] = {"errors": evidence_errors}
+            if scaffolded_sections:
+                payload["scaffolded"] = scaffolded_sections
+            print(json.dumps(_json_envelope("complete", False, error=msg, data=payload), indent=2))
         else:
             print(f"❌ {msg}:")
             for err in evidence_errors:
                 print(f"   - {err}")
+            if scaffolded_sections:
+                print(f"   ↳ Scaffolded sections: {', '.join(scaffolded_sections)}")
+                print("   ↳ Fill in the generated placeholders, then rerun complete.")
+            else:
+                print("   ↳ Tip: rerun with --scaffold-missing to auto-generate placeholders.")
         return
 
     if status.lower() == "completed":
@@ -3053,6 +3277,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
 
     now = _now_iso()
     task_id = _parse_task_field(text, "ID")
+    story_slug = _normalize_story_slug(_parse_task_field(text, "Story"))
 
     # Update status and add completion timestamp
     text = _update_task_field(text, "Status", "Completed")
@@ -3077,6 +3302,7 @@ def cmd_complete(args: argparse.Namespace) -> None:
     persona = getattr(args, "keeli", "developer") or "developer"
     _append_log(f"@{persona} | Task completed: {args.task_name} → {dest}", task_id=task_id)
     _db_log_event(task_id, "completed", actor=persona, details=args.task_name)
+    story_rollup = _sync_parent_story_status(tasks_dir, story_slug, actor=persona) if story_slug else None
 
     # Suggest next task
     next_path, next_slug = _get_next_task()
@@ -3101,9 +3327,15 @@ def cmd_complete(args: argparse.Namespace) -> None:
         "actor": persona,
         "archived": True,
         "next_task": next_task,
+        "story_rollup": story_rollup,
     }
     if getattr(args, "json", False):
         print(json.dumps(_json_envelope("complete", True, result), indent=2))
+    elif story_rollup and story_rollup.get("updated"):
+        print(
+            f"   ↳ Story rollup: {story_rollup.get('story_slug')} "
+            f"{story_rollup.get('before')} -> {story_rollup.get('after')}"
+        )
 
 
 def cmd_ensure(args: argparse.Namespace) -> None:
@@ -3238,7 +3470,9 @@ def cmd_next(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     """List all tasks with status, priority, and creation date."""
-    filter_status = getattr(args, "status", None)
+    _refresh_state_from_markdown()
+    raw_filter_status = getattr(args, "status", None)
+    filter_status = _canonical_status(raw_filter_status) if raw_filter_status else None
     filter_epic = getattr(args, "epic", None)
     STATUS_ICON = {
         "backlog":     "⬜",
@@ -3284,7 +3518,7 @@ def cmd_list(args: argparse.Namespace) -> None:
             priority = _parse_task_field(text, "Priority") or "P1"
             created = (_parse_task_field(text, "Created") or "?")[:10]
             epic = _parse_task_field(text, "Epic") or "None"
-            if filter_status and status.lower() != filter_status.lower():
+            if filter_status and (_canonical_status(status) or status).lower() != filter_status.lower():
                 continue
             if filter_epic and epic.lower() != filter_epic.lower():
                 continue
@@ -3567,6 +3801,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """Health-check: verify all expected files exist."""
+    _refresh_state_from_markdown()
     print(f"Keeli Framework v{SCHEMA_VERSION} — Status Check\n")
 
     paths = [
@@ -3864,25 +4099,56 @@ def cmd_find(args: argparse.Namespace) -> None:
         keeli find T-0003          # exact ID lookup
         keeli find "auth login"    # keyword search
     """
-    if not _INDEX_PATH.exists():
+    _refresh_state_from_markdown()
+    query = args.query.strip()
+    query_upper = query.upper()
+    status_filter_raw = getattr(args, "status", None)
+    status_filter = _canonical_status(status_filter_raw) if status_filter_raw else None
+
+    db_path = _state_db_path()
+    if not db_path.exists():
         if getattr(args, "json", False):
             print(json.dumps(_json_envelope(
                 "find",
                 False,
-                {"query": args.query.strip(), "results": []},
-                error="Index not found. Create some tasks first (keeli start / epic / story / bug).",
+                {"query": query, "results": []},
+                error="State DB not found. Run `keeli init` first.",
             ), indent=2))
         else:
-            print("❌ Index not found. Create some tasks first (keeli start / epic / story / bug).")
+            print("❌ State DB not found. Run `keeli init` first.")
         return
 
-    index = _load_index()
-    items = index.get("items", [])
-    query = args.query.strip()
-    query_upper = query.upper()
+    with contextlib.closing(_connect_state_db()) as conn:
+        def _to_item(row: sqlite3.Row) -> dict[str, object]:
+            return {
+                "id": row["item_id"],
+                "type": row["item_type"],
+                "title": row["title"],
+                "slug": row["slug"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "epic": row["epic_slug"],
+                "story": row["story_slug"],
+                "created": row["created_at"],
+                "completed": row["completed_at"],
+                "archived": bool(row["archived"]),
+            }
 
-    # Exact ID match first (e.g. T-0001, BUG-0003)
-    id_matches = [i for i in items if i.get("id", "").upper() == query_upper]
+        # Exact ID match first (e.g. T-0001, BUG-0003)
+        id_rows = conn.execute(
+            """
+            SELECT item_id, item_type, title, slug, status, priority, epic_slug, story_slug,
+                   created_at, completed_at, archived
+            FROM work_items
+            WHERE upper(item_id) = ?
+            """,
+            (query_upper,),
+        ).fetchall()
+
+    id_matches = [_to_item(row) for row in id_rows]
+    if status_filter:
+        id_matches = [i for i in id_matches if _canonical_status(str(i.get("status", ""))) == status_filter]
+
     if id_matches:
         if getattr(args, "json", False):
             print(json.dumps(_json_envelope(
@@ -3894,15 +4160,30 @@ def cmd_find(args: argparse.Namespace) -> None:
             _print_index_results(id_matches, label=f"ID: {query_upper}")
         return
 
-    # Keyword match across title + slug
-    q_lower = query.lower()
-    kw_matches = [
-        i for i in items
-        if q_lower in i.get("title", "").lower() or q_lower in i.get("slug", "").lower()
-    ]
-    status_filter = getattr(args, "status", None)
-    if status_filter:
-        kw_matches = [i for i in kw_matches if i.get("status", "").lower() == status_filter.lower()]
+    # Keyword match across title + slug (+ item ID), excluding archived by default.
+    q_like = f"%{query.lower()}%"
+    with contextlib.closing(_connect_state_db()) as conn:
+        where = [
+            "archived = 0",
+            "(lower(title) LIKE ? OR lower(slug) LIKE ? OR lower(item_id) LIKE ?)",
+        ]
+        params: list[str] = [q_like, q_like, q_like]
+        if status_filter:
+            where.append("lower(status) = lower(?)")
+            params.append(status_filter)
+
+        kw_rows = conn.execute(
+            f"""
+            SELECT item_id, item_type, title, slug, status, priority, epic_slug, story_slug,
+                   created_at, completed_at, archived
+            FROM work_items
+            WHERE {' AND '.join(where)}
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            params,
+        ).fetchall()
+
+    kw_matches = [_to_item(row) for row in kw_rows]
 
     if getattr(args, "json", False):
         print(json.dumps(_json_envelope(
@@ -3950,6 +4231,155 @@ def cmd_history(args: argparse.Namespace) -> None:
     for line in matches:
         print(f"  {line}")
     print()
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Diagnose state drift and active-task anomalies in a single command."""
+    _refresh_state_from_markdown()
+    db_path = _state_db_path()
+    if not db_path.exists():
+        payload = _json_envelope("doctor", False, {"checks": []}, error="State DB not found. Run `keeli init` first.")
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print("❌ State DB not found. Run `keeli init` first.")
+        return
+
+    with contextlib.closing(_connect_state_db()) as conn:
+        in_progress_rows = conn.execute(
+            """
+            SELECT item_id, slug, item_type, status, story_slug, epic_slug
+            FROM work_items
+            WHERE archived = 0 AND status = 'In Progress' AND item_type IN ('task', 'bug', 'feat')
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        ).fetchall()
+        active_rows = conn.execute(
+            """
+            SELECT item_id, slug, item_type, status
+            FROM work_items
+            WHERE archived = 0 AND status IN ('In Progress', 'Review', 'Blocked') AND item_type IN ('task', 'bug', 'feat')
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        ).fetchall()
+        stale_rows = conn.execute(
+            """
+            SELECT item_id, slug, source_path
+            FROM work_items
+            WHERE archived = 0 AND source_path IS NOT NULL
+            """
+        ).fetchall()
+
+    stale_sources = [
+        {"item_id": row["item_id"], "slug": row["slug"], "source_path": row["source_path"]}
+        for row in stale_rows
+        if row["source_path"] and not Path(str(row["source_path"])).exists()
+    ]
+
+    index = _load_index() if _INDEX_PATH.exists() else {"items": []}
+    index_by_id = {str(item.get("id")): item for item in index.get("items", [])}
+    with contextlib.closing(_connect_state_db()) as conn:
+        db_rows = conn.execute("SELECT item_id, status, archived FROM work_items").fetchall()
+    db_by_id = {str(row["item_id"]): row for row in db_rows}
+
+    mismatches: list[dict[str, object]] = []
+    for item_id, db_row in db_by_id.items():
+        idx = index_by_id.get(item_id)
+        if not idx:
+            continue
+        idx_status = _canonical_status(str(idx.get("status", ""))) or str(idx.get("status", ""))
+        db_status = _canonical_status(str(db_row["status"] or "")) or str(db_row["status"] or "")
+        idx_archived = bool(idx.get("archived"))
+        db_archived = bool(db_row["archived"])
+        if idx_status != db_status or idx_archived != db_archived:
+            mismatches.append(
+                {
+                    "item_id": item_id,
+                    "index_status": idx_status,
+                    "db_status": db_status,
+                    "index_archived": idx_archived,
+                    "db_archived": db_archived,
+                }
+            )
+
+    tasks_dir = Path("docs/tasks")
+    story_drift: list[dict[str, object]] = []
+    if tasks_dir.exists():
+        for story_path in sorted(tasks_dir.glob("story-*.md")):
+            story_text = story_path.read_text()
+            story_slug = story_path.stem[6:]
+            current_status = _parse_task_field(story_text, "Status") or "Backlog"
+            child_statuses: list[str] = []
+            for base in (tasks_dir, tasks_dir / "archive"):
+                if not base.exists():
+                    continue
+                for candidate in sorted(base.glob("*.md")):
+                    if candidate.name == ".gitkeep" or candidate.name.startswith(("story-", "epic-")):
+                        continue
+                    child_text = candidate.read_text()
+                    child_story = _normalize_story_slug(_parse_task_field(child_text, "Story"))
+                    if child_story == story_slug:
+                        child_statuses.append(_parse_task_field(child_text, "Status") or "Backlog")
+            target_status = _story_target_status_from_children(child_statuses)
+            if target_status and target_status.lower() != current_status.lower():
+                story_drift.append(
+                    {
+                        "story_slug": story_slug,
+                        "current": current_status,
+                        "expected": target_status,
+                        "child_count": len(child_statuses),
+                    }
+                )
+
+    checks = {
+        "in_progress_count": len(in_progress_rows),
+        "active_leaf_count": len(active_rows),
+        "index_db_mismatch_count": len(mismatches),
+        "stale_source_count": len(stale_sources),
+        "story_rollup_drift_count": len(story_drift),
+        "in_progress_items": [dict(row) for row in in_progress_rows],
+        "mismatches": mismatches,
+        "stale_sources": stale_sources,
+        "story_rollup_drift": story_drift,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(_json_envelope("doctor", True, checks), indent=2))
+        return
+
+    print("Keeli Doctor Report")
+    print("-------------------")
+    print(f"In Progress leaf tasks: {checks['in_progress_count']}")
+    print(f"Active leaf tasks (In Progress/Review/Blocked): {checks['active_leaf_count']}")
+    print(f"Index <-> DB mismatches: {checks['index_db_mismatch_count']}")
+    print(f"Stale source rows: {checks['stale_source_count']}")
+    print(f"Story rollup drift rows: {checks['story_rollup_drift_count']}")
+
+    if checks["in_progress_count"] > 1:
+        print("\n⚠️  Multiple In Progress leaf tasks detected (potential hung-thread symptom):")
+        for row in checks["in_progress_items"]:
+            print(f"   • {row['item_id']} {row['slug']} [{row['status']}]")
+
+    if checks["index_db_mismatch_count"]:
+        print("\n⚠️  Index/DB status drift detected:")
+        for row in checks["mismatches"][:10]:
+            print(
+                f"   • {row['item_id']}: index={row['index_status']} archived={row['index_archived']} "
+                f"db={row['db_status']} archived={row['db_archived']}"
+            )
+
+    if checks["story_rollup_drift_count"]:
+        print("\n⚠️  Story rollup drift detected:")
+        for row in checks["story_rollup_drift"][:10]:
+            print(
+                f"   • story-{row['story_slug']}: current={row['current']} expected={row['expected']} "
+                f"(children={row['child_count']})"
+            )
+
+    if not any(
+        checks[key] for key in ("index_db_mismatch_count", "stale_source_count", "story_rollup_drift_count")
+    ) and checks["in_progress_count"] <= 1:
+        print("\n✅ No obvious drift or hung-thread indicators detected.")
 
 
 def cmd_digest(args: argparse.Namespace) -> None:
@@ -4541,6 +4971,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_complete = sub.add_parser("complete", help="Mark a task as completed and show next task.")
     p_complete.add_argument("task_name", help="Task title or slug to mark as completed.")
     p_complete.add_argument("-k", "--keeli", choices=personas, default="developer", metavar="PERSONA", help="Persona completing the task.")
+    p_complete.add_argument("--scaffold-missing", action="store_true", help="Auto-scaffold missing Evidence/Verification placeholders before validation.")
     p_complete.add_argument("--json", action="store_true", help="Output transition details as JSON.")
 
     # tick
@@ -4582,6 +5013,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # status
     sub.add_parser("status", help="Health-check all Keeli files.")
+
+    # doctor
+    p_doctor = sub.add_parser("doctor", help="Diagnose task-state drift and hung-thread symptoms.")
+    p_doctor.add_argument("--json", action="store_true", help="Output diagnostics as JSON.")
 
     # validate-task-state
     p_validate = sub.add_parser("validate-task-state", help="Validate passive task guardrails for hooks and local automation.")
@@ -4860,7 +5295,265 @@ def build_parser() -> argparse.ArgumentParser:
                           help=f"Persona signing off ({'/'.join(personas)}).")
     p_handoff.add_argument("-m", "--message", default=None, help="Optional handoff summary/notes.")
 
+    # snapshot
+    p_snapshot = sub.add_parser(
+        "snapshot",
+        help="Generate a weekly governance snapshot from task state and audit log.",
+    )
+    p_snapshot.add_argument(
+        "--week-ending",
+        default=None,
+        metavar="DATE",
+        help="ISO date for the 'Week ending' header (default: today).",
+    )
+    p_snapshot.add_argument(
+        "--out",
+        default=None,
+        metavar="FILE",
+        help="Write snapshot to FILE instead of printing to stdout.",
+    )
+    p_snapshot.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit machine-readable KPI summary JSON instead of markdown.",
+    )
+    p_snapshot.add_argument(
+        "--json-out",
+        default=None,
+        metavar="FILE",
+        help="Write JSON payload to FILE (useful for CI artifacts).",
+    )
+
     return parser
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    """Generate a weekly governance snapshot from task state and audit log."""
+    root = _find_project_root()
+    tasks_dir = root / "docs" / "tasks"
+    log_file = root / "docs" / "ai_log.md"
+    week_ending = getattr(args, "week_ending", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # ── Collect task counts ─────────────────────────────────────────────────
+    counts: dict[str, int] = {"Backlog": 0, "In Progress": 0, "Review": 0, "Blocked": 0, "Completed": 0}
+    completed_this_week: list[str] = []
+    if _state_db_path().exists():
+        with contextlib.closing(_connect_state_db()) as conn:
+            for row in conn.execute(
+                "SELECT status, slug, completed_at FROM work_items WHERE item_type IN ('task','bug','feat','story')"
+            ).fetchall():
+                status = (row["status"] or "Backlog")
+                key = status if status in counts else "Backlog"
+                counts[key] = counts.get(key, 0) + 1
+                if status == "Completed" and row["completed_at"] and row["completed_at"][:10] == week_ending:
+                    completed_this_week.append(row["slug"])
+    else:
+        # Fall back to filesystem scan
+        if tasks_dir.exists():
+            for tf in tasks_dir.glob("*.md"):
+                if tf.name == ".gitkeep":
+                    continue
+                text = tf.read_text()
+                status = _parse_task_field(text, "Status") or "Backlog"
+                key = status if status in counts else "Backlog"
+                counts[key] = counts.get(key, 0) + 1
+            archive_dir = tasks_dir / "archive"
+            if archive_dir.exists():
+                for tf in archive_dir.glob("*.md"):
+                    text = tf.read_text()
+                    completed_at = _parse_task_field(text, "Completed")
+                    if completed_at and completed_at[:10] == week_ending:
+                        completed_this_week.append(tf.stem)
+
+    in_progress_count = counts.get("In Progress", 0) + counts.get("Review", 0)
+    blocked_count = counts.get("Blocked", 0)
+
+    # ── Recent log lines ────────────────────────────────────────────────────
+    recent_log_lines: list[str] = []
+    if log_file.exists():
+        lines = log_file.read_text().splitlines()
+        recent_log_lines = [l for l in lines if l.strip() and not l.startswith("#") and not l.startswith("<!--")][-10:]
+
+    # ── KPI table (current values where calculable, else Data Gap) ──────────
+    total_items = sum(counts.values())
+
+    def _story_has_defined_nfr(story_text: str) -> bool:
+        lines = _section_body(story_text, _SEC_NFR)
+        if not lines:
+            return False
+        for raw in lines:
+            value = raw.strip().lower()
+            if value in ("", "none", "n/a"):
+                continue
+            if value.startswith("<!--"):
+                continue
+            return True
+        return False
+
+    # Planning completeness: stories with non-None NFR section
+    planning_completeness = "Data Gap"
+    story_count = 0
+    stories_with_nfr = 0
+    if tasks_dir.exists():
+        for tf in tasks_dir.glob("story-*.md"):
+            text = tf.read_text()
+            story_count += 1
+            if _story_has_defined_nfr(text):
+                stories_with_nfr += 1
+        if story_count:
+            planning_completeness = f"{stories_with_nfr / story_count:.2f} ({stories_with_nfr}/{story_count} stories)"
+
+    blocked_ratio = (
+        f"{blocked_count / max(in_progress_count + blocked_count, 1):.2f}"
+        if (in_progress_count + blocked_count) > 0
+        else "0.00"
+    )
+
+    planning_status = "At Risk" if story_count and stories_with_nfr / max(story_count, 1) < 0.8 else "On Track" if story_count else "Data Gap"
+    blocked_status = "On Track" if float(blocked_ratio) <= 0.15 else "At Risk"
+    kpi_rows = [
+        ("Planning completeness ratio", planning_completeness, "", "30-day >= 0.80", planning_status),
+        ("Story acceptance clarity score", "Data Gap", "", "30-day >= 3.5", "Data Gap"),
+        ("Backlog churn percentage", "Data Gap", "", "30-day <= 20%", "Data Gap"),
+        ("Cycle time median", "Data Gap", "", "60-day <= 5 days", "Data Gap"),
+        ("Blocked work ratio", blocked_ratio, "", "60-day <= 15%", blocked_status),
+        ("Requirement-change rework hours", "Data Gap", "", "60-day <= 12h/sprint", "Data Gap"),
+        ("Hallucination-attributed rework hours", "Data Gap", "", "60-day", "Data Gap"),
+        ("Hallucination rework rate", "Data Gap", "", "60/90-day", "Data Gap"),
+        ("Defect escape rate", "Data Gap", "", "90-day <= 10%", "Data Gap"),
+        ("Incident rate from req gaps", "Data Gap", "", "90-day <= 1/release", "Data Gap"),
+        ("Throughput stability", "Data Gap", "", "90-day CoV <= 0.25", "Data Gap"),
+    ]
+
+    kpi_metrics = [
+        {
+            "name": kpi,
+            "current": current,
+            "last_week": last,
+            "target_band": target,
+            "status": status_,
+        }
+        for kpi, current, last, target, status_ in kpi_rows
+    ]
+
+    kpi_dict = {
+        "planning_completeness_ratio": planning_completeness,
+        "blocked_work_ratio": blocked_ratio,
+        "planning_completeness_status": planning_status,
+        "blocked_work_status": blocked_status,
+        "in_progress_count": in_progress_count,
+        "blocked_count": blocked_count,
+        "completed_this_week_count": len(completed_this_week),
+    }
+
+    payload = _json_envelope("snapshot", True, {
+        "week_ending": week_ending,
+        "delivery": {
+            "in_progress": in_progress_count,
+            "completed_this_week": len(completed_this_week),
+            "blocked": blocked_count,
+            "total_items": total_items,
+        },
+        "kpis": kpi_dict,
+        "kpi_metrics": kpi_metrics,
+        "completed_items": completed_this_week[:20],
+        "sources": [
+            "docs/tasks/",
+            "docs/ai_log.md",
+            "docs/decision.md",
+            "keeli_state.db",
+            "docs/requirements/governance-kpi-framework-30-60-90.md",
+            "docs/requirements/hallucination-rework-benchmark-protocol.md",
+        ],
+    })
+
+    json_out_path = getattr(args, "json_out", None)
+    if json_out_path:
+        dest = Path(json_out_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(payload, indent=2) + "\n")
+        _append_log(f"@system | Snapshot JSON generated: {dest} (week-ending {week_ending})")
+
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return
+
+    # ── Build markdown ──────────────────────────────────────────────────────
+    kpi_table_rows = "\n".join(
+        f"| {kpi} | {current} | {last} | {target} | {status_} |"
+        for kpi, current, last, target, status_ in kpi_rows
+    )
+
+    completed_bullets = (
+        "\n".join(f"  - {s}" for s in completed_this_week[:5])
+        if completed_this_week
+        else "  - (none recorded with matching completion date)"
+    )
+
+    log_section = (
+        "\n".join(f"  {l}" for l in recent_log_lines)
+        if recent_log_lines
+        else "  (audit log empty)"
+    )
+
+    # Source artifact references
+    source_refs = []
+    for candidate in ["docs/tasks/", "docs/ai_log.md", "docs/decision.md", "keeli_state.db"]:
+        source_refs.append(f"  - {candidate}")
+    kpi_ref = "docs/requirements/governance-kpi-framework-30-60-90.md"
+    if (root / kpi_ref).exists():
+        source_refs.append(f"  - {kpi_ref}")
+
+    md = f"""# Weekly Governance Snapshot
+
+## Header
+- Week ending: {week_ending}
+- Prepared by: @system (keeli snapshot)
+- Scope: All active work items
+- Source artifacts reviewed:
+{chr(10).join(source_refs)}
+
+## 1. Delivery Status
+- In Progress count: {in_progress_count}
+- Completed this week: {len(completed_this_week)}
+- Blocked items: {blocked_count}
+- Top completed this week:
+{completed_bullets}
+
+## 2. KPI Delta (WoW)
+
+| KPI | Current | Last Week | Target Band | Status |
+|---|---|---|---|---|
+{kpi_table_rows}
+
+## 3. Risk Register
+
+| Risk | Impact | Likelihood | Owner | Mitigation | Status |
+|---|---|---|---|---|---|
+| KPI data collection partly manual | Medium | High | @po | Automate extraction from keeli_state.db | Open |
+
+## 4. Decisions Needed
+- (review docs/decision.md for open decisions)
+
+## 5. Evidence And Links
+- Task artifacts: docs/tasks/
+- Audit log references: docs/ai_log.md
+- Decision log: docs/decision.md
+
+## Recent Audit Log
+{log_section}
+"""
+
+    out_path = getattr(args, "out", None)
+    if out_path:
+        dest = Path(out_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(md)
+        print(f"✅ Snapshot written → {dest}")
+        _append_log(f"@system | Snapshot generated: {dest} (week-ending {week_ending})")
+    else:
+        print(md)
+
 
 def cmd_mcp(args: argparse.Namespace) -> None:
     """Start the Keeli MCP server."""
@@ -4905,6 +5598,7 @@ def main() -> None:
         "log": cmd_log,
         "resume": cmd_resume,
         "status": cmd_status,
+        "doctor": cmd_doctor,
         "validate-task-state": cmd_validate_task_state,
         "capture-commit-state": cmd_capture_commit_state,
         "transition-from-commit": cmd_transition_from_commit,
@@ -4932,6 +5626,7 @@ def main() -> None:
         "chain": cmd_chain,
         "handoff": cmd_handoff,
         "prompt": cmd_prompt,
+        "snapshot": cmd_snapshot,
     }
 
     handler = dispatch.get(args.command)
