@@ -952,14 +952,28 @@ def _install_git_hooks(*, force: bool = False) -> bool:
     return True
 
 
+
+# Source-code file extensions that commonly define regex patterns for secret detection.
+# Scanning them for "secret-like assignment" produces guaranteed false positives.
+_SCAN_SOURCE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".ts", ".js", ".mjs", ".cjs", ".rb", ".go", ".java", ".kt", ".swift",
+    ".rs", ".c", ".cpp", ".cs", ".php",
+})
+
+
 def _scan_paths_for_pii(paths: list[str]) -> list[str]:
-    """Return human-readable PII or secret findings for the given file paths."""
+    """Return human-readable PII or secret findings for the given file paths.
+
+    Source-code files (see ``_SCAN_SOURCE_EXTENSIONS``) are excluded from the
+    "secret-like assignment" pattern because they routinely contain regex
+    definitions that include words like ``password`` or ``token``, producing
+    guaranteed false positives.  AWS key and email patterns still apply to all
+    file types.
+    """
     findings: list[str] = []
-    patterns = [
-        (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "email address"),
-        (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS access key"),
-        (re.compile(r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{6,}"), "secret-like assignment"),
-    ]
+    pattern_email = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    pattern_aws = re.compile(r"AKIA[0-9A-Z]{16}")
+    pattern_secret = re.compile(r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{6,}")
 
     for raw_path in paths:
         path = Path(raw_path)
@@ -969,10 +983,18 @@ def _scan_paths_for_pii(paths: list[str]) -> list[str]:
             content = path.read_text(errors="ignore")
         except OSError:
             continue
-        for regex, label in patterns:
-            if regex.search(content):
-                findings.append(f"{path}: potential {label}")
-                break
+
+        is_source = path.suffix.lower() in _SCAN_SOURCE_EXTENSIONS
+
+        if pattern_email.search(content):
+            findings.append(f"{path}: potential email address")
+            continue
+        if pattern_aws.search(content):
+            findings.append(f"{path}: potential AWS access key")
+            continue
+        if not is_source and pattern_secret.search(content):
+            findings.append(f"{path}: potential secret-like assignment")
+
     return findings
 
 

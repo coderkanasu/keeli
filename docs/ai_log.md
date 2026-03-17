@@ -51,3 +51,5 @@
 2026-03-12T18:48:06Z | T-0021 | @qa | Task completed: Generate first governance snapshot from current artifacts → docs/tasks/archive/generate-first-governance-snapshot-from-current-artifacts.md
 2026-03-12T18:48:06Z | T-0020 | @architect | Task completed: Define SDLC field mapping matrix → docs/tasks/archive/define-sdlc-field-mapping-matrix.md
 2026-03-12T18:48:06Z | T-0022 | @author | Task completed: Document pilot integration workflow example → docs/tasks/archive/document-pilot-integration-workflow-example.md
+2026-03-16T23:29:36Z | T-0023 | @architect | Task created: Fix secret-scan false positive on regex patterns → docs/tasks/fix-secret-scan-false-positive-on-regex-patterns.md
+2026-03-17T19:23:16Z | T-0023 | @developer | Task started: fix-secret-scan-false-positive-on-regex-patterns → docs/tasks/fix-secret-scan-false-positive-on-regex-patterns.md

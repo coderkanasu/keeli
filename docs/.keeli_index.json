@@ -1,7 +1,7 @@
 {
   "schema": "1.0",
   "counters": {
-    "T": 22,
+    "T": 23,
     "E": 4,
     "S": 8,
     "BUG": 0,
@@ -449,6 +449,19 @@
       "created": "2026-03-12T18:17:41Z",
       "completed": "2026-03-12T18:48:06Z",
       "archived": true
+    },
+    {
+      "id": "T-0023",
+      "type": "task",
+      "title": "Fix secret-scan false positive on regex patterns",
+      "slug": "fix-secret-scan-false-positive-on-regex-patterns",
+      "status": "In Progress",
+      "priority": "P2",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-16T23:29:36Z",
+      "completed": null,
+      "archived": false
     }
   ]
 }
