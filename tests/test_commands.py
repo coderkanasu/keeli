@@ -517,6 +517,22 @@ class TestListingAndStatus:
 
 
 class TestCustomPrompts:
+    def test_init_creates_persona_slash_prompt_files(self, initialized_dir):
+        prompts_dir = initialized_dir / ".github" / "prompts"
+        assert (prompts_dir / "architect.prompt.md").exists()
+        assert (prompts_dir / "po.prompt.md").exists()
+        assert (prompts_dir / "developer.prompt.md").exists()
+
+    def test_prompt_bootstrap_personas_force_regenerates_files(self, initialized_dir):
+        target = initialized_dir / ".github" / "prompts" / "architect.prompt.md"
+        target.write_text("marker")
+
+        with patch("sys.argv", ["keeli", "prompt", "bootstrap-personas", "--force"]):
+            main()
+
+        content = target.read_text()
+        assert "Activate Architect mode" in content
+
     def test_prompt_apply_renders_and_writes_output_file(self, initialized_dir):
         src = initialized_dir / "trello-template.md"
         src.write_text(
@@ -572,6 +588,20 @@ class TestCustomPrompts:
 
         output = capsys.readouterr().out
         assert "Hello Keeli" in output
+
+
+class TestPersonaHandoff:
+    def test_handoff_bootstraps_handshake_table_when_missing(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "start", "Handoff Bootstrap", "-o", "Do it"]):
+            main()
+
+        with patch("sys.argv", ["keeli", "handoff", "Handoff Bootstrap", "-p", "architect", "-m", "Design approved"]):
+            main()
+
+        task_text = (initialized_dir / "docs" / "tasks" / "handoff-bootstrap.md").read_text()
+        assert "## Handshakes" in task_text
+        assert "| @architect | ☑ signed |" in task_text
+        assert "Design approved" in task_text
 
 
 class TestValidateTaskState:

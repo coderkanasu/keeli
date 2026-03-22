@@ -9,6 +9,11 @@ It gives you a file-first workflow for humans and a machine-readable workflow fo
 - Git hooks and commit/test helpers reduce manual status updates.
 - JSON envelopes make command output stable for agents and scripts.
 
+## Important Behavior
+
+- `keeli init --force` overwrites core docs and instruction files (`docs/project.md`, `docs/decision.md`, `docs/ai_log.md`, `docs/skills.md`, `docs/personas.md`, and `.github/*` templates).
+- For planning and architecture documentation, you can work directly in `docs/` without running Keeli commands each time.
+
 ## What Is Implemented
 
 Keeli currently provides:
@@ -49,6 +54,17 @@ The built-in personas are:
 - `@security` for threat modeling and secrets/auth concerns.
 - `@author` for user-facing documentation.
 
+## Docs-First Workflow (Recommended)
+
+For architect/PO style work, Keeli supports direct docs editing as the primary flow:
+
+1. Update product scope in `docs/project.md` and/or `docs/requirements/*.md`.
+2. Record architecture or policy decisions in `docs/decision.md`.
+3. Record material execution notes in `docs/ai_log.md`.
+4. Keep task-level details in `docs/tasks/*.md`.
+
+You can use this without invoking any lifecycle CLI command.
+
 ## Install
 
 ```bash
@@ -73,6 +89,8 @@ keeli progress build-pipeline-runner
 keeli review build-pipeline-runner
 keeli complete build-pipeline-runner
 ```
+
+Use this command-driven path when you want automation/state transitions; use the docs-first path above when you want lightweight manual control.
 
 ## Daily Commands
 
@@ -121,6 +139,8 @@ That envelope is implemented across commit automation, lifecycle transitions, di
 ## Custom Prompts
 
 Keeli supports project prompts stored in `docs/prompts/` and rendered through the CLI.
+
+Keeli also generates persona prompts under `.github/prompts/` during init for slash activation in chat (`/architect`, `/po`, `/developer`, `/qa`, `/security`, `/author`).
 
 ```bash
 keeli prompt add trello-connector --file ./trello-template.md

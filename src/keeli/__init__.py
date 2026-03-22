@@ -1,3 +1,5 @@
-"""Keeli CLI - Enforce a Four-Persona Architecture for AI Agents."""
+"""Keeli CLI - Enforce a Five-Persona Architecture for AI Agents."""
 
-__version__ = "0.3.0"
+from keeli.version import get_version
+
+__version__ = get_version()

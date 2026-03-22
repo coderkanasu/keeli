@@ -1,6 +1,17 @@
 {
     "chat.tools.terminal.autoApprove": {
         "keeli": true,
-        "awk": true
+        "awk": true,
+        "git config": true,
+        "/^cd /Users/spatil/Documents/persona-cli && source \\.venv/bin/activate && python -c \"\nfrom src\\.keeli\\.main import _scan_paths_for_pii\nfindings = _scan_paths_for_pii\\(\\['src/keeli/main\\.py'\\]\\)\nprint\\('Findings for main\\.py:', findings if findings else 'NONE \\(false positive gone\\)'\\)\n\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^source \\.venv/bin/activate && keeli progress build-persona-gate-pipeline-package --json$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        ".": true,
+        "pipx": true
     }
 }

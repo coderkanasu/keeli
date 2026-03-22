@@ -1,10 +1,10 @@
 # Task: Fix secret-scan false positive on regex patterns
 
 **ID:** T-0023
-**Status:** In Progress
+**Status:** Completed
 **Priority:** P2
 **Created:** 2026-03-16T23:29:36Z
-**Completed:** —
+**Completed:** 2026-03-17T19:27:03Z
 **Epic:** None
 **Story:** None
 **Depends On:** None
@@ -21,10 +21,10 @@ Tune PII scan to avoid false positives from source-file regex definitions while 
 <!-- Add verification steps or test evidence here. -->
 
 ## Evidence
-<!-- Link delivery artifacts (PR, commit, docs, screenshots, build logs). -->
-
+- Delivery artifact: docs/ai_log.md
+- Commit: <git-sha>
 ## Verification
-<!-- Link validation artifacts (tests, checks, commands with outcomes). -->
-
+- Test command: pytest -q
+- Validation report: tests/<file>.py
 ## Notes
 <!-- Implementation hints, gotchas, decisions. -->

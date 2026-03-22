@@ -3,6 +3,8 @@
 ## Purpose
 Define measurable governance signals for Keeli pilot execution quality, requirement stability, and hallucination-risk reduction.
 
+Protocol reference: `docs/requirements/hallucination-rework-benchmark-protocol.md`
+
 ## KPI Dictionary
 
 | Metric | Definition | Formula | Owner | Data Source |
@@ -13,6 +15,8 @@ Define measurable governance signals for Keeli pilot execution quality, requirem
 | Cycle time median | Median days from In Progress to Completed | median(completed_at - in_progress_at) | @developer | keeli_state.db.work_items |
 | Blocked work ratio | Fraction of active items currently blocked | blocked_items / active_items | @qa | keeli_state.db.work_items |
 | Requirement-change rework hours | Time spent reworking due to requirement change | sum(rework_hours_tagged_requirement_change) | @po | Weekly governance snapshot |
+| Hallucination-attributed rework hours | Time spent reworking due to verified AI hallucination events | sum(hours where rubric tag in H1..H5) | @qa + @po | Hallucination benchmark protocol log |
+| Hallucination rework rate | Fraction of total rework attributable to hallucinations | hallucination_rework_hours / total_rework_hours | @architect | Weekly governance snapshot |
 | Defect escape rate | Defects found after release over total defects | escaped_defects / total_defects | @qa | bug tasks + release notes |
 | Incident rate from requirement gaps | Prod incidents traced to requirement ambiguity or omissions | req_gap_incidents / release_window | @security + @qa | post-incident review log |
 | Throughput stability | Variation in weekly completed work volume | stddev(weekly_completed_tasks) | @architect | keeli_state.db + ai_log |
@@ -28,11 +32,13 @@ Define measurable governance signals for Keeli pilot execution quality, requirem
 - Cycle time median: <= 5 business days
 - Blocked work ratio: <= 15%
 - Requirement-change rework hours: <= 12 hours per sprint
+- Hallucination rework rate: <= 0.25
 
 ### 90 Day Targets
 - Defect escape rate: <= 10%
 - Incident rate from requirement gaps: <= 1 per release window
 - Throughput stability: coefficient of variation <= 0.25
+- Hallucination rework rate: <= 0.15
 
 ## Cadence And Owner Model
 - Weekly (30 min, owner: @po): KPI movement, risk register updates, blockers needing leadership decision.
@@ -44,3 +50,4 @@ Define measurable governance signals for Keeli pilot execution quality, requirem
 - Prefer DB and immutable logs over manual recollection.
 - Each KPI update must include source references in weekly snapshot.
 - Missing data is captured explicitly as "Data Gap" and tracked as a task.
+- Rework attribution must follow `docs/requirements/hallucination-rework-benchmark-protocol.md`.

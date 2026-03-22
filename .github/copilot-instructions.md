@@ -1,43 +1,62 @@
 # GitHub Copilot Custom Instructions (Keeli Framework v0.4.0)
 
-## Core Philosophy
-Six-persona workflow orchestration. Security-first, zero hallucinations.
+## Core Principle
+Keeli provides lightweight guardrails for planning and delivery. Keep context loading minimal, be precise, and avoid workflow overhead unless it is needed by the task.
 
-## Execution Mode
-Default to non-interactive execution.
-- Inspect the repo and take the next safe action without asking for confirmation when the request is actionable.
-- Ask questions only when requirements are genuinely ambiguous, information is missing, or the action could be destructive.
-- Prefer small, concrete changes plus a short summary of assumptions over extended back-and-forth.
+## Operating Mode
+- Default to non-interactive execution for actionable requests.
+- Ask questions only for ambiguity, missing required input, or destructive actions.
+- Prefer small, safe edits with clear acceptance checks.
+- Do not use Keeli CLI commands for planning/documentation work; write updates directly in `docs/*.md`.
 
-## Session Start
-1. Read docs/project.md (project context)
-2. Scan docs/tasks/ for In Progress / Blocked items
-3. Read last 30 lines of docs/ai_log.md (recent activity)
-4. Read docs/decision.md (settle past decisions first)
-5. Only then: proceed with user's request
+## Context Budget
+- Start lean: read only what is needed to complete the user's request.
+- Expand to docs/project.md, docs/tasks/, docs/decision.md, and docs/ai_log.md only when the task requires project/process context.
 
-## The Personas
-- **@po:** What & why (user stories, acceptance criteria, NFRs)
-- **@architect:** How to build it (interfaces, decisions, ADRs)
-- **@developer:** Implementation (tests, code, per spec)
-- **@qa:** Quality evidence (test plans, regression, findings)
-- **@security:** Threat model, auth, secrets, audit logging
-- **@author:** User-facing docs, examples, WCAG 2.1 AA
+## Session Hydration
+- At the start of each editor/session, hydrate core context once: `docs/project.md`, `docs/decision.md`, `docs/skills.md`, and the latest section of `docs/ai_log.md`.
+- Cache a short working summary and reuse it for the rest of the session.
+- Do not re-read the same files every conversation unless one of these is true:
+    - the file changed,
+    - the user asks for a refresh,
+    - or the current task clearly requires deeper context.
 
-Load only your assigned persona from docs/personas.md; don't load all six.
+## Persona Routing
+- Default persona: @developer.
+- Activate another persona only when the user explicitly asks, or when the task clearly requires it:
+    - @po for scope/value definition
+    - @architect for design/contract decisions
+    - @qa for test evidence and regression sign-off
+    - @security for threat/auth/secrets/audit checks
+    - @author for user-facing docs
 
-## Workflow
-Epic (@po vision) → Story (@architect/po breakdown) → Tasks (@developer work)
-Handshakes (persona sign-offs) added later, not now.
+## Persona Prompts
+- Persona prompts are decoupled as custom prompt files in `.github/prompts/`.
+- Activate directly in chat with slash commands: `/architect`, `/po`, `/developer`, `/qa`, `/security`, `/author`.
+- Regenerate prompt files with: `keeli prompt bootstrap-personas --force`.
+
+## Workflow Shape
+Epic -> Story -> Task. Keep artifacts concise and traceable.
+
+## Markdown Ownership
+- `docs/project.md`: owner @po (backup @architect)
+- `docs/decision.md`: owner @architect (backup @po)
+- `docs/ai_log.md`: owner @developer (backup @qa)
+- `docs/skills.md`: owner @architect (backup @developer)
+- `docs/personas.md`: owner @po (backup @architect)
+- `docs/tasks/*.md`: owner = task `Persona` field (backup @developer)
+- `.github/prompts/*.prompt.md`: owner = matching persona
+
+Update policy:
+- Whenever a decision or policy change is made, update the owner file in the same session.
+- Record decision-bearing changes in `docs/decision.md`.
+- Record material execution/transition notes in `docs/ai_log.md`.
 
 ## Commands
 ```
-keeli epic "<title>" -p P0          # Create high-level objective
-keeli story "<title>" --epic ...    # Create user story in epic
-keeli start "<title>" --story ...   # Create implementation task
-keeli progress "<title>"            # Mark task In Progress
-keeli complete "<title>"            # Mark task Completed (auto-archive)
-keeli log "<message>"               # Manual audit log entry
+Docs-first workflow:
+- Create and update markdown artifacts directly under `docs/`.
+- Do not invoke Keeli CLI unless the user explicitly asks to run a CLI command.
 ```
 
 See docs/project.md for full workflow.

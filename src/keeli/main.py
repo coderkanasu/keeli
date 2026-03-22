@@ -44,6 +44,7 @@ from keeli.templates import (
     EPIC_TEMPLATE,
     FEATURE_TEMPLATE,
     GITIGNORE_CONTENT,
+    PERSONA_PROMPT_TEMPLATES,
     PERSONAS_MD,
     PROJECT_MD,
     SCHEMA_VERSION,
@@ -444,7 +445,7 @@ def _handshake_all_signed_off(text: str) -> bool:
     This is a file-first validation check (no tool calls) used at CLI boundaries
     (keeli_complete) to ensure full handshake before archiving.
     """
-    personas = _handshake_personas_in_text(text) or ["po", "architect", "developer", "security", "author"]
+    personas = _handshake_personas_in_text(text) or DEFAULT_PERSONAS
     
     # Check each persona
     for persona in personas:
@@ -453,6 +454,30 @@ def _handshake_all_signed_off(text: str) -> bool:
             return False
     
     return True
+
+
+def _ensure_handshake_table(text: str, personas: list[str] | None = None) -> str:
+    """Ensure a task markdown text has a Handshakes table.
+
+    If missing, append a default table near the end of the file.
+    """
+    if "## Handshakes" in text:
+        return text
+
+    rows = []
+    for persona in (personas or DEFAULT_PERSONAS):
+        rows.append(f"| @{persona} | ☐ pending | — | — |")
+
+    block = "\n".join(
+        [
+            "## Handshakes",
+            "| Persona | Status | Timestamp | Summary |",
+            "|---|---|---|---|",
+            *rows,
+        ]
+    )
+    suffix = "\n" if text.endswith("\n") else "\n\n"
+    return text + suffix + block + "\n"
 
 
 def _validate_transition(
@@ -971,6 +996,11 @@ def _scan_paths_for_pii(paths: list[str]) -> list[str]:
     file types.
     """
     findings: list[str] = []
+    # RFC 2606 / RFC 5737 reserved example domains — safe to use in test code.
+    _EXAMPLE_DOMAINS = re.compile(
+        r"@(example\.(com|net|org)|test\.(com|net|org)|localhost|invalid)\b",
+        re.IGNORECASE,
+    )
     pattern_email = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
     pattern_aws = re.compile(r"AKIA[0-9A-Z]{16}")
     pattern_secret = re.compile(r"(?i)(password|secret|token|api[_-]?key)\s*[:=]\s*['\"]?[^\s'\"]{6,}")
@@ -986,10 +1016,14 @@ def _scan_paths_for_pii(paths: list[str]) -> list[str]:
 
         is_source = path.suffix.lower() in _SCAN_SOURCE_EXTENSIONS
 
-        if pattern_email.search(content):
+        email_matches = pattern_email.findall(content)
+        real_emails = [m for m in email_matches if not _EXAMPLE_DOMAINS.search(m)]
+        if real_emails:
             findings.append(f"{path}: potential email address")
             continue
-        if pattern_aws.search(content):
+        aws_matches = pattern_aws.findall(content)
+        real_aws = [m for m in aws_matches if "EXAMPLE" not in m.upper()]
+        if real_aws:
             findings.append(f"{path}: potential AWS access key")
             continue
         if not is_source and pattern_secret.search(content):
@@ -1535,6 +1569,25 @@ def _inject_skills_into_instructions(skills: list[tuple[str, str, str, str]]) ->
     instr.write_text(f"{before}{_SKILLS_START}\n{block}\n{_SKILLS_END}{after}")
 
 
+def _write_persona_prompts(*, force: bool = False) -> int:
+    """Write slash-activatable persona prompts to .github/prompts/.
+
+    Returns the number of prompt files created/overwritten in this run.
+    """
+    prompts_dir = Path(".github/prompts")
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for persona, content in PERSONA_PROMPT_TEMPLATES.items():
+        path = prompts_dir / f"{persona}.prompt.md"
+        existed = path.exists()
+        if existed and not force:
+            continue
+        path.write_text(content)
+        print(f"  ✅ {'Overwrote' if existed else 'Created'} {path}")
+        written += 1
+    return written
+
+
 # ── Commands ───────────────────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -1544,7 +1597,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     try:
         # Directories
-        for d in [Path(".github"), Path("docs"), Path("docs/tasks"), Path("docs/requirements")]:
+        for d in [Path(".github"), Path(".github/prompts"), Path("docs"), Path("docs/tasks"), Path("docs/requirements")]:
             d.mkdir(parents=True, exist_ok=True)
 
         # .gitkeep for empty dirs (so Git tracks them)
@@ -1560,6 +1613,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/ai_log.md"), AI_LOG_MD, force=force)
         _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
         _write_file(Path("docs/personas.md"), PERSONAS_MD, force=force)
+        persona_prompt_count = _write_persona_prompts(force=force)
         _init_state_db()
         _db_sync_all_task_files()
         hooks_installed = _install_git_hooks(force=force)
@@ -1589,9 +1643,12 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"   State database ready: {_STATE_DB_FILENAME}")
         if hooks_installed:
             print("   Git hooks installed: .git/hooks/pre-commit, .git/hooks/post-commit")
+        if persona_prompt_count:
+            print(f"   Persona prompts ready: .github/prompts/ ({persona_prompt_count} file(s))")
         if args.ai:
             print(f"   Flavor-specific instructions created for: {', '.join(args.ai)}")
         print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
+        print("   Persona activation: use /architect, /po, /developer, /qa, /security, /author")
         print("   Suggested first steps:")
         print("     1. Fill in docs/project.md with your project context")
         print("     2. keeli stack                    # pick your tech stack preset interactively")
@@ -1630,12 +1687,8 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     # Resolve optional objective text
     objective_text = _resolve_objective(getattr(args, "objective", None))
-    if not objective_text:
-        print(_OBJECTIVE_HINT)
 
-    priority = getattr(args, "priority", None) or _prompt(
-        "Task priority", default="P1", choices=["P0", "P1", "P2"]
-    )
+    priority = getattr(args, "priority", None) or "P1"
     persona = getattr(args, "keeli", None) or "architect"
     depends_on = getattr(args, "depends_on", None) or "None"
     epic = getattr(args, "epic", None) or "None"
@@ -3659,7 +3712,7 @@ def cmd_handoff(args: argparse.Namespace) -> None:
 
     persona = args.persona
     message = getattr(args, "message", None) or ""
-    text = task_file.read_text()
+    text = _ensure_handshake_table(task_file.read_text())
     lines = text.splitlines()
 
     # Find and update the handshakes table row for this persona
@@ -4685,19 +4738,21 @@ def cmd_update(args: argparse.Namespace) -> None:
 # ── Custom Prompts ─────────────────────────────────────────────────────────
 
 def _load_all_prompts() -> dict:
-    """Load all custom prompts from docs/prompts/ and .keeli/prompts/.
+    """Load all custom prompts from docs/prompts/, .keeli/prompts/, and .github/prompts/.
     
     Returns a dict: {slug: {"path": Path, "metadata": dict, "body": str}}
     """
     prompts = {}
     
     # Load from both user-facing and internal directories
-    for base_dir in [Path("docs/prompts"), Path(".keeli/prompts")]:
+    for base_dir in [Path("docs/prompts"), Path(".keeli/prompts"), Path(".github/prompts")]:
         if not base_dir.exists():
             continue
         
         for md_file in base_dir.glob("*.md"):
             slug = md_file.stem
+            if slug.endswith(".prompt"):
+                slug = slug[:-7]
             content = md_file.read_text()
             metadata, body = _parse_prompt_metadata(content)
             
@@ -4780,8 +4835,15 @@ def cmd_prompt(args: argparse.Namespace) -> None:
         cmd_prompt_show(args)
     elif action == "remove":
         cmd_prompt_remove(args)
+    elif action == "bootstrap-personas":
+        written = _write_persona_prompts(force=getattr(args, "force", False))
+        if written:
+            print("✅ Persona prompt files synced to .github/prompts/")
+            print("   Use /architect, /po, /developer, /qa, /security, or /author in chat.")
+        else:
+            print("ℹ️  Persona prompt files already up to date.")
     else:
-        print("Usage: keeli prompt {add|apply|list|show|remove}")
+        print("Usage: keeli prompt {add|apply|list|show|remove|bootstrap-personas}")
 
 
 def _parse_prompt_vars(raw_vars: list[str] | None) -> dict[str, str]:
@@ -4982,7 +5044,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("task_name", help="Human-readable task title.")
     p_start.add_argument("-c", "--context", help="Path to a requirements or context file to link.")
     p_start.add_argument("-o", "--objective", help="Rich objective/requirements text (supports @file for file input).")
-    p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Prompted if omitted.")
+    p_start.add_argument("-p", "--priority", choices=["P0", "P1", "P2"], default=None, help="Task priority: P0 (critical), P1 (default), P2 (low). Defaults to P1 when omitted.")
     p_start.add_argument("-d", "--depends-on", help="Comma-separated list of task slugs this task depends on.")
     p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
     p_start.add_argument("--story", help="Associate this task with a story slug.")
@@ -5300,6 +5362,13 @@ def build_parser() -> argparse.ArgumentParser:
     
     # prompt list
     prompt_sub.add_parser("list", help="List all custom prompts with metadata.")
+
+    # prompt bootstrap-personas
+    p_prompt_bootstrap = prompt_sub.add_parser(
+        "bootstrap-personas",
+        help="Generate slash-activatable persona prompt files in .github/prompts/.",
+    )
+    p_prompt_bootstrap.add_argument("-f", "--force", action="store_true", help="Overwrite existing persona prompt files.")
     
     # prompt show
     p_prompt_show = prompt_sub.add_parser("show", help="Show the full content of a custom prompt.")

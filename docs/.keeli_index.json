@@ -1,7 +1,7 @@
 {
   "schema": "1.0",
   "counters": {
-    "T": 23,
+    "T": 27,
     "E": 4,
     "S": 8,
     "BUG": 0,
@@ -455,11 +455,63 @@
       "type": "task",
       "title": "Fix secret-scan false positive on regex patterns",
       "slug": "fix-secret-scan-false-positive-on-regex-patterns",
-      "status": "In Progress",
+      "status": "Completed",
       "priority": "P2",
       "epic": null,
       "story": null,
       "created": "2026-03-16T23:29:36Z",
+      "completed": "2026-03-17T19:27:03Z",
+      "archived": true
+    },
+    {
+      "id": "T-0024",
+      "type": "task",
+      "title": "smoke test task",
+      "slug": "smoke-test-task",
+      "status": "Backlog",
+      "priority": "P0",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-20T17:55:26Z",
+      "completed": null,
+      "archived": false
+    },
+    {
+      "id": "T-0025",
+      "type": "task",
+      "title": "lean flow task",
+      "slug": "lean-flow-task",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-20T17:57:32Z",
+      "completed": null,
+      "archived": false
+    },
+    {
+      "id": "T-0026",
+      "type": "task",
+      "title": "lean flow task two",
+      "slug": "lean-flow-task-two",
+      "status": "Backlog",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-20T17:58:47Z",
+      "completed": null,
+      "archived": false
+    },
+    {
+      "id": "T-0027",
+      "type": "task",
+      "title": "Working on uncommitted changes",
+      "slug": "working-on-uncommitted-changes",
+      "status": "In Progress",
+      "priority": "P1",
+      "epic": null,
+      "story": null,
+      "created": "2026-03-22T22:46:22Z",
       "completed": null,
       "archived": false
     }

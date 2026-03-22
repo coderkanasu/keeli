@@ -3,6 +3,27 @@
 ## Purpose
 Map Keeli Epic/Story/Task records to external tracking systems to maintain one source of truth with minimal duplicate entry.
 
+## Markdown Ownership (Persona -> File)
+
+| File | Primary Owner | Backup Owner | Update Trigger |
+|---|---|---|---|
+| docs/project.md | @po | @architect | Product scope, goals, or architecture summary changed |
+| docs/decision.md | @architect | @po | Any architectural or policy decision is made |
+| docs/ai_log.md | @developer | @qa | Material implementation, validation, or transition event occurs |
+| docs/skills.md | @architect | @developer | Tech stack/constraint decision changes |
+| docs/personas.md | @po | @architect | Persona responsibilities or boundaries change |
+| docs/tasks/*.md | Persona in task `**Persona:**` field | @developer | Task state, scope, evidence, or verification changes |
+| docs/tasks/archive/*.md | @developer | @qa | Completion/archive metadata changes |
+| docs/requirements/*.md | @po | @architect | Requirement baseline, KPI definitions, or governance policy changes |
+| .github/prompts/*.prompt.md | Matching persona prompt owner | @architect | Persona operating instructions change |
+| .github/copilot-instructions.md | @architect | @po | Guardrails, session hydration, or workflow policy changes |
+
+### Ownership Policy
+- Owners should update their files immediately in the same work session whenever a decision or policy change is made.
+- If an owner is unavailable, the backup owner updates and logs the reason in docs/ai_log.md.
+- Decision-bearing updates must include a corresponding entry in docs/decision.md.
+- Requirement-bearing updates must keep links consistent across docs/requirements/ and docs/project.md.
+
 ## Entity Mapping
 
 | Keeli Entity | Keeli Field | Jira | Azure Boards | GitHub Projects |

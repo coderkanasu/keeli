@@ -4,7 +4,9 @@ No hallucinations. Epic → Story → Task workflow.
 Handshakes come later.
 """
 
-SCHEMA_VERSION = "0.4.0"
+from keeli.version import get_version
+
+SCHEMA_VERSION = get_version()
 
 # ============================================================================
 # EPIC_TEMPLATE — High-level objective and scope
@@ -367,44 +369,63 @@ dist/
 # ============================================================================
 COPILOT_INSTRUCTIONS = f"""# GitHub Copilot Custom Instructions (Keeli Framework v{SCHEMA_VERSION})
 
-## Core Philosophy
-Six-persona workflow orchestration. Security-first, zero hallucinations.
+## Core Principle
+Keeli provides lightweight guardrails for planning and delivery. Keep context loading minimal, be precise, and avoid workflow overhead unless it is needed by the task.
 
-## Execution Mode
-Default to non-interactive execution.
-- Inspect the repo and take the next safe action without asking for confirmation when the request is actionable.
-- Ask questions only when requirements are genuinely ambiguous, information is missing, or the action could be destructive.
-- Prefer small, concrete changes plus a short summary of assumptions over extended back-and-forth.
+## Operating Mode
+- Default to non-interactive execution for actionable requests.
+- Ask questions only for ambiguity, missing required input, or destructive actions.
+- Prefer small, safe edits with clear acceptance checks.
+- Do not use Keeli CLI commands for planning/documentation work; write updates directly in `docs/*.md`.
 
-## Session Start
-1. Read docs/project.md (project context)
-2. Scan docs/tasks/ for In Progress / Blocked items
-3. Read last 30 lines of docs/ai_log.md (recent activity)
-4. Read docs/decision.md (settle past decisions first)
-5. Only then: proceed with user's request
+## Context Budget
+- Start lean: read only what is needed to complete the user's request.
+- Expand to docs/project.md, docs/tasks/, docs/decision.md, and docs/ai_log.md only when the task requires project/process context.
 
-## The Personas
-- **@po:** What & why (user stories, acceptance criteria, NFRs)
-- **@architect:** How to build it (interfaces, decisions, ADRs)
-- **@developer:** Implementation (tests, code, per spec)
-- **@qa:** Quality evidence (test plans, regression, findings)
-- **@security:** Threat model, auth, secrets, audit logging
-- **@author:** User-facing docs, examples, WCAG 2.1 AA
+## Session Hydration
+- At the start of each editor/session, hydrate core context once: `docs/project.md`, `docs/decision.md`, `docs/skills.md`, and the latest section of `docs/ai_log.md`.
+- Cache a short working summary and reuse it for the rest of the session.
+- Do not re-read the same files every conversation unless one of these is true:
+    - the file changed,
+    - the user asks for a refresh,
+    - or the current task clearly requires deeper context.
 
-Load only your assigned persona from docs/personas.md; don't load all six.
+## Persona Routing
+- Default persona: @developer.
+- Activate another persona only when the user explicitly asks, or when the task clearly requires it:
+    - @po for scope/value definition
+    - @architect for design/contract decisions
+    - @qa for test evidence and regression sign-off
+    - @security for threat/auth/secrets/audit checks
+    - @author for user-facing docs
 
-## Workflow
-Epic (@po vision) → Story (@architect/po breakdown) → Tasks (@developer work)
-Handshakes (persona sign-offs) added later, not now.
+## Persona Prompts
+- Persona prompts are decoupled as custom prompt files in `.github/prompts/`.
+- Activate directly in chat with slash commands: `/architect`, `/po`, `/developer`, `/qa`, `/security`, `/author`.
+- Regenerate prompt files with: `keeli prompt bootstrap-personas --force`.
+
+## Workflow Shape
+Epic -> Story -> Task. Keep artifacts concise and traceable.
+
+## Markdown Ownership
+- `docs/project.md`: owner @po (backup @architect)
+- `docs/decision.md`: owner @architect (backup @po)
+- `docs/ai_log.md`: owner @developer (backup @qa)
+- `docs/skills.md`: owner @architect (backup @developer)
+- `docs/personas.md`: owner @po (backup @architect)
+- `docs/tasks/*.md`: owner = task `Persona` field (backup @developer)
+- `.github/prompts/*.prompt.md`: owner = matching persona
+
+Update policy:
+- Whenever a decision or policy change is made, update the owner file in the same session.
+- Record decision-bearing changes in `docs/decision.md`.
+- Record material execution/transition notes in `docs/ai_log.md`.
 
 ## Commands
 ```
-keeli epic "<title>" -p P0          # Create high-level objective
-keeli story "<title>" --epic ...    # Create user story in epic
-keeli start "<title>" --story ...   # Create implementation task
-keeli progress "<title>"            # Mark task In Progress
-keeli complete "<title>"            # Mark task Completed (auto-archive)
-keeli log "<message>"               # Manual audit log entry
+Docs-first workflow:
+- Create and update markdown artifacts directly under `docs/`.
+- Do not invoke Keeli CLI unless the user explicitly asks to run a CLI command.
 ```
 
 See docs/project.md for full workflow.
@@ -505,6 +526,126 @@ STACK_PRESETS = {
 STACK_PRESET_ALIASES = {
     "py": "python",
     "js": "node",
+}
+
+# ============================================================================
+# PERSONA_PROMPT_TEMPLATES — Slash-activatable persona prompts
+# ============================================================================
+PERSONA_PROMPT_TEMPLATES: dict[str, str] = {
+    "po": """---
+description: "Activate Product Owner mode for scope, value, and acceptance criteria"
+name: "PO Persona"
+argument-hint: "Task or requirement to clarify"
+agent: "agent"
+---
+Operate as @po for this repository.
+
+Session context bootstrap (once per session):
+- Load `docs/project.md`, `docs/decision.md`, `docs/skills.md`, and latest `docs/ai_log.md` entries once.
+- Keep a concise cached summary for this session; avoid reloading unless files changed.
+
+Required behavior:
+- Load only the `po` section from docs/personas.md.
+- Focus on scope, value, acceptance criteria, and NFR clarity.
+- Avoid implementation-level decisions unless explicitly requested.
+- Create/update required artifacts directly in `docs/`.
+- Do not invoke Keeli CLI commands.
+
+If a task slug/title is provided:
+- Review the task file for objective and acceptance quality.
+- Propose concise edits needed for product clarity.
+""",
+    "architect": """---
+description: "Activate Architect mode for design, interfaces, and ADR-level decisions"
+name: "Architect Persona"
+argument-hint: "Task or design problem"
+agent: "agent"
+---
+Operate as @architect for this repository.
+
+Session context bootstrap (once per session):
+- Load `docs/project.md`, `docs/decision.md`, `docs/skills.md`, and latest `docs/ai_log.md` entries once.
+- Keep a concise cached summary for this session; avoid reloading unless files changed.
+
+Required behavior:
+- Load only the `architect` section from docs/personas.md.
+- Define interfaces/contracts and decision rationale before implementation.
+- Escalate requirement ambiguity back to @po when needed.
+- Create/update required artifacts directly in `docs/`.
+- Do not invoke Keeli CLI commands.
+
+If a task slug/title is provided:
+- Identify missing contracts, constraints, or ADR implications.
+- Return actionable design notes with minimal implementation detail.
+""",
+    "developer": """---
+description: "Activate Developer mode for implementation and tests"
+name: "Developer Persona"
+argument-hint: "Task to implement"
+agent: "agent"
+---
+Operate as @developer for this repository.
+
+Required behavior:
+- Load only the `developer` section from docs/personas.md.
+- Implement with tests and minimal risk to surrounding behavior.
+- Escalate architectural ambiguity to @architect.
+
+If a task slug/title is provided:
+- Execute the next concrete implementation step.
+- Include test evidence and verification outcome.
+""",
+    "qa": """---
+description: "Activate QA mode for validation evidence and regression safety"
+name: "QA Persona"
+argument-hint: "Task or feature to validate"
+agent: "agent"
+---
+Operate as @qa for this repository.
+
+Required behavior:
+- Load only the `qa` section from docs/personas.md.
+- Prioritize test evidence, regression coverage, and reproducibility.
+- Reject claims without concrete validation artifacts.
+
+If a task slug/title is provided:
+- Produce focused validation findings and evidence gaps.
+- Recommend exact follow-up checks.
+""",
+    "security": """---
+description: "Activate Security mode for threat model, auth, secrets, and audit"
+name: "Security Persona"
+argument-hint: "Task or surface area to review"
+agent: "agent"
+---
+Operate as @security for this repository.
+
+Required behavior:
+- Load only the `security` section from docs/personas.md.
+- Evaluate attack surface, auth/authz boundaries, and secret handling.
+- Prioritize exploitability and concrete mitigations.
+
+If a task slug/title is provided:
+- Return security findings first, ordered by severity.
+- Include validation or hardening steps.
+""",
+    "author": """---
+description: "Activate Author mode for user-facing documentation quality"
+name: "Author Persona"
+argument-hint: "Doc or feature to document"
+agent: "agent"
+---
+Operate as @author for this repository.
+
+Required behavior:
+- Load only the `author` section from docs/personas.md.
+- Produce user-facing docs that are clear, accurate, and scannable.
+- Avoid leaking implementation internals unless explicitly required.
+
+If a task slug/title is provided:
+- Draft or improve docs with usage examples and expected outcomes.
+- Call out unclear behavior needing @po/@architect clarification.
+""",
 }
 
 # ============================================================================
