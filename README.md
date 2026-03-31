@@ -6,7 +6,19 @@ Keeli is a Python CLI for teams building software with AI and needing repeatable
 
 It combines docs-first planning with automation-safe state so humans and agents can work in the same system without losing traceability.
 
+## What You'll Usually Do
+
+Typical workflow:
+
+- `keeli init` creates templates and SQLite state.
+- `keeli epic` and `keeli story` define scope and priorities.
+- `keeli start` begins a task.
+- Move through `keeli progress`, `keeli review`, and `keeli complete`.
+- Agents and CI can use `keeli capture-commit-state` and `keeli transition-from-commit` to automate lifecycle transitions.
+
 ## The Problem Keeli Solves
+
+Keeli helps you move from "prompt to code" blindness to an auditable, persona-driven workflow where every change is traceable and repeatable.
 
 AI-assisted delivery often breaks down in predictable ways:
 
@@ -218,6 +230,8 @@ Analyst -> Architect -> Security -> QA -> Regression
 
 This is foundation work for experimentation and follow-on CLI integration, not a complete end-user pipeline product yet.
 
+Note: pipeline modules are for experimentation and learning. They are not yet a production-ready pipeline product, but they demonstrate how to extend Keeli with deterministic gates.
+
 ## Sandbox: Test-And-Learn
 
 An isolated sandbox is available at `sandbox/keeli-pipeline-sandbox/`.
@@ -236,6 +250,8 @@ cd sandbox/keeli-pipeline-sandbox
 keeli init --force
 PYTHONPATH=/absolute/path/to/src python run_tnl.py
 ```
+
+Note: the sandbox is intentionally experimental and learning-oriented. It demonstrates extension patterns for deterministic gates and evidence capture rather than production deployment defaults.
 
 ## MCP Support
 
@@ -267,3 +283,21 @@ External agents can call these workflow primitives without re-implementing CLI b
 - Keeli is hybrid, not DB-only: markdown remains part of the workflow.
 - SQLCipher-style encrypted evidence storage is planned work, not finished functionality.
 - External connector sync is not yet complete runtime functionality; prompt-driven connector config management is implemented.
+
+## Contributors
+
+- [Vijay Ranganatha](https://www.linkedin.com/in/vijayranganatha/)
+
+## Community
+
+- Issues: https://github.com/coderkanasu/keeli/issues
+- Discussions: https://github.com/coderkanasu/keeli/discussions
+- For larger contributions or design ideas, open a draft PR or start a discussion first.
+
+## Related Links
+
+Keeli is open source, and contributions are welcome from builders interested in AI-assisted development workflows, persona-driven execution, and gated delivery pipelines.
+
+- Explore the framework: https://github.com/coderkanasu/keeli
+- Study the reference project: https://github.com/coderkanasu/GREENWARD
+- Try the live demo: https://greenward-nine.vercel.app
