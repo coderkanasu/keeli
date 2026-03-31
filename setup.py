@@ -14,11 +14,15 @@ setup(
     name="keeli",
     version=_externalized_version(),
     description="Keeli CLI — Enforce a Five-Persona Architecture for AI Agents.",
+    license="MIT",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     python_requires=">=3.12",
     install_requires=[
         "mcp>=1.0.0",
+    ],
+    classifiers=[
+        "License :: OSI Approved :: MIT License",
     ],
     entry_points={
         "console_scripts": [
