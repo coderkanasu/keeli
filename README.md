@@ -286,6 +286,7 @@ External agents can call these workflow primitives without re-implementing CLI b
 
 ## Contributors
 
+- [Shankar Patil](https://www.linkedin.com/in/shanvipatil/)
 - [Vijay Ranganatha](https://www.linkedin.com/in/vijayranganatha/)
 
 ## Community
