@@ -1,5 +1,7 @@
 # Keeli
 
+Keeli is an open-source framework for orchestrating AI-assisted development workflows.
+
 Keeli is a Python CLI for teams building software with AI and needing repeatable delivery, auditable decisions, and clean handoffs between personas.
 
 It combines docs-first planning with automation-safe state so humans and agents can work in the same system without losing traceability.
@@ -38,10 +40,12 @@ Use Keeli when you want one or more of the following:
 
 ## How To Contribute In 5 Minutes
 
+Help design better AI-engineer workflows, add new personas, or integrate with popular tools.
+
 ```bash
 # 1) Fork this repo on GitHub, then clone your fork
-git clone https://github.com/<your-username>/persona-cli.git
-cd persona-cli
+git clone https://github.com/<your-username>/keeli.git
+cd keeli
 
 # 2) Create a feature branch
 git checkout -b feat/my-change
