@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import argparse
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -26,14 +27,11 @@ from keeli.main import (
     _load_index, _allocate_id, _index_update_status,
     _parse_task_field, _resolve_task_file, _append_log,
     _db_log_event, _db_sync_task_file,
-    _evaluate_commit_transitions, _active_leaf_items, _apply_commit_transitions,
-    _INDEX_PATH, _tail, _find_project_root, _git_output, _transition_conflict_reason,
-    _resolve_transition_target,
+    _INDEX_PATH, _tail, _find_project_root, _git_output,
     _HINTS_MARKER_START,
-    _scan_manifests, _run_chain_inline, BUILTIN_CHAINS,
-    cmd_start,
 )
 from keeli.templates import TASK_TEMPLATE
+from keeli import query as kquery
 
 # ── HATEOAS: next-action suggestions ──────────────────────────────────────────
 # Each entry is a callable: ctx dict → list of {tool, args, why} dicts.
@@ -48,22 +46,12 @@ _NEXT_ACTIONS: dict[str, Any] = {
             "why":  "Inject AI context hints (relevant skills + ADRs) into the new task before starting work.",
         },
         {
-            "tool": "keeli_chain",
-            "args": {"steps": [f"analyze:{ctx.get('slug','<slug>')}", "progress:auto"]},
-            "why":  "One-shot pipeline: analyze the task then mark it In Progress.",
-        },
-        {
             "tool": "keeli_log",
             "args": {"message": f"@architect | Task created: {ctx.get('slug','<slug>')}", "persona": "architect"},
             "why":  "Append a timestamped entry to the audit log.",
         },
     ],
     "keeli_analyze": lambda ctx: [
-        {
-            "tool": "keeli_chain",
-            "args": {"steps": [f"progress:{ctx.get('slug','<slug>')}"]},
-            "why":  "Mark the analyzed task as In Progress.",
-        },
         {
             "tool": "keeli_next",
             "args": {},
@@ -87,11 +75,6 @@ _NEXT_ACTIONS: dict[str, Any] = {
             "tool": "keeli_analyze",
             "args": {"task_slug": ctx.get("slug", "<slug>")},
             "why":  "Inject relevant skills/ADRs into this task before starting.",
-        },
-        {
-            "tool": "keeli_chain",
-            "args": {"steps": [f"analyze:{ctx.get('slug','<slug>')}", "progress:auto"]},
-            "why":  "Fast-track: analyze + mark In Progress in a single pipeline call.",
         },
         {
             "tool": "keeli_start",
@@ -154,34 +137,263 @@ _NEXT_ACTIONS: dict[str, Any] = {
             "why":  "Find the next task to work on after archiving.",
         },
     ],
-    "keeli_skill_scan": lambda ctx: [
-        {
-            "tool": "keeli_log",
-            "args": {
-                "message": "@architect | Skill scan complete — review output and run `keeli skill scan --apply` via CLI to register constraints",
-                "persona": "architect",
-            },
-            "why":  "Record the scan event in the audit log (registration requires interactive CLI).",
-        },
-        {
-            "tool": "keeli_next",
-            "args": {},
-            "why":  "Resume task work after reviewing the dependency scan.",
-        },
-    ],
-    "keeli_chain": lambda ctx: [
-        {
-            "tool": "keeli_next",
-            "args": {},
-            "why":  "Check what to work on after the pipeline completed.",
-        },
-        {
-            "tool": "keeli_digest",
-            "args": {"budget": 2000},
-            "why":  "Refresh the context snapshot to reflect pipeline changes.",
-        },
-    ],
 }
+
+
+CACHE_BASE = Path.home() / ".keeli_workspace_cache"
+
+def _sha256_prefix(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _workspace_namespace_dir() -> Path:
+    root = _find_project_root()
+    name = root.name
+    namespace = f"workspace_{name}_{_sha256_prefix(str(root.resolve()))}"
+    path = CACHE_BASE / namespace
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _find_module_root(active_file_path: str, workspace_root: Path) -> Path:
+    path = Path(active_file_path)
+    if not path.is_absolute():
+        path = (workspace_root / path).resolve()
+    if not path.exists():
+        path = workspace_root
+
+    for parent in [path] + list(path.parents):
+        if parent == workspace_root or parent == workspace_root.parent:
+            break
+        for manifest in ("package.json", "pom.xml", "go.mod", "Cargo.toml", "pyproject.toml", "setup.py"):
+            if (parent / manifest).exists():
+                return parent
+    return workspace_root
+
+
+def _module_namespace_dir(active_file_path: str) -> Path:
+    workspace_dir = _workspace_namespace_dir()
+    workspace_root = _find_project_root()
+    module_root = _find_module_root(active_file_path, workspace_root)
+    namespace = f"module_{module_root.name}_{_sha256_prefix(str(module_root.resolve()))}"
+    path = workspace_dir / namespace
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_cache_dirs(active_file_path: Optional[str] = None) -> tuple[Path, Path]:
+    workspace_dir = _workspace_namespace_dir()
+    if active_file_path:
+        module_dir = _module_namespace_dir(active_file_path)
+    else:
+        module_dir = workspace_dir
+    return workspace_dir, module_dir
+
+
+def _json_load(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
+
+def _json_write(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2))
+
+
+def _write_wal_event(cache_dir: Path, event: dict[str, Any]) -> None:
+    event = {**event, "timestamp": _now_iso()}
+    wal_path = cache_dir / "telemetry.wal"
+    wal_path.parent.mkdir(parents=True, exist_ok=True)
+    with wal_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+
+def _lexicon_path(cache_dir: Path) -> Path:
+    if cache_dir.name.startswith("workspace_"):
+        return cache_dir / "shared_lexicon.json"
+    return cache_dir / "lexicon.json"
+
+
+def _load_lexicon(cache_dir: Path) -> dict[str, Any]:
+    return _json_load(_lexicon_path(cache_dir), {})
+
+
+def _save_lexicon(cache_dir: Path, data: dict[str, Any]) -> None:
+    _json_write(_lexicon_path(cache_dir), data)
+
+
+def _find_namespace_key(cache_dir: Path) -> str:
+    return cache_dir.name
+
+
+def _state_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS mcp_session_state (namespace TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+
+
+def _set_mcp_state(namespace: str, state: str) -> None:
+    db_path = _find_project_root() / "keeli_state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        _state_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO mcp_session_state(namespace, state, updated_at) VALUES (?, ?, ?)",
+            (namespace, state, _now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_mcp_state(namespace: str) -> Optional[str]:
+    db_path = _find_project_root() / "keeli_state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        _state_table(conn)
+        row = conn.execute(
+            "SELECT state FROM mcp_session_state WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def _parse_pascal_case_terms(text: str) -> list[str]:
+    multi_segment = re.findall(r"\b[A-Z][a-z]+(?:[A-Z][a-zA-Z0-9]+)+\b", text)
+    service_names = re.findall(
+        r"\b[A-Z][a-zA-Z0-9]+(?:Service|Manager|Client|Controller|Repo|Repository)\b",
+        text,
+    )
+    terms = set(multi_segment) | set(service_names)
+    stopwords = {
+        "The", "A", "An", "In", "On", "For", "With", "To", "From",
+        "And", "Or", "But", "If", "Then", "Else", "This", "That",
+        "These", "Those", "It", "Its", "By", "As", "At", "Of",
+    }
+    return [term for term in terms if term not in stopwords]
+
+
+def _resolve_term(term: str, module_dir: Path, workspace_dir: Path) -> Optional[dict[str, Any]]:
+    module_lexicon = _load_lexicon(module_dir)
+    if term in module_lexicon and not module_lexicon[term].get("tombstone"):
+        return module_lexicon[term]
+    workspace_lexicon = _load_lexicon(workspace_dir)
+    if term in workspace_lexicon and not workspace_lexicon[term].get("tombstone"):
+        return workspace_lexicon[term]
+    return None
+
+
+def _sanitize_raw_source_text(raw_source_text: str) -> str:
+    sanitized = re.sub(r"<[^>]{1,200}>", "", raw_source_text)
+    lower = sanitized.lower()
+    for marker in ("system:", "[inst]", "### instruction"):
+        if marker in lower:
+            raise ValueError("POTENTIAL_INJECTION")
+    if len(sanitized) > 4096:
+        raise ValueError("TRUNCATED")
+    return sanitized
+
+
+def _extract_workflow_entries(file_path: Path, commit_sha: str, scope: str) -> tuple[list[dict[str, Any]], int]:
+    entries: list[dict[str, Any]] = []
+    in_code = False
+    root = _find_project_root().resolve()
+    source_rel = None
+    try:
+        source_rel = str(file_path.resolve().relative_to(root))
+    except ValueError:
+        source_rel = str(file_path.resolve())
+
+    with file_path.open("r", encoding="utf-8") as handle:
+        for lineno, raw_line in enumerate(handle, start=1):
+            line = raw_line.rstrip("\n")
+            if line.strip().startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            cleaned = None
+            if line.lstrip().startswith("#"):
+                cleaned = line.lstrip("# ")
+            elif line.lstrip().startswith("-") or line.lstrip().startswith("*"):
+                cleaned = line.lstrip("-* \t")
+            if not cleaned:
+                continue
+            cleaned = cleaned.strip()
+            if not cleaned:
+                continue
+            entry = {
+                "statement": cleaned,
+                "source_file": source_rel,
+                "line_range": f"{lineno}-{lineno}",
+                "verified_by_commit": commit_sha,
+                "integrity_hash": hashlib.sha256(cleaned.encode("utf-8")).hexdigest(),
+                "scope": scope,
+            }
+            entries.append(entry)
+    overflow = 0
+    if len(entries) > 30:
+        overflow = len(entries) - 30
+        entries = entries[:30]
+    return entries, overflow
+
+
+def _workspace_map_path(module_dir: Path) -> Path:
+    return module_dir / "workspace.map"
+
+
+def _load_workspace_map(module_dir: Path) -> dict[str, Any]:
+    return _json_load(_workspace_map_path(module_dir), {})
+
+
+def _lexicon_store_path(cache_dir: Path) -> Path:
+    return _lexicon_path(cache_dir)
+
+
+def _workflow_store_path(cache_dir: Path) -> Path:
+    return cache_dir / "workflows.json"
+
+
+def _load_workflows(cache_dir: Path) -> list[dict[str, Any]]:
+    return _json_load(_workflow_store_path(cache_dir), [])
+
+
+def _save_workflows(cache_dir: Path, entries: list[dict[str, Any]]) -> None:
+    _json_write(_workflow_store_path(cache_dir), entries)
+
+
+def _normalize_active_file_path(active_file_path: str) -> Path:
+    candidate = Path(active_file_path)
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    return candidate
+
+
+def _make_namespace(active_file_path: str) -> str:
+    workspace_dir, module_dir = _resolve_cache_dirs(active_file_path)
+    return f"{workspace_dir.name}:{module_dir.name}"
+
+
+def _ensure_cache_roots(active_file_path: Optional[str] = None) -> tuple[Path, Path]:
+    workspace_dir = _workspace_namespace_dir()
+    module_dir = _module_namespace_dir(active_file_path or str(workspace_dir))
+    return workspace_dir, module_dir
+
+
+def _persist_state(active_file_path: str, state: str) -> None:
+    namespace = _make_namespace(active_file_path)
+    _set_mcp_state(namespace, state)
+
+
+def _current_state(active_file_path: str) -> Optional[str]:
+    namespace = _make_namespace(active_file_path)
+    return _get_mcp_state(namespace)
 
 
 def _with_next(text: str, tool_name: str, ctx: "dict | None" = None) -> str:
@@ -335,12 +547,6 @@ async def list_tools() -> list[Tool]:
                         "enum": ["P0", "P1", "P2"],
                         "default": "P1"
                     },
-                    "persona": {
-                        "type": "string",
-                        "description": "The persona assigned to the task.",
-                        "enum": ["architect", "developer", "security", "author"],
-                        "default": "developer"
-                    },
                     "depends_on": {
                         "type": "string",
                         "description": "Comma-separated list of task slugs this task depends on."
@@ -381,12 +587,6 @@ async def list_tools() -> list[Tool]:
                     "message": {
                         "type": "string",
                         "description": "The message to log."
-                    },
-                    "persona": {
-                        "type": "string",
-                        "description": "The persona logging the message.",
-                        "enum": ["architect", "developer", "security", "author", "system"],
-                        "default": "system"
                     }
                 },
                 "required": ["message"],
@@ -410,6 +610,40 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"],
             },
         ),
+        Tool(
+            name="keeli_get",
+            description="Get a single task by ID or slug. Returns full task details including tags, required skills, and affects.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID (e.g., 'T-0001') or slug (e.g., 'add-login-form')."
+                    }
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="keeli_search",
+            description="Full-text search across task titles and context notes. Fast alternative to keeli_find for natural language queries.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search text to match against task titles and context."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default 20, max 100).",
+                        "default": 20
+                    }
+                },
+                "required": ["query"],
+            },
+        ),
+
         Tool(
             name="keeli_history",
             description="Return all ai_log entries that mention a specific task ID or keyword.",
@@ -455,182 +689,19 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_slug"],
             },
         ),
-        Tool(
-            name="keeli_skill_scan",
-            description=(
-                "Scan project manifest files (pyproject.toml, requirements*.txt, package.json, "
-                "go.mod, Cargo.toml, pom.xml, .python-version, .nvmrc) to discover technologies "
-                "and return a structured list of detected skills. "
-                "Does NOT modify docs/skills.md — use keeli_start + keeli_log or the CLI "
-                "'keeli skill scan --apply' for interactive registration."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "scan_path": {
-                        "type": "string",
-                        "description": "Directory to scan (default: project root)."
-                    }
-                },
-            },
-        ),
-        Tool(
-            name="keeli_ensure",
-            description=(
-                "Check for an existing task matching a description, optionally create it. "
-                "This is the MCP equivalent of the CLI 'keeli ensure' command. "
-                "Arguments: title (string), yes (bool), no (bool), objective (string), priority (P0|P1|P2)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Problem/feature description."},
-                    "yes": {"type": "boolean", "description": "Auto-create if missing."},
-                    "no": {"type": "boolean", "description": "Do not create if missing."},
-                    "objective": {"type": "string", "description": "Objective text for creation."},
-                    "priority": {"type": "string", "enum": ["P0","P1","P2"], "default": "P1"},
-                },
-                "required": ["title"],
-            },
-        ),
-        Tool(
-            name="keeli_orchestrate",
-            description=(
-                "Persona handoff tool for multi-agent orchestration. "
-                "Given a task slug, returns a structured JSON payload containing: "
-                "task_id, current_status, required_persona, system_prompt_hint "
-                "(extracted from docs/personas.md), a context_snapshot of the task, "
-                "suggested_next_tool + args for the sub-agent to call, and a "
-                "blocking_reason if the task cannot proceed. "
-                "This is a READ-ONLY tool — it mutates no state. "
-                "The master agent uses this payload to spawn a scoped sub-call "
-                "(same or different LLM) with the correct persona system prompt."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_slug": {
-                        "type": "string",
-                        "description": "Slug (or prefix) of the task to generate a handoff for."
-                    }
-                },
-                "required": ["task_slug"],
-            },
-        ),
 
-        Tool(
-            name="keeli_chain",
-            description=(
-                "Execute a sequential pipeline of keeli commands. "
-                "Each step is a string in 'cmd:arg' format. "
-                "Use the sentinel 'auto' as an argument to automatically propagate "
-                "the task slug produced by the previous step. "
-                "Pass dry_run=true to preview the resolved steps without executing. "
-                "Named built-in chains: new-task, close-task, onboard."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "steps": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Ordered list of steps. Each step is 'cmd:arg' "
-                            "(e.g. 'start:My Task', 'analyze:auto', 'progress:auto'). "
-                            "Or pass ['run', '<chain-name>'] to execute a named chain."
-                        )
-                    },
-                    "vars": {
-                        "type": "object",
-                        "additionalProperties": {"type": "string"},
-                        "description": "Variable substitutions for named chains ({key} → value)."
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "description": "If true, print the resolved steps without executing.",
-                        "default": False
-                    }
-                },
-                "required": ["steps"],
-            },
-        ),
 
-        Tool(
-            name="keeli_prompts_list",
-            description="Retrieve the latest curated custom prompts with metadata.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "persona": {
-                        "type": "string",
-                        "description": "Filter by persona (architect, developer, security, author, po). Omit to see all.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of prompts to return.",
-                        "default": 10,
-                    }
-                },
-            },
-        ),
 
-        Tool(
-            name="keeli_prompts_read",
-            description="Fetch the full content of a custom prompt by slug.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "description": "The slug of the prompt to fetch (e.g., 'architect-design-principles')."
-                    }
-                },
-                "required": ["slug"],
-            },
-        ),
-        Tool(
-            name="keeli_transition_from_commit",
-            description="Evaluate commit-transition semantics and optionally apply them to active work state.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "subject": {
-                        "type": "string",
-                        "description": "Commit subject to evaluate."
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Optional commit body or trailers.",
-                        "default": ""
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "description": "Explicit task ID target for keeli:complete semantics.",
-                        "default": ""
-                    },
-                    "apply": {
-                        "type": "boolean",
-                        "description": "If true, apply transitions to active state.",
-                        "default": False
-                    }
-                },
-                "required": ["subject"],
-            },
-        ),
-        Tool(
-            name="keeli_capture_commit_state",
-            description="Capture the latest git commit and apply/evaluate commit-driven task transitions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "target_id": {
-                        "type": "string",
-                        "description": "Explicit task ID target for keeli:complete semantics.",
-                        "default": ""
-                    }
-                },
-            },
-        ),
+
+
+
+
+
+
+
+
+
+
     ]
 
 @app.call_tool()
@@ -672,20 +743,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text="No tasks available. All tasks are complete or blocked.")]
 
         content = task_path.read_text()
-        persona = _parse_task_field(content, "Persona") or "@developer"
-        persona_hint = f"Load persona rules from docs/personas.md ## {persona.lstrip('@')}"
-        
-        # Enhanced response with persona metadata
         enhanced_output = f"""Next task: {task_slug}
 
-**Persona:** {persona}
-**Hint:** {persona_hint}
-
----
-
 {content}"""
-        
-        return [TextContent(type="text", text=_with_next(enhanced_output, "keeli_next", {"slug": task_slug, "persona": persona}))]
+        return [TextContent(type="text", text=_with_next(enhanced_output, "keeli_next", {"slug": task_slug}))]
 
     elif name == "keeli_complete":
         slug = arguments.get("task_slug")
@@ -746,109 +807,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result_text = f"Marked {slug} as In Progress.\n\nTransition events:\n```json\n{json.dumps(transition_events, indent=2)}\n```"
         return [TextContent(type="text", text=_with_next(result_text, "keeli_progress", {"slug": slug}))]
 
-    elif name == "keeli_transition_from_commit":
-        subject = arguments.get("subject", "")
-        body = arguments.get("body", "")
-        target_id = (arguments.get("target_id", "") or "").strip() or None
-        apply_changes = bool(arguments.get("apply", False))
-        if not subject:
-            return [TextContent(type="text", text="Error: subject is required.")]
-
-        active_items = _active_leaf_items()
-        active = _resolve_transition_target(active_items, target_id)
-        evaluation = _evaluate_commit_transitions(subject, active["item_id"] if active else None, body, target_id)
-        conflict = _transition_conflict_reason(evaluation, active_items)
-        applied: list[str] = []
-        if apply_changes:
-            if active is None:
-                return [TextContent(type="text", text="No active task available to apply transitions.")]
-            if conflict:
-                return [TextContent(type="text", text=json.dumps({"evaluation": evaluation, "applied": [], "conflict": conflict}, indent=2))]
-            applied = _apply_commit_transitions(active, subject, body, target_id)
-
-        payload = {
-            "evaluation": evaluation,
-            "applied": applied,
-        }
-        if conflict:
-            payload["conflict"] = conflict
-        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
-
-    elif name == "keeli_capture_commit_state":
-        target_id = (arguments.get("target_id", "") or "").strip() or None
-        active_items = _active_leaf_items()
-        active = _resolve_transition_target(active_items, target_id)
-        if active is None:
-            return [TextContent(type="text", text=json.dumps({"ok": True, "message": "No active task to attach commit metadata to.", "transitions": []}, indent=2))]
-
-        try:
-            commit_hash = _git_output(["rev-parse", "HEAD"])
-            commit_subject = _git_output(["log", "-1", "--pretty=%s"])
-            commit_body = _git_output(["log", "-1", "--pretty=%b"])
-        except Exception:
-            return [TextContent(type="text", text=json.dumps({"ok": False, "error": "Unable to capture git commit metadata.", "transitions": []}, indent=2))]
-
-        evaluation = _evaluate_commit_transitions(commit_subject, active["item_id"], commit_body, target_id)
-        conflict = _transition_conflict_reason(evaluation, active_items)
-        if conflict:
-            payload = {
-                "ok": False,
-                "error": conflict,
-                "active_items": [{"item_id": row["item_id"], "slug": row["slug"], "status": row["status"]} for row in active_items],
-                "transitions": [],
-            }
-            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
-
-        details = json.dumps({
-            "commit": commit_hash,
-            "subject": commit_subject,
-            "body": commit_body,
-            "task": active["slug"],
-        })
-        commit_event_id = _db_log_event(active["item_id"], "commit", actor="mcp", details=details)
-        _append_log(f"@mcp | [audit:{commit_event_id}] Commit captured for {active['slug']}: {commit_hash[:12]} {commit_subject}", task_id=active["item_id"])
-        transitions = _apply_commit_transitions(active, commit_subject, commit_body, target_id)
-        payload = {
-            "ok": True,
-            "commit": {"hash": commit_hash, "subject": commit_subject, "body": commit_body},
-            "active_item": {"item_id": active["item_id"], "slug": active["slug"]},
-            "commit_event_id": commit_event_id,
-            "evaluation": evaluation,
-            "transitions": transitions,
-        }
-        return [TextContent(type="text", text=json.dumps(payload, indent=2))]
-
-    elif name == "keeli_ensure":
-        title = arguments.get("title")
-        yes = arguments.get("yes", False)
-        no = arguments.get("no", False)
-        objective = arguments.get("objective", "")
-        priority = arguments.get("priority", "P1")
-
-        slug = _slugify(title)
-        task_path = _resolve_task_file(tasks_dir, slug)
-        if task_path:
-            return [TextContent(type="text", text=f"✅ Found existing task: {task_path.name}")]
-        if no:
-            return [TextContent(type="text", text="ℹ️  No task created.")]
-        if not yes:
-            return [TextContent(type="text", text="Error: must supply yes or no flag for keeli_ensure.")]
-        if not objective:
-            return [TextContent(type="text", text="Error: objective required when creating task.")]
-        # create via CLI helper
-        ns = argparse.Namespace(
-            task_name=title,
-            context=None,
-            objective=objective,
-            priority=priority,
-            depends_on=None,
-            keeli=None,
-            story=None,
-            epic=None,
-            force=False,
-        )
-        cmd_start(ns)
-        return [TextContent(type="text", text=f"✅ Created task: {slug}.md")]  
     elif name == "keeli_start":
         title = arguments.get("title")
         priority = arguments.get("priority", "P1")
@@ -873,9 +831,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             timestamp=_now_iso(),
             depends_on=depends_on,
             context_note="",
-            persona=f"@{persona}",
             epic=epic,
             story=story,
+            tags="",
+            requires_skills="",
+            affects="",
             what=objective or "<!-- Be specific about the implementation work. -->",
             why="<!-- Explain the user or business impact. -->",
             acceptance="<!-- Add verification steps or test evidence here. -->",
@@ -929,8 +889,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             summary_parts.append(f"Skills: {', '.join(m['name'] for _, m in hints['skills'])}")
         if hints["adrs"]:
             summary_parts.append(f"ADRs: {', '.join(m['ref'] for _, m in hints['adrs'])}")
-        if hints["persona"]:
-            summary_parts.append(f"Suggested persona: @{hints['persona']}")
         return [TextContent(type="text", text=_with_next("\n".join(summary_parts), "keeli_analyze", {"slug": slug}))]
 
     elif name == "keeli_log":
@@ -971,6 +929,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not kw_matches:
             return [TextContent(type="text", text=f"No results for '{query}'.")]
         return [TextContent(type="text", text=_with_next(f"Keyword results for '{query}':\n{json.dumps(kw_matches, indent=2)}", "keeli_find", {}))]
+
+    elif name == "keeli_get":
+        task_id = arguments.get("task_id", "").strip()
+        if not task_id:
+            return [TextContent(type="text", text="Error: task_id is required.")]
+        
+        # Try ID lookup first, then slug
+        task_dict = kquery.query_task_by_id(task_id) or kquery.query_task_by_slug(task_id)
+        
+        if not task_dict:
+            return [TextContent(type="text", text=f"Error: Task '{task_id}' not found.")]
+        
+        result = json.dumps(task_dict, indent=2)
+        return [TextContent(type="text", text=f"Task {task_dict['item_id']}:\n{result}")]
+
+    elif name == "keeli_search":
+        query_text = arguments.get("query", "").strip()
+        limit = min(arguments.get("limit", 20), 100)  # Cap at 100
+        
+        if not query_text:
+            return [TextContent(type="text", text="Error: query is required.")]
+        
+        results = kquery.search_tasks(query_text, limit=limit)
+        
+        if not results:
+            return [TextContent(type="text", text=f"No tasks match '{query_text}'.")]
+        
+        result_json = json.dumps(results, indent=2)
+        return [TextContent(type="text", text=f"Found {len(results)} task(s) matching '{query_text}':\n{result_json}")]
 
     elif name == "keeli_history":
         task_id = arguments.get("task_id", "").strip().upper()
@@ -1076,230 +1063,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         await _mcp_log("info", f"Task archived: {slug}")
         return [TextContent(type="text", text=_with_next(f"Archived '{slug}' → archive/{task_path.name}", "keeli_archive_task", {"slug": slug}))]
-
-    elif name == "keeli_orchestrate":
-        slug = arguments.get("task_slug", "").strip()
-        if not slug:
-            return [TextContent(type="text", text="Error: task_slug is required.")]
-
-        task_path = _resolve_task_file(tasks_dir, slug)
-        if not task_path:
-            return [TextContent(type="text", text=f"Error: Task '{slug}' not found.")]
-
-        content = task_path.read_text()
-        task_id   = _parse_task_field(content, "ID") or "—"
-        status    = _parse_task_field(content, "Status") or "Backlog"
-        persona   = (_parse_task_field(content, "Persona") or "@developer").lstrip("@")
-        depends   = _parse_task_field(content, "Depends On") or ""
-
-        # Extract objective section as context snapshot
-        lines = content.splitlines()
-        snap_lines: list[str] = []
-        in_obj = False
-        for line in lines:
-            if line.startswith("## Objective"):
-                in_obj = True
-            elif line.startswith("## ") and in_obj:
-                break
-            if in_obj:
-                snap_lines.append(line)
-        context_snapshot = "\n".join(snap_lines[:30])  # cap at 30 lines
-
-        # Pull system_prompt_hint from docs/personas.md
-        personas_path = docs_dir / "personas.md"
-        system_prompt_hint = f"You are @{persona}. Execute the task strictly within your persona's scope."
-        if personas_path.exists():
-            for pline in personas_path.read_text().splitlines():
-                if pline.strip().startswith(f"- {persona}:"):
-                    desc = pline.split(":", 1)[1].strip()
-                    system_prompt_hint = (
-                        f"You are @{persona}: {desc}. "
-                        f"Operate strictly within this persona's responsibilities. "
-                        f"Use keeli tools to progress, log, and complete the task. "
-                        f"Do NOT change architecture — request it from @architect first."
-                    )
-                    break
-
-        # Determine blocking reason
-        blocking_reason = None
-        if status.lower() == "blocked":
-            blocking_reason = "Task is currently Blocked — resolve the blocker before proceeding."
-        elif status.lower() == "completed":
-            blocking_reason = "Task is already Completed."
-        elif depends:
-            # Check if any dependency is still open
-            open_deps = []
-            for dep in [d.strip() for d in depends.split(",") if d.strip() and d.strip() != "None"]:
-                dep_path = _resolve_task_file(tasks_dir, dep)
-                if dep_path:
-                    dep_content = dep_path.read_text()
-                    dep_status = _parse_task_field(dep_content, "Status") or ""
-                    if dep_status.lower() not in ("completed",):
-                        open_deps.append(dep)
-                else:
-                    # Not in active — might be archived, which is fine
-                    archive_path = _resolve_task_file(tasks_dir / "archive", dep)
-                    if not archive_path:
-                        open_deps.append(dep)  # missing entirely
-            if open_deps:
-                blocking_reason = f"Unresolved dependencies: {', '.join(open_deps)}"
-
-        # Determine suggested_next_tool based on status
-        status_lower = status.lower()
-        if blocking_reason and "blocked" in status_lower:
-            next_tool, next_args = "keeli_log", {"message": f"[{task_id}] Blocker resolved — resuming", "persona": persona}
-        elif status_lower == "backlog":
-            next_tool, next_args = "keeli_progress", {"task_slug": task_path.stem}
-        elif status_lower == "in progress":
-            next_tool, next_args = "keeli_review", {"task_slug": task_path.stem}
-        elif status_lower == "review":
-            next_tool, next_args = "keeli_complete", {"task_slug": task_path.stem}
-        else:
-            next_tool, next_args = "keeli_next", {}
-
-        handoff = {
-            "task_id": task_id,
-            "task_slug": task_path.stem,
-            "current_status": status,
-            "required_persona": f"@{persona}",
-            "system_prompt_hint": system_prompt_hint,
-            "context_snapshot": context_snapshot,
-            "suggested_next_tool": next_tool,
-            "suggested_next_args": next_args,
-            "blocking_reason": blocking_reason,
-        }
-        await _mcp_log("info", f"[orchestrate] Handoff generated for {task_id} → @{persona} | next: {next_tool}")
-        return [TextContent(type="text", text=_with_next(json.dumps(handoff, indent=2), "keeli_orchestrate", {"slug": task_path.stem}))]
-
-    elif name == "keeli_skill_scan":
-        scan_path = arguments.get("scan_path")
-        target = Path(scan_path) if scan_path else root
-        await _mcp_log("info", f"[skill_scan] Scanning {target} for manifest files…")
-        found = _scan_manifests(target)
-        if not found:
-            return [TextContent(
-                type="text",
-                text=(
-                    "No recognised manifest files found in the project root.\n"
-                    "Supported: pyproject.toml  requirements*.txt  package.json\n"
-                    "           go.mod  Cargo.toml  pom.xml  .python-version  .nvmrc"
-                )
-            )]
-        rows = [
-            {"name": s.name, "type": s.skill_type, "version": s.version, "source": s.source_file}
-            for s in found
-        ]
-        summary = f"{len(rows)} technology/package(s) detected:\n" + json.dumps(rows, indent=2)
-        await _mcp_log("info", f"[skill_scan] Done: {len(rows)} item(s) found")
-        return [TextContent(type="text", text=_with_next(summary, "keeli_skill_scan", {}))]
-
-    elif name == "keeli_chain":
-        steps_raw: list[str] = arguments.get("steps", [])
-        dry_run: bool        = arguments.get("dry_run", False)
-        vars_dict: dict      = arguments.get("vars", {})
-
-        if not steps_raw:
-            return [TextContent(
-                type="text",
-                text=(
-                    "Error: 'steps' is required.\n"
-                    "Example: {\"steps\": [\"start:My Task\", \"analyze:auto\", \"progress:auto\"]}\n"
-                    f"Named chains: {', '.join(BUILTIN_CHAINS)}"
-                )
-            )]
-
-        # Handle 'run <chain-name>' shorthand
-        if steps_raw[0].strip() == "run":
-            chain_name = steps_raw[1] if len(steps_raw) > 1 else None
-            if not chain_name:
-                return [TextContent(type="text", text=f"Error: chain name required. Available: {', '.join(BUILTIN_CHAINS)}")]
-            if chain_name not in BUILTIN_CHAINS:
-                return [TextContent(type="text", text=f"Error: unknown chain '{chain_name}'. Available: {', '.join(BUILTIN_CHAINS)}")]
-            defn = BUILTIN_CHAINS[chain_name]
-            step_strs = [
-                f"{s['cmd']}:{' '.join(s['args'])}" if s["args"] else s["cmd"]
-                for s in defn["steps"]
-            ]
-            for k, v in vars_dict.items():
-                step_strs = [s.replace(f"{{{k}}}", v) for s in step_strs]
-            steps_raw = step_strs
-
-        import io, contextlib as _cl
-        buf = io.StringIO()
-        await _mcp_log("info", f"[chain] Starting {len(steps_raw)}-step pipeline (dry_run={dry_run})")
-        try:
-            with _cl.redirect_stdout(buf):
-                _run_chain_inline(steps_raw, dry_run=dry_run, vars_=vars_dict)
-        except Exception as exc:
-            return [TextContent(type="text", text=f"Chain error: {exc}")]
-        output = buf.getvalue()
-        await _mcp_log("info", f"[chain] Pipeline complete")
-        return [TextContent(type="text", text=_with_next(output or "Chain executed (no output).", "keeli_chain", {}))]
-
-    elif name == "keeli_prompts_list":
-        from keeli.main import _load_all_prompts, _filter_prompts_by_persona
-        
-        persona_filter = arguments.get("persona")
-        limit = arguments.get("limit", 10)
-        
-        prompts = _load_all_prompts()
-        
-        if persona_filter:
-            prompts = _filter_prompts_by_persona(prompts, persona_filter)
-        
-        # Sort by priority and creation date, limit results
-        sorted_prompts = sorted(
-            prompts.items(),
-            key=lambda x: (
-                {"high": 0, "medium": 1, "low": 2}.get(x[1]["metadata"].get("priority", "low"), 3),
-                x[1]["metadata"].get("created", ""),
-            )
-        )
-        
-        limited = dict(sorted_prompts[:limit])
-        
-        if not limited:
-            return [TextContent(type="text", text="No custom prompts found.")]
-        
-        output = f"Found {len(limited)} custom prompt(s):\n\n"
-        for slug, data in limited.items():
-            meta = data["metadata"]
-            output += f"• **{slug}** (persona: {meta.get('persona', '?')}, applies: {meta.get('applies_to', '?')})\n"
-        
-        await _mcp_log("info", f"Listed {len(limited)} prompt(s)")
-        return [TextContent(type="text", text=_with_next(output, "keeli_prompts_list", {}))]
-
-    elif name == "keeli_prompts_read":
-        from keeli.main import _load_all_prompts
-        
-        slug = arguments.get("slug")
-        if not slug:
-            return [TextContent(type="text", text="Error: slug is required.")]
-        
-        prompts = _load_all_prompts()
-        
-        if slug not in prompts:
-            return [TextContent(type="text", text=f"Error: Prompt '{slug}' not found.")]
-        
-        data = prompts[slug]
-        meta = data["metadata"]
-        body = data["body"]
-        
-        output = f"""# Prompt: {slug}
-
-**Persona:** {meta.get('persona', '?')}
-**Applies to:** {meta.get('applies_to', '?')}
-**Priority:** {meta.get('priority', '?')}
-**Created:** {meta.get('created', '?')}
-**Location:** {data['path']}
-
-## Content
-
-{body}
-"""
-        
-        await _mcp_log("info", f"Read prompt: {slug}")
-        return [TextContent(type="text", text=_with_next(output, "keeli_prompts_read", {"slug": slug}))]
 
     else:
         return [TextContent(type="text", text=f"Error: Unknown tool {name}")]

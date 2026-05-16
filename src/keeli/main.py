@@ -44,8 +44,6 @@ from keeli.templates import (
     EPIC_TEMPLATE,
     FEATURE_TEMPLATE,
     GITIGNORE_CONTENT,
-    PERSONA_PROMPT_TEMPLATES,
-    PERSONAS_MD,
     PROJECT_MD,
     SCHEMA_VERSION,
     SKILLS_MD,
@@ -56,6 +54,8 @@ from keeli.templates import (
     TASK_TEMPLATE,
     get_flavor_instructions,
 )
+from keeli.schema import init_state_db as _schema_init_db, CURRENT_SCHEMA_VERSION
+from keeli import tags as tag_utils
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -695,59 +695,9 @@ def _connect_state_db() -> sqlite3.Connection:
 
 
 def _init_state_db() -> None:
-    """Create the SQLite state database and schema if missing."""
-    with contextlib.closing(_connect_state_db()) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS state_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS work_items (
-                item_id TEXT PRIMARY KEY,
-                item_type TEXT NOT NULL,
-                slug TEXT NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                status TEXT NOT NULL,
-                priority TEXT NOT NULL,
-                epic_slug TEXT,
-                story_slug TEXT,
-                persona TEXT,
-                context_note TEXT,
-                depends_on TEXT,
-                source_path TEXT,
-                created_at TEXT,
-                completed_at TEXT,
-                archived INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_work_items_status ON work_items(status);
-            CREATE INDEX IF NOT EXISTS idx_work_items_priority ON work_items(priority);
-            CREATE INDEX IF NOT EXISTS idx_work_items_epic_slug ON work_items(epic_slug);
-            CREATE INDEX IF NOT EXISTS idx_work_items_story_slug ON work_items(story_slug);
-            CREATE INDEX IF NOT EXISTS idx_work_items_archived ON work_items(archived);
-
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id TEXT,
-                actor TEXT,
-                action TEXT NOT NULL,
-                details TEXT,
-                created_at TEXT NOT NULL
-            );
-            """
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
-            ("schema_version", SCHEMA_VERSION),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
-            ("storage_mode", "sqlite"),
-        )
-        conn.commit()
+    """Create the SQLite state database and schema if missing, applying migrations."""
+    db_path = _state_db_path()
+    _schema_init_db(db_path)
 
 
 def _item_type_from_path(path: Path) -> str:
@@ -790,6 +740,9 @@ def _db_upsert_work_item(
     epic_slug: str | None,
     story_slug: str | None,
     persona: str | None,
+    tags: list[str] | None = None,
+    requires_skills: list[str] | None = None,
+    affects: list[str] | None = None,
     context_note: str | None,
     depends_on: str | None,
     source_path: str,
@@ -797,17 +750,29 @@ def _db_upsert_work_item(
     completed_at: str | None,
     archived: bool,
 ) -> None:
-    """Insert or update a work item in SQLite."""
+    """
+    Insert or update a work item in SQLite.
+    
+    Uses optimistic locking via version column. If concurrent update detected,
+    the latest write wins (simple conflict resolution for MVP).
+    """
     _init_state_db()
     now = _now_iso()
+    
+    # Serialize arrays to JSON
+    tags_json = tag_utils.serialize_tags(tags or [])
+    skills_json = tag_utils.serialize_tags(requires_skills or [])
+    affects_json = tag_utils.serialize_tags(affects or [])
+    
     with contextlib.closing(_connect_state_db()) as conn:
         conn.execute(
             """
             INSERT INTO work_items (
                 item_id, item_type, slug, title, status, priority,
-                epic_slug, story_slug, persona, context_note, depends_on,
-                source_path, created_at, completed_at, archived, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                epic_slug, story_slug, persona, tags, requires_skills, affects,
+                context_note, depends_on,
+                source_path, created_at, completed_at, archived, updated_at, version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 slug = excluded.slug,
@@ -817,13 +782,17 @@ def _db_upsert_work_item(
                 epic_slug = excluded.epic_slug,
                 story_slug = excluded.story_slug,
                 persona = excluded.persona,
+                tags = excluded.tags,
+                requires_skills = excluded.requires_skills,
+                affects = excluded.affects,
                 context_note = excluded.context_note,
                 depends_on = excluded.depends_on,
                 source_path = excluded.source_path,
                 created_at = COALESCE(work_items.created_at, excluded.created_at),
                 completed_at = excluded.completed_at,
                 archived = excluded.archived,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                version = work_items.version + 1
             """,
             (
                 item_id,
@@ -835,6 +804,9 @@ def _db_upsert_work_item(
                 epic_slug,
                 story_slug,
                 persona,
+                tags_json,
+                skills_json,
+                affects_json,
                 context_note,
                 depends_on,
                 source_path,
@@ -897,6 +869,24 @@ def _db_sync_task_file(task_file: Path) -> None:
     item_id = _parse_task_field(text, "ID")
     if not item_id:
         return
+    
+    # Parse tags from markdown (comma-separated list)
+    tags_raw = _parse_task_field(text, "Tags")
+    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+    
+    # Parse required skills
+    skills_raw = _parse_task_field(text, "Requires Skills")
+    skills = [s.strip() for s in skills_raw.split(",") if s.strip()] if skills_raw else []
+    
+    # Parse affects
+    affects_raw = _parse_task_field(text, "Affects")
+    affects = [a.strip() for a in affects_raw.split(",") if a.strip()] if affects_raw else []
+    
+    # If tags empty but persona set, migrate persona to tags
+    persona = _normalize_field(_parse_task_field(text, "Persona")) or None
+    if not tags and persona:
+        tags = tag_utils.migrate_persona_to_tags(persona)
+    
     _db_upsert_work_item(
         item_id=item_id,
         item_type=_item_type_from_path(task_file),
@@ -906,7 +896,10 @@ def _db_sync_task_file(task_file: Path) -> None:
         priority=_parse_task_field(text, "Priority") or "P1",
         epic_slug=_normalize_field(_parse_task_field(text, "Epic")),
         story_slug=_normalize_field(_parse_task_field(text, "Story")),
-        persona=_normalize_field(_parse_task_field(text, "Persona")) or None,
+        persona=persona,  # Keep for backward compat
+        tags=tags,
+        requires_skills=skills,
+        affects=affects,
         context_note=_normalize_field(_parse_task_field(text, "Context")),
         depends_on=_normalize_field(_parse_task_field(text, "Depends On")),
         source_path=str(task_file),
@@ -1569,23 +1562,6 @@ def _inject_skills_into_instructions(skills: list[tuple[str, str, str, str]]) ->
     instr.write_text(f"{before}{_SKILLS_START}\n{block}\n{_SKILLS_END}{after}")
 
 
-def _write_persona_prompts(*, force: bool = False) -> int:
-    """Write slash-activatable persona prompts to .github/prompts/.
-
-    Returns the number of prompt files created/overwritten in this run.
-    """
-    prompts_dir = Path(".github/prompts")
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-    for persona, content in PERSONA_PROMPT_TEMPLATES.items():
-        path = prompts_dir / f"{persona}.prompt.md"
-        existed = path.exists()
-        if existed and not force:
-            continue
-        path.write_text(content)
-        print(f"  ✅ {'Overwrote' if existed else 'Created'} {path}")
-        written += 1
-    return written
 
 
 # ── Commands ───────────────────────────────────────────────────────────────
@@ -1597,7 +1573,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     try:
         # Directories
-        for d in [Path(".github"), Path(".github/prompts"), Path("docs"), Path("docs/tasks"), Path("docs/requirements")]:
+        for d in [Path(".github"), Path("docs"), Path("docs/tasks"), Path("docs/requirements")]:
             d.mkdir(parents=True, exist_ok=True)
 
         # .gitkeep for empty dirs (so Git tracks them)
@@ -1612,8 +1588,6 @@ def cmd_init(args: argparse.Namespace) -> None:
         _write_file(Path("docs/decision.md"), DECISION_MD, force=force)
         _write_file(Path("docs/ai_log.md"), AI_LOG_MD, force=force)
         _write_file(Path("docs/skills.md"), SKILLS_MD.format(version=SCHEMA_VERSION), force=force)
-        _write_file(Path("docs/personas.md"), PERSONAS_MD, force=force)
-        persona_prompt_count = _write_persona_prompts(force=force)
         _init_state_db()
         _db_sync_all_task_files()
         hooks_installed = _install_git_hooks(force=force)
@@ -1643,12 +1617,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         print(f"   State database ready: {_STATE_DB_FILENAME}")
         if hooks_installed:
             print("   Git hooks installed: .git/hooks/pre-commit, .git/hooks/post-commit")
-        if persona_prompt_count:
-            print(f"   Persona prompts ready: .github/prompts/ ({persona_prompt_count} file(s))")
         if args.ai:
             print(f"   Flavor-specific instructions created for: {', '.join(args.ai)}")
         print("   Copilot is now aware of Keeli. Run `keeli resume --brief` to verify context.")
-        print("   Persona activation: use /architect, /po, /developer, /qa, /security, /author")
         print("   Suggested first steps:")
         print("     1. Fill in docs/project.md with your project context")
         print("     2. keeli stack                    # pick your tech stack preset interactively")
@@ -1693,6 +1664,28 @@ def cmd_start(args: argparse.Namespace) -> None:
     depends_on = getattr(args, "depends_on", None) or "None"
     epic = getattr(args, "epic", None) or "None"
     story = getattr(args, "story", None) or "None"
+    
+    # Process tags: accept explicit tags or infer from content
+    tags_arg = getattr(args, "tags", None)
+    if tags_arg:
+        tags = [t.strip() for t in tags_arg.split(",")]
+    else:
+        # Auto-infer tags from title and objective
+        tags = tag_utils.infer_tags_from_content(args.task_name, objective_text or "")
+        # If persona provided but no tags, add persona tag
+        if not tags and persona:
+            tags = tag_utils.migrate_persona_to_tags(persona)
+    
+    # Process required skills: explicit or auto-suggest from tags
+    skills_arg = getattr(args, "requires_skills", None)
+    if skills_arg:
+        requires_skills = [s.strip() for s in skills_arg.split(",")]
+    else:
+        requires_skills = tag_utils.suggest_required_skills(tags)
+    
+    # Process affects
+    affects_arg = getattr(args, "affects", None)
+    affects = [a.strip() for a in affects_arg.split(",")] if affects_arg else []
 
     task_id = _parse_task_field(existing_text, "ID") if existing_text else ""
     if not task_id:
@@ -1710,7 +1703,9 @@ def cmd_start(args: argparse.Namespace) -> None:
         depends_on=depends_on,
         epic=epic,
         story=story,
-        persona=f"@{persona}",
+        tags=", ".join(tags) if tags else "—",
+        requires_skills=", ".join(requires_skills) if requires_skills else "—",
+        affects=", ".join(affects) if affects else "—",
         what=objective_text or "<!-- Be specific about the implementation work. -->",
         why="<!-- Explain the user or business impact. -->",
         acceptance="<!-- Add verification steps or test evidence here. -->",
@@ -1720,6 +1715,10 @@ def cmd_start(args: argparse.Namespace) -> None:
     task_file.write_text(content)
     _db_sync_task_file(task_file)
     print(f"✅ Created task: {task_file} [{task_id}]")
+    if tags:
+        print(f"   Tags: {', '.join(tags)}")
+    if requires_skills:
+        print(f"   Requires skills: {', '.join(requires_skills)}")
 
     # Auto-log the event
     _append_log(f"@{persona} | Task created: {args.task_name} → {task_file}", task_id=task_id)
@@ -1907,7 +1906,9 @@ def _ensure_validate_stub_task() -> str:
             depends_on="None",
             epic="None",
             story="None",
-            persona="@developer",
+            tags="—",
+            requires_skills="—",
+            affects="—",
             what="Investigate and reconcile untracked ongoing work.",
             why="Validation found pending leaf work without an active task.",
             acceptance="Validation passes with one active task; replace this stub with a real task.",
@@ -2795,7 +2796,7 @@ def cmd_skill(args: argparse.Namespace) -> None:
             scope = f"@{p}" if p else "global"
             print(f"\n  Skill:       {n}")
             print(f"  Type:        {t}")
-            print(f"  Persona:     {scope}")
+            print(f"  Profile:     {scope}")
             print(f"  Constraint:  {c or '(none \u2014 recommend adding one for LLM clarity)'}")
 
     elif sub == "add":
@@ -3091,94 +3092,6 @@ def cmd_stack(args: argparse.Namespace) -> None:
     else:
         print(f"\n  No new skills added ({skipped_existing} already registered).")
 
-
-def cmd_persona(args: argparse.Namespace) -> None:
-    """Manage project personas (add / list / remove)."""
-    if not Path("docs").exists():
-        print("\u274c docs/ not found. Run `keeli init` first.")
-        return
-
-    sub = args.persona_action
-
-    if sub == "list":
-        personas = _load_personas()
-        print(f"\n  {'Slug':<16} Source")
-        print("  " + "-" * 40)
-        path = Path("docs/personas.md")
-        for p in personas:
-            src = "built-in" if p in DEFAULT_PERSONAS else "custom"
-            if path.exists() and f"## {p}" in path.read_text():
-                src = "docs/personas.md"
-            print(f"  {p:<16} {src}")
-        print(f"\n  {len(personas)} persona(s) registered.")
-
-    elif sub == "add":
-        slug = getattr(args, "persona_slug", None) or _prompt("Persona slug (e.g. qa, devops)")
-        if not slug:
-            print("\u26a0\ufe0f  Persona slug is required.")
-            return
-        slug = re.sub(r"[^a-z0-9-]", "", slug.strip().lower())
-        existing = _load_personas()
-        if slug in existing:
-            print(f"\u26a0\ufe0f  Persona '{slug}' already exists.")
-            return
-
-        description = _prompt(
-            f"Describe @{slug}'s mindset in one sentence",
-            default=f"{slug.title()} specialist",
-        )
-
-        print(f"\nWhat skills does @{slug} need?")
-        print("  Enter one skill per prompt, or paste a comma-separated list.")
-        print("  Press Enter with no input to finish.\n")
-        skills: list[str] = []
-        while True:
-            entry = input("  Skill (or comma list, blank to finish): ").strip()
-            if not entry:
-                break
-            for item in entry.split(","):
-                item = item.strip()
-                if item:
-                    skills.append(item)
-        if not skills:
-            print("  (no skills added — you can edit docs/personas.md to add them later)")
-
-        must_not = _prompt(
-            f"What should @{slug} NEVER do? (comma-separated, blank to skip)",
-            default="",
-        )
-
-        _write_persona_block(slug, description, skills, must_not)
-        print(f"\n\u2705 Persona '@{slug}' added to docs/personas.md")
-        _append_log(f"@architect | Persona added: {slug} | skills: {', '.join(skills) or 'none'}")
-
-    elif sub == "remove":
-        slug = getattr(args, "persona_slug", None) or _prompt("Persona slug to remove")
-        if not slug:
-            print("\u26a0\ufe0f  Persona slug is required.")
-            return
-        if slug in DEFAULT_PERSONAS:
-            confirm = _prompt(f"'{slug}' is a built-in persona. Remove anyway? (yes/no)", default="no")
-            if confirm.lower() not in ("yes", "y"):
-                print("Aborted.")
-                return
-        path = Path("docs/personas.md")
-        if not path.exists():
-            print("\u26a0\ufe0f  docs/personas.md not found.")
-            return
-        content = path.read_text()
-        # Remove the ## slug block up to the next ## or end of file
-        pattern = rf"\n## {re.escape(slug)}\n.*?(?=\n## |\Z)"
-        new_content = re.sub(pattern, "", content, flags=re.DOTALL).rstrip() + "\n"
-        if new_content == content:
-            print(f"\u26a0\ufe0f  Persona '{slug}' not found in docs/personas.md.")
-            return
-        path.write_text(new_content)
-        print(f"\u2705 Persona '@{slug}' removed from docs/personas.md.")
-        _append_log(f"@architect | Persona removed: {slug}")
-
-    else:
-        print("Usage: keeli persona <add|list|remove>")
 
 
 def cmd_story(args: argparse.Namespace) -> None:
@@ -3531,8 +3444,6 @@ def cmd_next(args: argparse.Namespace) -> None:
                     if hints["adrs"]:
                         adr_str = ", ".join(m["ref"] for _, m in hints["adrs"])
                         print(f"  ADRs:    {adr_str}")
-                    if hints["persona"]:
-                        print(f"  Persona: @{hints['persona']}")
                     print("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
             except Exception:
                 pass  # never let analysis errors break `keeli next`
@@ -3885,7 +3796,6 @@ def cmd_status(args: argparse.Namespace) -> None:
         Path("docs/decision.md"),
         Path("docs/ai_log.md"),
         Path("docs/skills.md"),
-        Path("docs/personas.md"),
         Path("docs/tasks"),
         Path("docs/requirements"),
         Path(_STATE_DB_FILENAME),
@@ -4122,8 +4032,7 @@ def _format_hints_block(hints: dict) -> str:
         lines.append("### Relevant Skills")
         for _s, meta in hints["skills"]:
             c_text = f": {meta['constraint']}" if meta.get("constraint") else ""
-            p_tag  = f" (@{meta['persona']})"  if meta.get("persona")    else ""
-            lines.append(f'- **`{meta["name"]}`**{p_tag}{c_text}')
+            lines.append(f'- **`{meta["name"]}`**{c_text}')
     else:
         lines.append("_No skill matches \u2014 run `keeli stack` to populate skills._")
     lines.append("")
@@ -4133,10 +4042,6 @@ def _format_hints_block(hints: dict) -> str:
             lines.append(f"- {meta['ref']}")
     else:
         lines.append("_No ADR matches found._")
-    if hints["persona"]:
-        lines.append("")
-        lines.append("### Suggested Persona")
-        lines.append(f"- @{hints['persona']}")
     lines.append(_HINTS_MARKER_END)
     return "\n".join(lines)
 
@@ -4591,8 +4496,6 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     task_path.write_text(new_text)
     print(f"\u2705 Hints injected \u2192 {task_path}  [engine: {engine}]")
     summary = f"   Skills: {len(hints['skills'])}  ADRs: {len(hints['adrs'])}"
-    if hints["persona"]:
-        summary += f"  Persona: @{hints['persona']}"
     print(summary)
 
 
@@ -4835,15 +4738,8 @@ def cmd_prompt(args: argparse.Namespace) -> None:
         cmd_prompt_show(args)
     elif action == "remove":
         cmd_prompt_remove(args)
-    elif action == "bootstrap-personas":
-        written = _write_persona_prompts(force=getattr(args, "force", False))
-        if written:
-            print("✅ Persona prompt files synced to .github/prompts/")
-            print("   Use /architect, /po, /developer, /qa, /security, or /author in chat.")
-        else:
-            print("ℹ️  Persona prompt files already up to date.")
     else:
-        print("Usage: keeli prompt {add|apply|list|show|remove|bootstrap-personas}")
+        print("Usage: keeli prompt {add|apply|list|show|remove}")
 
 
 def _parse_prompt_vars(raw_vars: list[str] | None) -> dict[str, str]:
@@ -4958,7 +4854,7 @@ def cmd_prompt_list(args: argparse.Namespace) -> None:
         location = "user" if "docs/prompts" in str(data["path"]) else "internal"
         
         print(f"  • {slug}")
-        print(f"    Persona: {persona} | Applies: {applies_to} | Priority: {priority}")
+        print(f"    Profile: {persona} | Applies: {applies_to} | Priority: {priority}")
         print(f"    Created: {created} | Location: {location}")
         print()
 
@@ -4979,7 +4875,7 @@ def cmd_prompt_show(args: argparse.Namespace) -> None:
     print(f"\n{'='*60}")
     print(f"Prompt: {slug}")
     print(f"{'='*60}")
-    print(f"Persona:    {meta.get('persona', '?')}")
+    print(f"Profile:    {meta.get('persona', '?')}")
     print(f"Applies to: {meta.get('applies_to', '?')}")
     print(f"Priority:   {meta.get('priority', '?')}")
     print(f"Created:    {meta.get('created', '?')}")
@@ -5049,6 +4945,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("-e", "--epic", help="Associate this task with an epic slug.")
     p_start.add_argument("--story", help="Associate this task with a story slug.")
     p_start.add_argument("-k", "--keeli", choices=personas, default="architect", metavar="PERSONA", help=f"Persona to attribute task creation to ({'/'.join(personas)}). Default: architect.")
+    p_start.add_argument("-t", "--tags", help="Comma-separated tags (e.g., 'security:auth,type:implementation'). Auto-inferred if omitted.")
+    p_start.add_argument("-s", "--requires-skills", help="Comma-separated skills required (e.g., 'security,testing'). Auto-suggested if omitted.")
+    p_start.add_argument("-a", "--affects", help="Comma-separated components/areas affected (e.g., 'api,database,frontend').")
     p_start.add_argument("-f", "--force", action="store_true", help="Overwrite an existing task file.")
 
     # complete
@@ -5247,17 +5146,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_stack_apply.add_argument("preset_name", help="Preset name or alias (e.g. python-fastapi, java, react).")
     p_stack_apply.add_argument("-y", "--yes", action="store_true", help="Accept all suggested constraints without prompting.")
 
-    # persona
-    p_persona = sub.add_parser("persona", help="Manage personas (add / list / remove).")
-    persona_sub = p_persona.add_subparsers(dest="persona_action", help="Persona action")
-    # persona add
-    p_persona_add = persona_sub.add_parser("add", help="Add a new persona interactively.")
-    p_persona_add.add_argument("persona_slug", nargs="?", default=None, help="Persona slug. Prompted if omitted.")
-    # persona list
-    persona_sub.add_parser("list", help="List all registered personas.")
-    # persona remove
-    p_persona_rm = persona_sub.add_parser("remove", help="Remove a persona.")
-    p_persona_rm.add_argument("persona_slug", nargs="?", default=None, help="Persona slug to remove. Prompted if omitted.")
 
     # list
     p_list = sub.add_parser("list", help="List all tasks with status and priority.")
@@ -5363,12 +5251,6 @@ def build_parser() -> argparse.ArgumentParser:
     # prompt list
     prompt_sub.add_parser("list", help="List all custom prompts with metadata.")
 
-    # prompt bootstrap-personas
-    p_prompt_bootstrap = prompt_sub.add_parser(
-        "bootstrap-personas",
-        help="Generate slash-activatable persona prompt files in .github/prompts/.",
-    )
-    p_prompt_bootstrap.add_argument("-f", "--force", action="store_true", help="Overwrite existing persona prompt files.")
     
     # prompt show
     p_prompt_show = prompt_sub.add_parser("show", help="Show the full content of a custom prompt.")
@@ -5708,7 +5590,6 @@ def main() -> None:
         "ensure": cmd_ensure,
         "skill": cmd_skill,
         "stack": cmd_stack,
-        "persona": cmd_persona,
         "analyze": cmd_analyze,
         "find": cmd_find,
         "history": cmd_history,
