@@ -144,7 +144,7 @@ class TestEpicStoryTask:
 
         task = initialized_dir / "docs" / "tasks" / "create-sqlite-schema.md"
         text = task.read_text()
-        assert "**Persona:** @architect" in text
+        assert "**Persona:**" not in text
         assert "Design state database schema" in text
 
         db_path = initialized_dir / "keeli_state.db"
@@ -153,7 +153,7 @@ class TestEpicStoryTask:
             "SELECT persona, priority, item_type FROM work_items WHERE slug = ?",
             ("create-sqlite-schema",),
         )
-        assert row["persona"] == "@architect"
+        assert row["persona"] in (None, "")
         assert row["priority"] == "P0"
         assert row["item_type"] == "task"
 
@@ -517,21 +517,13 @@ class TestListingAndStatus:
 
 
 class TestCustomPrompts:
-    def test_init_creates_persona_slash_prompt_files(self, initialized_dir):
+    def test_init_does_not_create_persona_prompt_files(self, initialized_dir):
         prompts_dir = initialized_dir / ".github" / "prompts"
-        assert (prompts_dir / "architect.prompt.md").exists()
-        assert (prompts_dir / "po.prompt.md").exists()
-        assert (prompts_dir / "developer.prompt.md").exists()
+        assert not prompts_dir.exists() or not any(prompts_dir.iterdir())
 
-    def test_prompt_bootstrap_personas_force_regenerates_files(self, initialized_dir):
-        target = initialized_dir / ".github" / "prompts" / "architect.prompt.md"
-        target.write_text("marker")
-
-        with patch("sys.argv", ["keeli", "prompt", "bootstrap-personas", "--force"]):
+    def test_prompt_bootstrap_personas_is_unrecognized(self, initialized_dir):
+        with patch("sys.argv", ["keeli", "prompt", "bootstrap-personas", "--force"]), pytest.raises(SystemExit):
             main()
-
-        content = target.read_text()
-        assert "Activate Architect mode" in content
 
     def test_prompt_apply_renders_and_writes_output_file(self, initialized_dir):
         src = initialized_dir / "trello-template.md"
@@ -636,7 +628,7 @@ class TestValidateTaskState:
 
     def test_fails_on_pii_in_scanned_file(self, initialized_dir):
         sample = initialized_dir / "sample.txt"
-        sample.write_text("contact me at test@example.com")
+        sample.write_text("contact me at secret@examplecorp.com")
 
         with pytest.raises(SystemExit) as exc:
             with patch("sys.argv", ["keeli", "validate-task-state", "--paths", str(sample)]):

@@ -295,3 +295,39 @@ env/
 *.egg-info/
 build/
 dist/
+
+# Keeli
+*.pyc
+__pycache__/
+.env
+venv/
+env/
+.venv/
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# Keeli
+*.pyc
+__pycache__/
+.env
+venv/
+env/
+.venv/
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# Keeli
+*.pyc
+__pycache__/
+.env
+venv/
+env/
+.venv/
+.eggs/
+*.egg-info/
+build/
+dist/

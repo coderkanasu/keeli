@@ -1,4 +1,4 @@
-# Decision Log  (Keeli Framework v0.4.0)
+# Decision Log  (Keeli Framework v2.0.0)
 
 Format: Record significant decisions with rationale and alternatives.
 

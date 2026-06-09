@@ -1,4 +1,4 @@
-# Keeli Skills Registry  (Keeli Framework v0.4.0)
+# Keeli Skills Registry  (Keeli Framework v2.0.0)
 
 Managed by `keeli skill` and `keeli stack`. Track project-specific tech decisions.
 

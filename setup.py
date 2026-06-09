@@ -13,7 +13,7 @@ def _externalized_version() -> str:
 setup(
     name="keeli",
     version=_externalized_version(),
-    description="Keeli CLI — Enforce a Five-Persona Architecture for AI Agents.",
+    description="Keeli CLI — Host-local MCP tool and structured grounding framework for AI-assisted workflows.",
     license="MIT",
     packages=find_packages(where="src"),
     package_dir={"": "src"},

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_DEFAULT_VERSION = "0.4.1"
+__DEFAULT_VERSION = "2.0.0"
 _VERSION_FILE = "VERSION"
 _APPEND_ENV = "KEELI_VERSION_APPEND"
 
@@ -22,8 +22,8 @@ def get_version() -> str:
     """Return project version from VERSION file with optional append suffix.
 
     Set KEELI_VERSION_APPEND to append arbitrary increment strings, e.g.:
-    - KEELI_VERSION_APPEND=.dev1 -> 0.4.1.dev1
-    - KEELI_VERSION_APPEND=+build.7 -> 0.4.1+build.7
+    - KEELI_VERSION_APPEND=.dev1 -> 2.0.0.dev1
+    - KEELI_VERSION_APPEND=+build.7 -> 2.0.0+build.7
     """
     base = _read_base_version()
     append = os.getenv(_APPEND_ENV, "").strip()
