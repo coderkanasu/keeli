@@ -15,7 +15,7 @@ def _read_base_version() -> str:
         raw = version_file.read_text().strip()
         if raw:
             return raw
-    return _DEFAULT_VERSION
+    return __DEFAULT_VERSION
 
 
 def get_version() -> str:

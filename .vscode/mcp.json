@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "keeli": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "/Users/spatil/Documents/persona-cli/src/keeli/mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+}
