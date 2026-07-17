@@ -10,17 +10,18 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     
-    # Enable WAL mode for better concurrency
+    # Enable WAL mode for better concurrency and set busy timeout
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     
-    # Index table (rebuildable from files)
+    # Task table (rebuildable from files)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS "index" (
+        CREATE TABLE IF NOT EXISTS task_index (
             id TEXT PRIMARY KEY,          -- T-0001
             slug TEXT NOT NULL,            -- fix-auth
             title TEXT NOT NULL,
             status TEXT NOT NULL,          -- backlog, active, review, blocked, archive
-            priority TEXT,                 -- p0, p1, p2
+            priority TEXT,                 -- P0, P1, P2
             created TEXT,                  -- ISO timestamp
             tags TEXT,                     -- comma-separated: "security:auth,type:bugfix"
             path TEXT NOT NULL,            -- docs/tasks/active/T-0001-fix-auth.md

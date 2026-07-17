@@ -2,17 +2,17 @@
 Keeli v4.0 Markdown templates.
 """
 
-TASK_TEMPLATE = """# {task_id}: {title}
+TASK_TEMPLATE = """# ${task_id}: ${title}
 
-**Status:** {status}
-**Priority:** {priority}
-**Created:** {timestamp}
+**Status:** ${status}
+**Priority:** ${priority}
+**Created:** ${timestamp}
 **Completed:** —
-**Depends On:** {depends_on}
-**Tags:** {tags}
+**Depends On:** ${depends_on}
+**Tags:** ${tags}
 
 ## Description
-{description}
+${description}
 
 ## Acceptance Criteria
 - [ ] Criterion 1

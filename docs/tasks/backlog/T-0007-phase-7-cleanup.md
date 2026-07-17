@@ -1,14 +1,14 @@
-# T-0009: Phase 6 Integration Refinement
+# T-0007: Phase 7: Cleanup
 
-**Status:** Active
-**Priority:** P0
-**Created:** 2026-07-17T02:39:21Z
+**Status:** Backlog
+**Priority:** P2
+**Created:** 2026-07-17T00:05:03Z
 **Completed:** —
 **Depends On:** —
 **Tags:** —
 
 ## Description
-Address identified UX and logic gaps in Phase 6 Dashboard Integration.
+Delete dead code (ml_conviction.py, options_engine.py, api.py) and update imports.
 
 ## Acceptance Criteria
 - [ ] Criterion 1
