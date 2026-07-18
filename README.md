@@ -66,22 +66,25 @@ Every task is a Markdown file with structured metadata. This allows both humans 
 Keeli integrates seamlessly with GitHub Copilot as a Skill and MCP Server.
 
 1.  **Skill**: Add the `keeli` skill to your `.github/skills/keeli/SKILL.md` to help Copilot understand task-related prompts.
-2.  **MCP Server**: Configure your `.vscode/mcp.json`:
-    ```json
-    {
-      "mcpServers": {
-        "keeli": {
-          "command": "python3",
-          "args": ["-m", "keeli.mcp_server"],
-          "env": {
-            "PYTHONPATH": "src"
-          }
-        }
-      }
+### MCP Server (VS Code / Cursor)
+
+Configure your `.vscode/mcp.json` or global `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "keeli": {
+      "command": "/opt/homebrew/anaconda3/bin/keeli",
+      "args": ["mcp"],
+      "type": "stdio"
     }
-    ```
+  }
+}
+```
 
 ## Configuration
+
+Keeli is highly portable and follows standard Python path conventions.
 
 Keeli can be configured via environment variables:
 
