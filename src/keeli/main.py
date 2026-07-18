@@ -140,9 +140,40 @@ def validate(args):
 
 def doctor(args):
     print("🔍 Keeli Health Check")
+    print(f"  Root: {engine.root_dir}")
+    print(f"  DB:   {engine.db_path} ({'OK' if engine.db_path.exists() else 'Missing - will be created on sync'})")
+    
     for s, d in engine.status_dirs.items():
-        print(f"  Folder {s:10}: {'OK' if d.exists() else 'MISSING'}")
-    print("✅ Index health: OK")
+        status = 'OK' if d.exists() else 'MISSING'
+        print(f"  Folder {s:10}: {status}")
+    
+    count, corrected = engine.sync()
+    print(f"✅ Indexing: {count} tasks found, {corrected} corrected for v5.1 compliance.")
+    
+    # MCP Check
+    mcp_config_path = engine.root_dir / ".vscode" / "mcp.json"
+    if mcp_config_path.exists():
+        print(f"✅ MCP Configuration: Found at {mcp_config_path}")
+    else:
+        print("💡 Tip: Run 'keeli mcp-config' to see how to enable GitHub Copilot / Cursor integration.")
+
+def mcp_config(args):
+    py_path = sys.executable
+    config = {
+        "mcpServers": {
+            "keeli": {
+                "command": py_path,
+                "args": ["-m", "keeli.mcp_server"],
+                "env": {
+                    "PYTHONPATH": str(engine.root_dir / "src")
+                },
+                "type": "stdio"
+            }
+        }
+    }
+    print("\n--- MCP CONFIGURATION (Add to .vscode/mcp.json) ---")
+    print(json.dumps(config, indent=2))
+    print("---------------------------------------------------\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Keeli v5.0.0 Task Manager")
@@ -189,6 +220,7 @@ def main():
     s_sub.add_parser("list")
 
     subparsers.add_parser("mcp")
+    subparsers.add_parser("mcp-config")
     subparsers.add_parser("sync")
     subparsers.add_parser("validate")
     subparsers.add_parser("doctor")
@@ -222,6 +254,7 @@ def main():
     elif cmd == "mcp":
         from keeli.mcp_server import main as mcp_main
         mcp_main()
+    elif cmd == "mcp-config": mcp_config(args)
     elif cmd == "doctor": doctor(args)
 
 if __name__ == "__main__":

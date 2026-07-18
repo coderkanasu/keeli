@@ -127,7 +127,8 @@ class KeeliEngine:
             "INSERT INTO audit (item_id, session_id, action, actor, details, rationale, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (item_id, session_id, action, actor, details, rationale, self._now_iso())
         )
-        target_conn.commit()
+        if not conn:
+            target_conn.commit()
 
     def _git_commit(self, message: str, file_path: Optional[Path] = None):
         try:
@@ -183,6 +184,10 @@ class KeeliEngine:
         return next_id
 
     def sync(self, conn: Optional[sqlite3.Connection] = None) -> Tuple[int, int]:
+        """
+        Grounded Re-indexing: Re-scans docs/tasks/ and reconciles the performance index.
+        Physically moved files are treated as status updates.
+        """
         target_conn = conn or init_db(self.db_path)
         seen_ids = {}
         count = 0
@@ -190,51 +195,69 @@ class KeeliEngine:
         rows = []
         files_to_update = []
         
+        # Priority mapping for FTS
+        p_weight = {"P0": 0, "P1": 1, "P2": 2}
+
+        # Scan all directories in strict order to establish ownership
         for status, folder in self.status_dirs.items():
-            if not folder.exists(): continue
+            if not folder.exists(): 
+                folder.mkdir(parents=True, exist_ok=True)
+                continue
+                
             for md_file in folder.glob("*.md"):
                 content = md_file.read_text()
                 data = self.parse_task_file(content, md_file)
                 if not data or not data.get('id'): continue
                 
                 tid = data['id']
-                if tid in seen_ids: continue
+                # De-duplication: first folder seen "wins"
+                if tid in seen_ids: 
+                    print(f"Warning: Duplicate task {tid} found at {md_file}. Ignoring.", file=sys.stderr)
+                    continue
                 seen_ids[tid] = md_file
 
+                # PHYSICAL STATE RECONCILIATION
+                # If the folder location disagrees with the internal status metadata,
+                # the folder location is the source of truth.
                 if data['status'].lower() != status.lower():
                     new_status_str = status.capitalize()
+                    # Preserve all other content, only update Status: line
                     new_content = re.sub(r"^\*\*Status:\*\* .+$", f"**Status:** {new_status_str}", content, flags=re.MULTILINE)
-                    if "**Status:**" not in new_content and "---" in new_content:
-                        new_content = new_content.replace("---", f"**Status:** {new_status_str}\n---", 1)
                     
                     if new_content != content:
                         files_to_update.append((md_file, new_content))
-                        content = new_content # use updated content for hash
+                        content = new_content
                         data['status'] = status
                         corrected += 1
 
                 v_hash = self._get_hash(content)
-                rows.append((data['id'], data['slug'], data['title'], status, data['priority'], data['created'], data['tags'], data['path'], v_hash, self._now_iso()))
+                rows.append((
+                    data['id'], data['slug'], data['title'], status, 
+                    data['priority'], data['created'], data['tags'], 
+                    str(md_file), v_hash, self._now_iso()
+                ))
                 count += 1
 
         with target_conn:
             target_conn.execute("DELETE FROM task_index")
-            target_conn.executemany(
-                "INSERT INTO task_index (id, slug, title, status, priority, created, tags, path, version_hash, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                rows
-            )
+            if rows:
+                target_conn.executemany(
+                    "INSERT INTO task_index (id, slug, title, status, priority, created, tags, path, version_hash, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows
+                )
+            
+            # Flush corrected metadata back to filesystem
             for f, c in files_to_update:
                 f.write_text(c)
             
-            # Update FTS
+            # Rebuild FTS
             try:
                 target_conn.execute("DELETE FROM task_fts")
                 target_conn.execute("INSERT INTO task_fts(task_id, title, description, tags) SELECT id, title, slug, tags FROM task_index")
-            except sqlite3.OperationalError:
-                pass
+            except Exception: pass
 
-            self.prune_context()
-            self.log_event(None, "sync", "system", f"Rebuilt index: {count} tasks, {corrected} corrected", conn=target_conn)
+            self.prune_context(conn=target_conn)
+            self.log_event(None, "sync", "system", f"Grounded sync: {count} tasks, {corrected} metadata corrections", conn=target_conn)
         
         return count, corrected
 
@@ -322,17 +345,22 @@ class KeeliEngine:
                 conn.execute("DELETE FROM task_index WHERE id = ?", (task_id,))
                 self.log_event(task_id, "delete", os.getenv("USER", "developer"), "Deleted task")
 
-    def prune_context(self):
+    def prune_context(self, conn: Optional[sqlite3.Connection] = None):
         """GC: Deletes branch-scoped context for branches that no longer exist in Git."""
         try:
             branches = subprocess.check_output(["git", "branch", "--format=%(refname:short)"], text=True).splitlines()
-            conn = self.conn
-            with conn:
-                # Use subquery to find context rows that don't match any active branch
+            target_conn = conn or self.conn
+            if conn:
+                # Part of ongoing transaction
                 placeholders = ",".join(["?"] * len(branches))
-                conn.execute(f"DELETE FROM context_store WHERE scope = 'branch' AND scope_id NOT IN ({placeholders})", branches)
+                target_conn.execute(f"DELETE FROM context_store WHERE scope = 'branch' AND scope_id NOT IN ({placeholders})", branches)
+            else:
+                with target_conn:
+                    placeholders = ",".join(["?"] * len(branches))
+                    target_conn.execute(f"DELETE FROM context_store WHERE scope = 'branch' AND scope_id NOT IN ({placeholders})", branches)
         except Exception as e:
-            print(f"Prune context failed: {e}")
+            if not os.getenv("KEELI_QUIET"):
+                print(f"Prune context failed: {e}")
 
     # --- Context Engine ---
     def context_resolve(self, key: str, session_id: Optional[str] = None) -> Tuple[Optional[str], str]:
@@ -536,7 +564,9 @@ class KeeliEngine:
         if active:
             active_block.append("## ACTIVE TASKS")
             for a in active:
-                active_block.append(f"- {a['id']}: {a['title']} (P{a['priority']}) [Hash: {a['version_hash'][:8]}]")
+                p = a['priority']
+                p_str = p if p.startswith('P') else f"P{p}"
+                active_block.append(f"- {a['id']}: {a['title']} ({p_str}) [Hash: {a['version_hash'][:8]}]")
             active_block.append("")
         
         active_text = "\n".join(active_block)
