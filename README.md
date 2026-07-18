@@ -4,10 +4,11 @@ Keeli is an AI-first task management system and grounding framework that uses yo
 
 ## Key Features
 
-- **Filesystem as Source of Truth**: Tasks are stored as human-readable Markdown files. Directory structure defines task status (`docs/tasks/backlog`, `docs/tasks/active`, etc.).
+- **Filesystem-Backed State**: Tasks are stored as human-readable Markdown files. Keeli treats the directory structure (`docs/tasks/backlog`, `active`, etc.) as the canonical status signal, which is automatically mirrored into the file's metadata during indexing.
 - **Built for AI Agents**: Native support for Model Context Protocol (MCP), allowing GitHub Copilot, Cursor, and other AI tools to manage your backlog directly.
-- **Grounded Context**: The `digest` tool provides token-budgeted snapshots of your project state, ensuring your AI agent always has the most relevant context.
-- **Performance Indexing**: Uses a local SQLite database for fast querying and insights while remaining fully recoverable from the filesystem.
+- **Grounded Context**: The `digest` tool provides token-budgeted snapshots of your project state, prioritizing active tasks and recent changes for LLM context windows.
+- **Hybrid Performance**: Uses a local SQLite database for fast querying and velocity insights, while ensuring the entire task state remains fully recoverable from Markdown files.
+- **Audit Trails**: Maintains a local event log (SQLite) to track task transitions and developer actions, providing a clear history of project progress.
 
 ## Installation
 
@@ -90,8 +91,8 @@ Keeli can be configured via environment variables:
 
 ## Project Philosophy
 
-1.  **Markdown First**: If the database is lost, the filesystem is the recovery signal.
-2.  **Status is Directory**: A task's status is its physical location on disk.
+1.  **Markdown First**: The filesystem is the authoritative record for current state; the database is a cache.
+2.  **Physical State Machine**: A task's status is moved by physically moving the file across status directories.
 3.  **No Fluff**: Minimal dependencies, maximum portability.
 
 ## Directory Structure

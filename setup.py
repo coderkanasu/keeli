@@ -20,6 +20,7 @@ setup(
     python_requires=">=3.12",
     install_requires=[
         "mcp>=1.0.0",
+        "tiktoken",
     ],
     classifiers=[
         "License :: OSI Approved :: MIT License",
