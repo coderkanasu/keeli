@@ -57,7 +57,7 @@ def keeli_next():
 
 @mcp.tool()
 def keeli_start(title: str, description: str = "", priority: str = "p2", tags: list = None):
-    """Create a new task in the backlog. Priority can be p0/high, p1/medium, p2/low."""
+    """Create a new task in the backlog. Use one priority: 'p0', 'p1', 'p2', 'high', 'medium', or 'low'."""
     cmd = ["start", title, "--priority", priority]
     if description:
         cmd.extend(["--description", description])

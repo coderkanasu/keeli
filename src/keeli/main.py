@@ -54,7 +54,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def _slugify(text: str) -> str:
+    # Preserve key characters if possible, or ensure consistent stripping
     slug = text.lower().strip()
+    slug = slug.replace("&", "and")
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
     return slug.strip("-")
 
@@ -159,13 +161,16 @@ def start(args):
     conn = ensure_synced()
     
     # Map friendly priority names
+    # Handle composite formats like 'p1/medium'
+    raw_p = args.priority.lower()
+    if "/" in raw_p:
+        raw_p = raw_p.split("/")[0]
+
     p_map = {
         "high": "P0", "medium": "P1", "low": "P2",
         "p0": "P0", "p1": "P1", "p2": "P2"
     }
-    priority = p_map.get(args.priority.lower(), "P2")
-
-    ids = []
+    priority = p_map.get(raw_p, "P1") # Default to P1 if unknown
     for f in TASKS_DIR.rglob("T-*.md"):
         m = re.search(r"T-(\d{4})", f.name)
         if m: ids.append(int(m.group(1)))
@@ -177,6 +182,13 @@ def start(args):
     filename = f"{next_id}-{slug}.md"
     filepath = STATUS_DIRS['backlog'] / filename
 
+    # Clean tags: strip prefixes if provided as 'tag:value' but check against CLI list
+    processed_tags = []
+    if args.tags:
+        for t in args.tags:
+            t = t.strip().lower()
+            if t: processed_tags.append(t)
+
     # Safety: injection-proof template filling
     template = string.Template(TASK_TEMPLATE)
     content = template.safe_substitute(
@@ -186,7 +198,7 @@ def start(args):
         priority=priority,
         timestamp=_now_iso(),
         depends_on=args.depends_on or "—",
-        tags=", ".join(args.tags) if args.tags else "—",
+        tags=", ".join(processed_tags) if processed_tags else "—",
         description=args.description or "No description provided."
     )
 
@@ -493,7 +505,7 @@ def main():
 
     p_start = subparsers.add_parser("start", aliases=["create"])
     p_start.add_argument("title", nargs="?", default="Untitled Task")
-    p_start.add_argument("--priority", choices=["p0", "p1", "p2", "high", "medium", "low"], default="p2", help="Priority: p0/high, p1/medium, p2/low")
+    p_start.add_argument("--priority", default="p2", help="Priority: p0/high, p1/medium, p2/low")
     p_start.add_argument("--tags", nargs="*", default=[])
     p_start.add_argument("--description")
     p_start.add_argument("--depends-on")
