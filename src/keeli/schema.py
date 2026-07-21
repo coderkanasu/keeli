@@ -29,6 +29,15 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             updated TEXT                   -- last sync timestamp
         )
     """)
+
+    # Migration: Add version_hash if missing (for v5.1+ compatibility)
+    try:
+        cursor = conn.execute("PRAGMA table_info(task_index)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "version_hash" not in columns:
+            conn.execute("ALTER TABLE task_index ADD COLUMN version_hash TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     # Sessions (Conversation threads)
     conn.execute("""
@@ -98,6 +107,17 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             created TEXT NOT NULL           -- ISO timestamp
         )
     """)
+    
+    # Audit Migrations
+    try:
+        cursor = conn.execute("PRAGMA table_info(audit)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "session_id" not in columns:
+            conn.execute("ALTER TABLE audit ADD COLUMN session_id TEXT")
+        if "rationale" not in columns:
+            conn.execute("ALTER TABLE audit ADD COLUMN rationale TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     # FTS5 (Virtual Table)
     try:

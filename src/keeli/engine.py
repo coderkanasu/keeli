@@ -37,9 +37,19 @@ class KeeliEngine:
         if os.getenv("KEELI_ROOT"):
             return Path(os.getenv("KEELI_ROOT")).absolute()
         curr = start_path.absolute()
+        home = Path.home()
         for _ in range(20):
-            if (curr / ".git").exists() or (curr / "docs" / "tasks").exists():
+            # Prioritize existing Keeli structure
+            if (curr / "docs" / "tasks").exists():
                 return curr
+            # Stop at git root, but be wary of home directory git repos
+            if (curr / ".git").exists():
+                if curr == home:
+                    # Only treat home as root if it specifically has Keeli tasks
+                    if (curr / "docs" / "tasks").exists():
+                        return curr
+                else:
+                    return curr
             if curr.parent == curr:
                 break
             curr = curr.parent
@@ -133,14 +143,16 @@ class KeeliEngine:
     def _git_commit(self, message: str, file_path: Optional[Path] = None):
         try:
             target = str(file_path) if file_path else str(self.tasks_dir)
-            check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True)
+            cwd = str(self.root_dir)
+            
+            check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, cwd=cwd)
             if check.returncode != 0: return
 
-            subprocess.run(["git", "add", target], check=True, capture_output=True)
-            diff = subprocess.run(["git", "diff", "--cached", "--quiet", "--", target])
+            subprocess.run(["git", "add", target], check=True, capture_output=True, cwd=cwd)
+            diff = subprocess.run(["git", "diff", "--cached", "--quiet", "--", target], cwd=cwd)
             if diff.returncode == 0: return
             
-            subprocess.run(["git", "commit", "-m", message, "--", target], check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", message, "--", target], check=True, capture_output=True, cwd=cwd)
         except Exception:
             pass
 
