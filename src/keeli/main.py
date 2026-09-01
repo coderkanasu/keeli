@@ -22,7 +22,7 @@ from keeli.schema import init_db
 from keeli.templates import TASK_TEMPLATE, CLAUDE_MD, SKILL_TEMPLATE, MCP_TEMPLATE
 from keeli.engine import KeeliEngine
 
-VERSION = "5.0.0"
+VERSION = "6.0.0"
 
 # --- CLI Wrappers ---
 engine = KeeliEngine()
