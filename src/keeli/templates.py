@@ -1,5 +1,5 @@
 """
-Keeli v4.0 Markdown templates.
+Keeli v6.0 Markdown and Agent Context Templates.
 """
 
 TASK_TEMPLATE = """# ${task_id}: ${title}
@@ -7,7 +7,7 @@ TASK_TEMPLATE = """# ${task_id}: ${title}
 **Status:** ${status}
 **Priority:** ${priority}
 **Created:** ${timestamp}
-**Completed:** —
+**Completed:** ${completed}
 **Depends On:** ${depends_on}
 **Tags:** ${tags}
 
@@ -36,45 +36,47 @@ Current focus: {focus}
 - Build: {build_command}
 - Test: {test_command}
 
-## Conventions
-- Follow PEP 8 for Python.
-- Use Keeli for task management.
+## CRDT Context Protocol (v6.0)
+- Tasks live in `.keeli/tasks/` (gitignored, never indexed by LLM tools).
+- Source of truth is the SQLite event log (`task_events`), not markdown files.
+- Markdown files are materialized views — rebuildable via `keeli sync`.
+- No SHA-256 expected_hash locks. Instead, use vector clocks for awareness.
+- Field-level independence: editing `status` never conflicts with editing `priority`.
+- Always pass `session_id` and `branch` explicitly in MCP tool calls.
+- Use `keeli_detect_conflicts(task_id)` to observe concurrent edit history.
 """
 
 SKILL_TEMPLATE = """---
 name: keeli-task-manager
-description: Keeli v5.1 task management with optimistic locking. 
+description: Keeli v6.0 task management with field-level CRDTs, isolated workspace, and connection-scoped sessions.
 ---
 
-# Keeli Task Management Skill (v5.1)
+# Keeli Task Management Skill (v6.0)
 
-## CRITICAL WORKFLOW: Optimistic Locking
-All state-changing tools (`keeli_complete`, `keeli_active`, `keeli_block`, `keeli_review`) now require an **expected_hash** to prevent overwriting stale tasks.
+## CRITICAL WORKFLOW: Field-Level Concurrency (No Locks!)
+v6.0 replaces v5.1's SHA-256 expected_hash with automatic CRDT merging.
 
-**YOU MUST FOLLOW THIS EXACT SEQUENCE:**
+**MANDATORY SEQUENCE:**
+1. **Read**: Call `keeli_get(task_id)` to see current state and `VECTOR_CLOCK`.
+2. **Edit Freely**: Call `keeli_edit_field`, `keeli_active`, `keeli_complete` without any hash.
+3. **Concurrent edits auto-merge**: Agent A changes `status` while Agent B changes `priority` → both succeed, no 409.
+4. **Observe**: Call `keeli_detect_conflicts(task_id)` to see if concurrent edits touched the SAME field.
 
-1. **Read First**: Always call `keeli_get(task_id)` to fetch the latest task content.
-   - The response includes a metadata header: `<!-- VERSION_HASH: sha256-abc123 -->`.
-2. **Extract the Hash**: Parse that header to get the `expected_hash` value.
-3. **Act with Hash**: Pass the extracted hash to any state-changing tool.
-   - Example: `keeli_complete(task_id="T-0001", expected_hash="sha256-abc123", rationale="Fixed the bug")`
-4. **Handle Conflicts**: If you receive a `409 CONFLICT` error, it means another agent updated the task. Immediately call `keeli_get` again to fetch the new hash and content, then re-attempt your action with the updated hash.
-
-## Tools Available (v5.1)
-
-- `keeli_get(task_id)` → Returns markdown + **VERSION_HASH** header.
-- `keeli_complete(task_id, expected_hash, rationale, session_id)` → Requires hash.
-- `keeli_active(task_id, expected_hash, session_id)` → Requires hash.
-- `keeli_block(task_id, expected_hash, reason, session_id)` → Requires hash.
-- `keeli_digest(session_id, budget)` → Prioritized context (Active > Audit > Backlog).
-- `keeli_context_set(key, value, scope)` → Override global context for your session.
-- `keeli_session_start(name)` → Initialize a new stateful session.
-- `keeli_session_checkpoint(note)` → Save reasoning and state.
-
-## Best Practices
-- Never skip the `keeli_get` step before modifying a task.
-- Always include a `rationale` or `reason` when completing/blocking—it gets stored in the audit trail.
-- Use `keeli_digest` frequently to stay updated on session focus and concurrent changes.
+## Tools Available
+- `keeli_get(task_id)` → Markdown + `VECTOR_CLOCK` header.
+- `keeli_get_state(task_id)` → Structured JSON state with vector clock.
+- `keeli_complete(task_id, rationale, actor, branch, session_id)` → Archive with audit trail.
+- `keeli_active(task_id, actor, branch, session_id)` → Move to active.
+- `keeli_block(task_id, reason, actor, branch, session_id)` → Block with reason.
+- `keeli_unblock(task_id, actor, branch, session_id)` → Return to backlog.
+- `keeli_edit_field(task_id, field, value, actor, branch, session_id)` → Generic field mutation.
+- `keeli_add_tags(task_id, tags, ...)` / `keeli_remove_tags(task_id, tags, ...)` → OR-Set operations.
+- `keeli_detect_conflicts(task_id, lookback_seconds)` → Observability for concurrent edits.
+- `keeli_digest(tier, budget, session_id, branch)` → Token-budgeted scoped context.
+- `keeli_context_set(key, value, scope, scope_id)` / `keeli_context_get(key, session_id, branch)`.
+- `keeli_session_start(name, branch, focus_task_id)` → Returns session_id.
+- `keeli_session_focus(task_id, session_id)` → Scoped focus (no global flag!).
+- `keeli_session_checkpoint(note, session_id, pending_decisions)`.
 """
 
 MCP_TEMPLATE = """{{

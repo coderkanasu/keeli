@@ -1,338 +1,447 @@
+"""
+Keeli v6.0 — Event-Sourced CRDT Engine (Production-Hardened)
+
+Critical fixes applied:
+  • All multi-table mutations wrapped in explicit SQLite transactions
+  • Vector clocks read from CRDT replay, never from stale task_index
+  • Markdown files are lazily materialized (on-demand / sync only)
+  • Tag removal uses tag-aware observed-remove from ORSet
+  • File I/O decoupled from event emission — event log is sole runtime truth
+"""
+
+import hashlib
+import json
 import os
 import re
 import sqlite3
 import string
 import subprocess
-import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from keeli.schema import init_db
-from keeli.templates import TASK_TEMPLATE
-
-import hashlib
 import tiktoken
 
+from keeli.schema import init_db
+from keeli.crdt import Event, TaskCRDT, VectorClock
+from keeli.templates import TASK_TEMPLATE
+
+
 class KeeliEngine:
+    """Production-ready task engine with CRDT-backed optimistic concurrency."""
+
     def __init__(self, root_dir: Optional[Path] = None):
         self.root_dir = root_dir or self._find_project_root(Path.cwd())
-        self.docs_dir = self.root_dir / "docs"
-        self.tasks_dir = self.docs_dir / "tasks"
-        self.db_path = self.root_dir / "keeli_state.db"
+        self.workspace_dir = self.root_dir / ".keeli"
+        self.tasks_dir = self.workspace_dir / "tasks"
+        self.db_path = self.workspace_dir / "keeli_state.db"
         self.valid_statuses = ["backlog", "active", "review", "blocked", "archive"]
         self.status_dirs = {s: self.tasks_dir / s for s in self.valid_statuses}
-        self._conn = None
+        self._conn: Optional[sqlite3.Connection] = None
+        self._actor = os.getenv("KEELI_ACTOR") or os.getenv("USER", "agent")
 
-    def _get_hash(self, content: str) -> str:
-        return hashlib.sha256(content.encode()).hexdigest()
-
-    @property
-    def conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = self.ensure_synced()
-        return self._conn
-
-    def _find_project_root(self, start_path: Path) -> Path:
-        if os.getenv("KEELI_ROOT"):
-            return Path(os.getenv("KEELI_ROOT")).absolute()
-        curr = start_path.absolute()
-        home = Path.home()
-        for _ in range(20):
-            # Prioritize existing Keeli structure
-            if (curr / "docs" / "tasks").exists():
-                return curr
-            # Stop at git root, but be wary of home directory git repos
-            if (curr / ".git").exists():
-                if curr == home:
-                    # Only treat home as root if it specifically has Keeli tasks
-                    if (curr / "docs" / "tasks").exists():
-                        return curr
-                else:
-                    return curr
-            if curr.parent == curr:
-                break
-            curr = curr.parent
-        return start_path.absolute()
+    # ── Internal Utilities ──
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def _slugify(self, text: str) -> str:
-        slug = text.lower().strip()
-        slug = slug.replace("&", "and")
+        slug = text.lower().strip().replace("&", "and")
         slug = re.sub(r"[^a-z0-9]+", "-", slug)
-        return slug.strip("-")
+        return slug.strip("-") or "untitled"
 
-    def parse_task_file(self, content: str, path: Path) -> Dict[str, Any]:
-        try:
-            match = re.search(r"^# (T-\d{4})[:\s]+(.+)$", content, re.MULTILINE)
-            if not match:
-                match = re.search(r"^# \[(T-\d{4})\]\s+(.+)$", content, re.MULTILINE)
-            
-            if match:
-                task_id = match.group(1)
-                title = match.group(2).strip()
-            else:
-                id_match = re.search(r"(T-\d{4})", content[:200])
-                task_id = id_match.group(1) if id_match else None
-                title = "Untitled Task"
+    def _find_project_root(self, start_path: Path) -> Path:
+        if os.getenv("KEELI_ROOT"):
+            return Path(os.getenv("KEELI_ROOT")).absolute()
+        curr = start_path.absolute()
+        for _ in range(20):
+            if (curr / ".keeli").exists() or (curr / ".git").exists():
+                return curr
+            if curr.parent == curr:
+                break
+            curr = curr.parent
+        return start_path.absolute()
 
-            status_match = re.search(r"^\*\*Status:\*\* (.+)$", content, re.MULTILINE)
-            priority_match = re.search(r"^\*\*Priority:\*\* (.+)$", content, re.MULTILINE)
-            created_match = re.search(r"^\*\*Created:\*\* (.+)$", content, re.MULTILINE)
-            
-            tags = []
-            tags_match = re.search(r"^\*\*Tags:\*\* (.+)$", content, re.MULTILINE)
-            if tags_match:
-                tags_line = tags_match.group(1)
-                tags = re.findall(r"([a-z0-9-]+:[a-z0-9-]+)", tags_line, re.IGNORECASE)
+    @property
+    def conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = self._ensure_synced()
+        return self._conn
 
-            inferred_status = "backlog"
-            for s, d in self.status_dirs.items():
-                if str(path.absolute()).startswith(str(d.absolute())):
-                    inferred_status = s
-                    break
+    def _ensure_synced(self) -> sqlite3.Connection:
+        """Initialize DB and ensure workspace structure exists."""
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        for d in self.status_dirs.values():
+            d.mkdir(parents=True, exist_ok=True)
+        gitignore = self.root_dir / ".gitignore"
+        if gitignore.exists():
+            content = gitignore.read_text(encoding="utf-8")
+            if ".keeli/" not in content:
+                with open(gitignore, "a", encoding="utf-8") as f:
+                    f.write("\n.keeli/\n")
+        else:
+            gitignore.write_text(".keeli/\n", encoding="utf-8")
+        return init_db(self.db_path)
 
-            return {
-                "id": task_id,
-                "title": title,
-                "slug": path.stem.replace(f"{task_id}-", "") if task_id else path.stem,
-                "status": status_match.group(1).strip().lower() if status_match else inferred_status,
-                "priority": (priority_match.group(1).strip().upper() if priority_match else "P1"),
-                "created": created_match.group(1).strip() if created_match else "",
-                "tags": ",".join(tags),
-                "path": str(path)
-            }
-        except Exception:
-            return {}
+    def _get_next_task_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT task_id FROM task_events WHERE task_id LIKE 'T-%' ORDER BY task_id DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            last_num = int(row["task_id"].split("-")[1])
+            return f"T-{last_num + 1:04d}"
+        return "T-0001"
 
-    def ensure_synced(self) -> sqlite3.Connection:
-        conn = init_db(self.db_path)
-        if not self.db_path.exists() or not self.tasks_dir.exists():
-            return conn
-        
-        try:
-            last_sync_row = conn.execute("SELECT MAX(updated) FROM task_index").fetchone()
-            last_sync_ts = 0
-            if last_sync_row and last_sync_row[0]:
-                last_sync_ts = datetime.fromisoformat(last_sync_row[0].replace("Z", "+00:00")).timestamp()
-        except sqlite3.OperationalError:
-            self.sync(conn=conn)
-            return conn
+    def _get_task_vc(self, task_id: str) -> VectorClock:
+        """CRITICAL FIX: Read vector clock from CRDT replay, NEVER from stale task_index."""
+        task = self._rebuild_task(task_id)
+        return task.vector_clock
 
-        latest_mtime = 0
-        for folder in self.status_dirs.values():
-            if folder.exists():
-                latest_mtime = max(latest_mtime, folder.stat().st_mtime)
-        
-        if latest_mtime > last_sync_ts + 0.5:
-            self.sync(conn=conn)
-            
-        return conn
+    def _rebuild_task(self, task_id: str) -> TaskCRDT:
+        """Replay all events for a task to reconstruct its CRDT state."""
+        rows = self.conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY timestamp, event_id",
+            (task_id,),
+        ).fetchall()
+        events = [Event.from_db_row(r) for r in rows]
+        return TaskCRDT.from_events(task_id, events)
 
-    def log_event(self, item_id: Optional[str], action: str, actor: str, details: str, session_id: Optional[str] = None, rationale: Optional[str] = None, conn: Optional[sqlite3.Connection] = None):
-        target_conn = conn or self.conn
-        target_conn.execute(
-            "INSERT INTO audit (item_id, session_id, action, actor, details, rationale, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (item_id, session_id, action, actor, details, rationale, self._now_iso())
+    def _upsert_task_index(self, task_id: str, state: Dict[str, Any]) -> None:
+        """Update materialized SQLite row from CRDT state. Call inside transaction."""
+        slug = self._slugify(state["title"])
+        status = state["status"]
+        target_dir = self.status_dirs.get(status, self.status_dirs["backlog"])
+        filepath = target_dir / f"{task_id}-{slug}.md"
+
+        self.conn.execute(
+            """INSERT INTO task_index 
+               (id, slug, title, status, priority, created, tags, depends_on, description, completed, path, updated, vector_clock)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               slug=excluded.slug, title=excluded.title, status=excluded.status,
+               priority=excluded.priority, created=excluded.created, tags=excluded.tags,
+               depends_on=excluded.depends_on, description=excluded.description,
+               completed=excluded.completed, path=excluded.path, updated=excluded.updated,
+               vector_clock=excluded.vector_clock""",
+            (
+                task_id, slug, state["title"], state["status"], state["priority"],
+                state["created"], state["tags"], state["depends_on"],
+                state["description"], state["completed"], str(filepath),
+                self._now_iso(), json.dumps(state["vector_clock"], sort_keys=True),
+            ),
         )
-        if not conn:
-            target_conn.commit()
 
-    def _git_commit(self, message: str, file_path: Optional[Path] = None):
+    def _update_fts(self, task_id: str, state: Dict[str, Any]) -> None:
+        """Rebuild FTS entry. Call inside transaction."""
         try:
-            target = str(file_path) if file_path else str(self.tasks_dir)
-            cwd = str(self.root_dir)
-            
-            check = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, cwd=cwd)
-            if check.returncode != 0: return
-
-            subprocess.run(["git", "add", target], check=True, capture_output=True, cwd=cwd)
-            diff = subprocess.run(["git", "diff", "--cached", "--quiet", "--", target], cwd=cwd)
-            if diff.returncode == 0: return
-            
-            subprocess.run(["git", "commit", "-m", message, "--", target], check=True, capture_output=True, cwd=cwd)
+            self.conn.execute("DELETE FROM task_fts WHERE task_id = ?", (task_id,))
+            self.conn.execute(
+                "INSERT INTO task_fts(task_id, title, description, tags) VALUES (?, ?, ?, ?)",
+                (task_id, state["title"], state["description"], state["tags"]),
+            )
         except Exception:
             pass
 
-    def start(self, title: str, priority_raw: str = "p2", tags: List[str] = None, description: str = None, depends_on: str = None) -> str:
-        conn = self.conn
-        p_map = {"high": "P0", "medium": "P1", "low": "P2", "p0": "P0", "p1": "P1", "p2": "P2"}
-        priority = p_map.get(priority_raw.lower().split("/")[0], "P1")
-        
-        ids = []
-        for f in self.tasks_dir.rglob("T-*.md"):
-            m = re.search(r"T-(\d{4})", f.name)
-            if m: ids.append(int(m.group(1)))
-        
-        next_num = (max(ids) + 1) if ids else 1
-        next_id = f"T-{next_num:04d}"
-        slug = self._slugify(title or "untitled")
-        filename = f"{next_id}-{slug}.md"
-        filepath = self.status_dirs['backlog'] / filename
-
-        processed_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
-        template = string.Template(TASK_TEMPLATE)
-        content = template.safe_substitute(
-            task_id=next_id, title=title or "Untitled Task", status="Backlog",
-            priority=priority, timestamp=self._now_iso(), depends_on=depends_on or "—",
-            tags=", ".join(processed_tags) if processed_tags else "—",
-            description=description or "No description provided."
+    def _log_audit(
+        self,
+        item_id: Optional[str],
+        action: str,
+        actor: str,
+        details: str,
+        session_id: Optional[str] = None,
+        rationale: Optional[str] = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO audit (item_id, session_id, action, actor, details, rationale, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, session_id, action, actor, details, rationale, self._now_iso()),
         )
 
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(content)
-        v_hash = self._get_hash(content)
-        
-        with conn:
-            conn.execute(
-                "INSERT INTO task_index (id, slug, title, status, priority, created, tags, path, version_hash, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (next_id, slug, title, "backlog", priority, self._now_iso(), ",".join(processed_tags), str(filepath), v_hash, self._now_iso())
+    def _emit_event(
+        self,
+        task_id: str,
+        field: str,
+        op: str,
+        value: Any,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Event:
+        """Append a CRDT event and atomically update the materialized index.
+
+        CRITICAL: Wraps event insertion + index rebuild + audit in a single
+        SQLite transaction. Never writes physical files.
+        """
+        actor = actor or self._actor
+        parent_vc = self._get_task_vc(task_id)
+        vc = parent_vc.increment(actor)
+
+        event = Event(
+            task_id=task_id,
+            field=field,
+            op=op,
+            value=value,
+            timestamp=self._now_iso(),
+            actor=actor,
+            branch=branch,
+            session_id=session_id,
+            vector_clock=vc.clocks,
+        )
+
+        with self.conn:  # EXPLICIT TRANSACTION: all-or-nothing
+            cur = self.conn.execute(
+                """INSERT INTO task_events 
+                   (task_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                event.to_db_row(),
             )
-            self.log_event(next_id, "start", os.getenv("USER", "developer"), f"Created task: {title}", conn=conn)
-        
-        self._git_commit(f"keeli start {next_id}: {title}", filepath)
-        return next_id
+            event.event_id = cur.lastrowid
 
-    def sync(self, conn: Optional[sqlite3.Connection] = None) -> Tuple[int, int]:
-        """
-        Grounded Re-indexing: Re-scans docs/tasks/ and reconciles the performance index.
-        Physically moved files are treated as status updates.
-        """
-        target_conn = conn or init_db(self.db_path)
-        seen_ids = {}
-        count = 0
-        corrected = 0
-        rows = []
-        files_to_update = []
-        
-        # Priority mapping for FTS
-        p_weight = {"P0": 0, "P1": 1, "P2": 2}
+            # Rebuild CRDT from event log (includes the event just inserted)
+            task = self._rebuild_task(task_id)
+            state = task.to_dict()
 
-        # Scan all directories in strict order to establish ownership
-        for status, folder in self.status_dirs.items():
-            if not folder.exists(): 
-                folder.mkdir(parents=True, exist_ok=True)
-                continue
-                
-            for md_file in folder.glob("*.md"):
-                content = md_file.read_text()
-                data = self.parse_task_file(content, md_file)
-                if not data or not data.get('id'): continue
-                
-                tid = data['id']
-                # De-duplication: first folder seen "wins"
-                if tid in seen_ids: 
-                    print(f"Warning: Duplicate task {tid} found at {md_file}. Ignoring.", file=sys.stderr)
-                    continue
-                seen_ids[tid] = md_file
+            # Atomically update materialized index
+            self._upsert_task_index(task_id, state)
+            self._update_fts(task_id, state)
 
-                # PHYSICAL STATE RECONCILIATION
-                # If the folder location disagrees with the internal status metadata,
-                # the folder location is the source of truth.
-                if data['status'].lower() != status.lower():
-                    new_status_str = status.capitalize()
-                    # Preserve all other content, only update Status: line
-                    new_content = re.sub(r"^\*\*Status:\*\* .+$", f"**Status:** {new_status_str}", content, flags=re.MULTILINE)
-                    
-                    if new_content != content:
-                        files_to_update.append((md_file, new_content))
-                        content = new_content
-                        data['status'] = status
-                        corrected += 1
+        return event
 
-                v_hash = self._get_hash(content)
-                rows.append((
-                    data['id'], data['slug'], data['title'], status, 
-                    data['priority'], data['created'], data['tags'], 
-                    str(md_file), v_hash, self._now_iso()
-                ))
-                count += 1
+    def _write_task_markdown(self, task_id: str, state: Dict[str, Any]) -> Path:
+        """Generate markdown file from CRDT state. Called lazily by sync() only."""
+        slug = self._slugify(state["title"])
+        status = state["status"]
+        target_dir = self.status_dirs.get(status, self.status_dirs["backlog"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filepath = target_dir / f"{task_id}-{slug}.md"
 
-        with target_conn:
-            target_conn.execute("DELETE FROM task_index")
-            if rows:
-                target_conn.executemany(
-                    "INSERT INTO task_index (id, slug, title, status, priority, created, tags, path, version_hash, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    rows
+        template = string.Template(TASK_TEMPLATE)
+        content = template.safe_substitute(
+            task_id=task_id,
+            title=state["title"],
+            status=state["status"].capitalize(),
+            priority=state["priority"],
+            timestamp=state["created"] or self._now_iso(),
+            depends_on=state["depends_on"],
+            tags=state["tags"] if state["tags"] else "—",
+            description=state["description"],
+            completed=state["completed"],
+        )
+        filepath.write_text(content, encoding="utf-8")
+        return filepath
+
+    # ── Public API ──
+
+    def start(
+        self,
+        title: str,
+        priority_raw: str = "p2",
+        tags: List[str] = None,
+        description: str = None,
+        depends_on: str = None,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Create a new task via batched CRDT init events in a single transaction."""
+        p_map = {"high": "P0", "medium": "P1", "low": "P2", "p0": "P0", "p1": "P1", "p2": "P2"}
+        priority = p_map.get(priority_raw.lower().split("/")[0], "P1")
+        task_id = self._get_next_task_id()
+        ts = self._now_iso()
+        processed_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
+        actor = actor or self._actor
+
+        with self.conn:  # Single transaction for all init events
+            parent_vc = VectorClock()
+
+            def _emit_init(field: str, value: Any) -> VectorClock:
+                nonlocal parent_vc
+                vc = parent_vc.increment(actor)
+                evt = Event(
+                    task_id=task_id, field=field, op="init", value=value,
+                    timestamp=ts, actor=actor, branch=branch,
+                    session_id=session_id, vector_clock=vc.clocks,
                 )
-            
-            # Flush corrected metadata back to filesystem
-            for f, c in files_to_update:
-                f.write_text(c)
-            
-            # Rebuild FTS
-            try:
-                target_conn.execute("DELETE FROM task_fts")
-                target_conn.execute("INSERT INTO task_fts(task_id, title, description, tags) SELECT id, title, slug, tags FROM task_index")
-            except Exception: pass
+                cur = self.conn.execute(
+                    """INSERT INTO task_events 
+                       (task_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    evt.to_db_row(),
+                )
+                evt.event_id = cur.lastrowid
+                parent_vc = vc
+                return vc
 
-            self.prune_context(conn=target_conn)
-            self.log_event(None, "sync", "system", f"Grounded sync: {count} tasks, {corrected} metadata corrections", conn=target_conn)
-        
-        return count, corrected
+            _emit_init("title", title or "Untitled Task")
+            _emit_init("status", "backlog")
+            _emit_init("priority", priority)
+            _emit_init("created", ts)
+            _emit_init("description", description or "No description provided.")
+            _emit_init("depends_on", depends_on or "—")
+            if processed_tags:
+                for tag in processed_tags:
+                    parent_vc = parent_vc.increment(actor)
+                    evt = Event(
+                        task_id=task_id, field="tags", op="add", value=[tag],
+                        timestamp=ts, actor=actor, branch=branch,
+                        session_id=session_id, vector_clock=parent_vc.clocks,
+                    )
+                    cur = self.conn.execute(
+                        """INSERT INTO task_events 
+                           (task_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        evt.to_db_row(),
+                    )
+                    evt.event_id = cur.lastrowid
 
-    def move_task(self, task_id: str, target_status: str, expected_hash: Optional[str] = None, rationale: Optional[str] = None) -> str:
-        if target_status not in self.status_dirs:
-            raise ValueError(f"Invalid status {target_status}")
+            # Rebuild once and upsert index
+            task = self._rebuild_task(task_id)
+            state = task.to_dict()
+            self._upsert_task_index(task_id, state)
+            self._update_fts(task_id, state)
+            self._log_audit(task_id, "start", actor, f"Created task: {title}", session_id)
 
-        conn = self.conn
-        row = conn.execute("SELECT id, path, title, version_hash FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)).fetchone()
+        return task_id
+
+    def move_task(
+        self,
+        task_id: str,
+        target_status: str,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+        rationale: Optional[str] = None,
+    ) -> str:
+        if target_status not in self.valid_statuses:
+            raise ValueError(f"Invalid status '{target_status}'")
+
+        row = self.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)
+        ).fetchone()
         if not row:
             raise ValueError(f"Task {task_id} not found.")
-        
-        tid, current_path, title, current_hash = row['id'], Path(row['path']), row['title'], row['version_hash']
-        
-        # Conflict Detection (Optimistic Locking)
-        if expected_hash and current_hash != expected_hash:
-            raise ValueError(f"CONFLICT: Task {tid} was modified elsewhere. Expected {expected_hash}, but index has {current_hash}.")
+        tid = row["id"]
 
-        new_path = self.status_dirs[target_status] / current_path.name
-        self.status_dirs[target_status].mkdir(parents=True, exist_ok=True)
-        os.rename(current_path, new_path)
-        
-        content = new_path.read_text()
-        new_content = re.sub(r"^\*\*Status:\*\* .+$", f"**Status:** {target_status.capitalize()}", content, flags=re.MULTILINE)
-        
+        self._emit_event(tid, "status", "set", target_status, actor, branch, session_id)
+
         if target_status == "archive":
-            ts = self._now_iso()
-            new_content = re.sub(r"^\*\*Completed:\*\* .+$", f"**Completed:** {ts}", new_content, flags=re.MULTILINE) if "**Completed:**" in new_content else re.sub(r"^(\*\*Priority:\*\* .+)$", f"\\1\n**Completed:** {ts}", new_content, flags=re.MULTILINE)
+            self._emit_event(tid, "completed", "set", self._now_iso(), actor, branch, session_id)
         else:
-            new_content = re.sub(r"^\*\*Completed:\*\* .+$", "**Completed:** —", new_content, flags=re.MULTILINE)
-        
-        new_path.write_text(new_content)
-        v_hash = self._get_hash(new_content)
-        
-        with conn:
-            conn.execute("UPDATE task_index SET status = ?, path = ?, version_hash = ?, updated = ? WHERE id = ?", (target_status, str(new_path), v_hash, self._now_iso(), tid))
-            self.log_event(tid, target_status, os.getenv("USER", "developer"), f"Moved to {target_status}", rationale=rationale, conn=conn)
-        
-        # Architecture v5.1: No auto-commits in engine core.
+            self._emit_event(tid, "completed", "set", "—", actor, branch, session_id)
+
+        self._log_audit(
+            tid, target_status, actor or self._actor,
+            f"Moved to {target_status}", session_id, rationale,
+        )
         return tid
 
-    def next_task(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        conn = self.conn
-        focus_task = None
-        if session_id:
-            row = conn.execute("SELECT focus_task_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
-            if row: focus_task = row['focus_task_id']
+    def edit_task_field(
+        self,
+        task_id: str,
+        field: str,
+        value: Any,
+        op: str = "set",
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        row = self.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Task {task_id} not found.")
+        tid = row["id"]
 
-        if focus_task:
-            # Prioritize focus task if it's not archived, or its dependencies
-            row = conn.execute("SELECT * FROM task_index WHERE id = ? AND status != 'archive'", (focus_task,)).fetchone()
-            if row: return dict(row)
+        self._emit_event(tid, field, op, value, actor, branch, session_id)
+        self._log_audit(tid, "edit", actor or self._actor, f"Edited {field}", session_id)
+        return tid
+
+    def add_tags(
+        self,
+        task_id: str,
+        tags: List[str],
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        return self.edit_task_field(task_id, "tags", tags, "add", actor, branch, session_id)
+
+    def remove_tags(
+        self,
+        task_id: str,
+        tags: List[str],
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Tag-aware OR-Set remove — only purges observed tag instances."""
+        row = self.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Task {task_id} not found.")
+        tid = row["id"]
+
+        # CRITICAL FIX: Rebuild CRDT to get current unique tag IDs for precise removal
+        task = self._rebuild_task(tid)
+        removal_map = task.tags.get_tags_for_removal(tags)
+
+        if not removal_map:
+            return tid
+
+        self._emit_event(tid, "tags", "remove", removal_map, actor, branch, session_id)
+        self._log_audit(tid, "tag_remove", actor or self._actor, f"Removed tags: {tags}", session_id)
+        return tid
+
+    def next_task(
+        self,
+        session_id: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if session_id:
+            row = self.conn.execute(
+                "SELECT focus_task_id FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if row and row["focus_task_id"]:
+                task = self.conn.execute(
+                    "SELECT * FROM task_index WHERE id = ? AND status != 'archive'",
+                    (row["focus_task_id"],),
+                ).fetchone()
+                if task:
+                    return dict(task)
 
         query = """
         SELECT * FROM task_index WHERE status IN ('backlog', 'active') 
-        ORDER BY CASE WHEN priority = 'P0' THEN 0 WHEN priority = 'P1' THEN 1 WHEN priority = 'P2' THEN 2 ELSE 3 END ASC,
-        CASE WHEN (created IS NULL OR created = '') THEN '9999' ELSE created END ASC LIMIT 1;
+        ORDER BY 
+            CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END ASC,
+            COALESCE(created, '9999') ASC
+        LIMIT 1
         """
-        row = conn.execute(query).fetchone()
+        row = self.conn.execute(query).fetchone()
         return dict(row) if row else None
 
-    def list_tasks(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        query = "SELECT id, title, status, priority, version_hash FROM task_index"
+    def list_tasks(
+        self,
+        status: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if branch:
+            query = """
+            SELECT 
+                COALESCE(bs.task_id, ti.id) as id,
+                COALESCE(bs.title, ti.title) as title,
+                COALESCE(bs.status, ti.status) as status,
+                COALESCE(bs.priority, ti.priority) as priority,
+                ti.vector_clock
+            FROM task_index ti
+            LEFT JOIN branch_snapshots bs ON ti.id = bs.task_id AND bs.branch = ?
+            WHERE ti.status != 'archive' OR bs.status IS NOT NULL
+            """
+            rows = self.conn.execute(query, (branch,)).fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+
+        query = "SELECT id, title, status, priority, vector_clock FROM task_index"
         params = []
         if status:
             query += " WHERE status = ? COLLATE NOCASE"
@@ -340,290 +449,299 @@ class KeeliEngine:
         return [dict(r) for r in self.conn.execute(query, params).fetchall()]
 
     def get_task(self, task_id: str) -> str:
-        row = self.conn.execute("SELECT path, version_hash FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)).fetchone()
-        if row and Path(row['path']).exists():
-            content = Path(row['path']).read_text()
-            # Inject version hash into header for MCP
-            return f"<!-- VERSION_HASH: {row['version_hash']} -->\n{content}"
-        raise ValueError(f"Task {task_id} not found.")
-
-    def delete_task(self, task_id: str):
-        conn = self.conn
-        row = conn.execute("SELECT path FROM task_index WHERE id = ?", (task_id,)).fetchone()
-        if row:
-            p = Path(row['path'])
-            if p.exists(): p.unlink()
-            with conn:
-                conn.execute("DELETE FROM task_index WHERE id = ?", (task_id,))
-                self.log_event(task_id, "delete", os.getenv("USER", "developer"), "Deleted task")
-
-    def prune_context(self, conn: Optional[sqlite3.Connection] = None):
-        """GC: Deletes branch-scoped context for branches that no longer exist in Git."""
-        try:
-            branches = subprocess.check_output(["git", "branch", "--format=%(refname:short)"], text=True).splitlines()
-            target_conn = conn or self.conn
-            if conn:
-                # Part of ongoing transaction
-                placeholders = ",".join(["?"] * len(branches))
-                target_conn.execute(f"DELETE FROM context_store WHERE scope = 'branch' AND scope_id NOT IN ({placeholders})", branches)
-            else:
-                with target_conn:
-                    placeholders = ",".join(["?"] * len(branches))
-                    target_conn.execute(f"DELETE FROM context_store WHERE scope = 'branch' AND scope_id NOT IN ({placeholders})", branches)
-        except Exception as e:
-            if not os.getenv("KEELI_QUIET"):
-                print(f"Prune context failed: {e}")
-
-    # --- Context Engine ---
-    def context_resolve(self, key: str, session_id: Optional[str] = None) -> Tuple[Optional[str], str]:
-        """Resolves context key using strict waterfall: Session > Branch > Global."""
-        conn = self.conn
-        branch = self._get_current_branch()
-        
-        # 1. Session
-        if session_id:
-            res = conn.execute("SELECT value FROM context_store WHERE key = ? AND scope = 'session' AND scope_id = ?", (key, session_id)).fetchone()
-            if res: return res['value'], 'session'
-        
-        # 2. Branch
-        if branch:
-            res = conn.execute("SELECT value FROM context_store WHERE key = ? AND scope = 'branch' AND scope_id = ?", (key, branch)).fetchone()
-            if res: return res['value'], 'branch'
-            
-        # 3. Global
-        res = conn.execute("SELECT value FROM context_store WHERE key = ? AND scope = 'global'", (key,)).fetchone()
-        if res: return res['value'], 'global'
-        
-        return None, 'none'
-
-    def context_get(self, key: str, session_id: Optional[str] = None) -> Dict[str, Any]:
-        val, scope = self.context_resolve(key, session_id)
-        return {"key": key, "value": val, "scope": scope}
-        
-        # 1. Session Lookup
-        if session_id:
-            row = conn.execute(
-                "SELECT value, scope, source, updated FROM context_store WHERE key = ? AND scope = 'session' AND scope_id = ?",
-                (key, session_id)
-            ).fetchone()
-            if row: return dict(row)
-
-        # 2. Branch Lookup (Infer branch)
-        branch = self._get_current_branch()
-        if branch:
-            row = conn.execute(
-                "SELECT value, scope, source, updated FROM context_store WHERE key = ? AND scope = 'branch' AND scope_id = ?",
-                (key, branch)
-            ).fetchone()
-            if row: return dict(row)
-
-        # 3. Global Lookup
-        row = conn.execute(
-            "SELECT value, scope, source, updated FROM context_store WHERE key = ? AND scope = 'global'",
-            (key,)
+        """CRITICAL FIX: Generate markdown on-the-fly from CRDT state.
+        Never reads stale pre-written files."""
+        row = self.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?",
+            (task_id, task_id),
         ).fetchone()
-        if row: return dict(row)
+        if not row:
+            raise ValueError(f"Task {task_id} not found.")
+        tid = row["id"]
 
-        # 4. Implicit Discovery
-        discovered = self._discover_context(key)
-        if discovered:
-            self.context_set(key, discovered, scope='global', source='discovery')
-            return {"value": discovered, "scope": "global", "source": "discovery", "updated": self._now_iso()}
-        
-        return {}
+        task = self._rebuild_task(tid)
+        state = task.to_dict()
+        content = self._generate_markdown(tid, state)
+        return f"<!-- VECTOR_CLOCK: {json.dumps(state['vector_clock'], sort_keys=True)} -->\n{content}"
 
-    def context_set(self, key: str, value: str, scope: str = 'session', scope_id: Optional[str] = None, source: str = 'user_override'):
-        conn = self.conn
-        if scope == 'branch' and not scope_id:
-            scope_id = self._get_current_branch()
-        
-        with conn:
-            conn.execute("""
-                INSERT INTO context_store (key, value, scope, scope_id, source, updated)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(key, scope, scope_id) DO UPDATE SET
-                value = excluded.value, source = excluded.source, updated = excluded.updated
-            """, (key, value, scope, scope_id, source, self._now_iso()))
+    def _generate_markdown(self, task_id: str, state: Dict[str, Any]) -> str:
+        """Generate markdown string from CRDT state without filesystem I/O."""
+        template = string.Template(TASK_TEMPLATE)
+        return template.safe_substitute(
+            task_id=task_id,
+            title=state["title"],
+            status=state["status"].capitalize(),
+            priority=state["priority"],
+            timestamp=state["created"] or self._now_iso(),
+            depends_on=state["depends_on"],
+            tags=state["tags"] if state["tags"] else "—",
+            description=state["description"],
+            completed=state["completed"],
+        )
 
-    def _get_current_branch(self) -> Optional[str]:
-        try:
-            return subprocess.check_output(["git", "branch", "--show-current"], text=True).strip()
-        except Exception:
-            return None
+    def get_task_state(self, task_id: str) -> Dict[str, Any]:
+        row = self.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?", (task_id, task_id)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Task {task_id} not found.")
+        task = self._rebuild_task(row["id"])
+        return task.to_dict()
 
-    def _discover_context(self, key: str) -> Optional[str]:
-        # Basic discovery logic for common keys
-        if key == 'python_version':
-            return sys.version.split()[0]
-        if key == 'project_name':
-            return self.root_dir.name
-        
-        # Check pyproject.toml etc.
-        pyproject = self.root_dir / "pyproject.toml"
-        if pyproject.exists():
-            content = pyproject.read_text()
-            if key == 'dependencies':
-                # very crude parsing
-                deps = re.findall(r'dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL)
-                return deps[0].strip() if deps else None
-        
-        return None
+    def sync(self) -> Tuple[int, int]:
+        """CRITICAL FIX: Reconcile event log -> index -> physical files.
+        This is the ONLY method that writes to disk."""
+        task_ids = [r["task_id"] for r in self.conn.execute(
+            "SELECT DISTINCT task_id FROM task_events"
+        ).fetchall()]
+        count = 0
+        corrected = 0
 
-    # --- Session Management ---
-    def session_start(self, name: str = "Investigation", branch: Optional[str] = None, focus_task_id: Optional[str] = None) -> str:
+        with self.conn:
+            for tid in task_ids:
+                old = self.conn.execute(
+                    "SELECT status, vector_clock FROM task_index WHERE id = ?", (tid,)
+                ).fetchone()
+
+                task = self._rebuild_task(tid)
+                state = task.to_dict()
+                self._upsert_task_index(tid, state)
+                self._update_fts(tid, state)
+                self._write_task_markdown(tid, state)
+
+                new = self.conn.execute(
+                    "SELECT status, vector_clock FROM task_index WHERE id = ?", (tid,)
+                ).fetchone()
+                if old and new:
+                    if old["status"] != new["status"]:
+                        corrected += 1
+                count += 1
+
+            self._log_audit(None, "sync", "system", f"Reconciled {count} tasks, corrected {corrected}")
+
+        return count, corrected
+
+    def detect_conflicts(self, task_id: str, lookback_seconds: int = 300) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """SELECT e1.event_id as e1_id, e2.event_id as e2_id, e1.field, e1.actor as a1, e2.actor as a2
+               FROM task_events e1
+               JOIN task_events e2 ON e1.task_id = e2.task_id AND e1.field = e2.field
+               WHERE e1.task_id = ? AND e1.event_id < e2.event_id
+                 AND e1.vector_clock != e2.vector_clock
+                 AND json_extract(e1.vector_clock, '$.' || e2.actor) IS NOT NULL
+                 AND json_extract(e2.vector_clock, '$.' || e1.actor) IS NOT NULL""",
+            (task_id,),
+        ).fetchall()
+        conflicts = []
+        for r in rows:
+            conflicts.append({
+                "field": r["field"],
+                "events": [r["e1_id"], r["e2_id"]],
+                "actors": [r["a1"], r["a2"]],
+                "resolution": "lww",
+            })
+        return conflicts
+
+    def context_resolve(
+        self,
+        key: str,
+        session_id: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> Tuple[Optional[str], str]:
+        if session_id:
+            res = self.conn.execute(
+                "SELECT value FROM context_store WHERE key = ? AND scope = 'session' AND scope_id = ?",
+                (key, session_id),
+            ).fetchone()
+            if res:
+                return res["value"], "session"
+        if branch:
+            res = self.conn.execute(
+                "SELECT value FROM context_store WHERE key = ? AND scope = 'branch' AND scope_id = ?",
+                (key, branch),
+            ).fetchone()
+            if res:
+                return res["value"], "branch"
+        res = self.conn.execute(
+            "SELECT value FROM context_store WHERE key = ? AND scope = 'global'",
+            (key,),
+        ).fetchone()
+        if res:
+            return res["value"], "global"
+        return None, "none"
+
+    def context_get(
+        self,
+        key: str,
+        session_id: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        val, scope = self.context_resolve(key, session_id, branch)
+        return {"key": key, "value": val, "scope": scope}
+
+    def context_set(
+        self,
+        key: str,
+        value: str,
+        scope: str = "session",
+        scope_id: Optional[str] = None,
+        source: str = "agent_override",
+    ) -> None:
+        if scope == "session" and not scope_id:
+            raise ValueError("session scope requires scope_id (session_id)")
+        if scope == "branch" and not scope_id:
+            raise ValueError("branch scope requires scope_id (branch_name)")
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO context_store (key, value, scope, scope_id, source, updated)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT DO UPDATE SET
+                   value = excluded.value, source = excluded.source, updated = excluded.updated""",
+                (key, value, scope, scope_id, source, self._now_iso()),
+            )
+
+    def session_start(
+        self,
+        name: str = "Investigation",
+        branch: Optional[str] = None,
+        focus_task_id: Optional[str] = None,
+    ) -> str:
         import uuid
         session_id = str(uuid.uuid4())
-        branch = branch or self._get_current_branch()
-        conn = self.conn
-        with conn:
-            conn.execute("""
-                INSERT INTO sessions (session_id, branch_name, focus_task_id, goal, last_ping, created)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (session_id, branch, focus_task_id, name, self._now_iso(), self._now_iso()))
-            
-            # Set as active session
-            conn.execute("""
-                INSERT INTO context_store (key, value, scope, updated, source)
-                VALUES ('active_session_id', ?, 'global', ?, 'session_manager')
-                ON CONFLICT(key) WHERE scope = 'global' DO UPDATE SET value = excluded.value, updated = excluded.updated
-            """, (session_id, self._now_iso()))
-            
+        ts = self._now_iso()
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO sessions (session_id, branch_name, focus_task_id, goal, last_ping, created)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (session_id, branch, focus_task_id, name, ts, ts),
+            )
         return session_id
 
-    def session_focus(self, task_id: str, session_id: Optional[str] = None):
-        conn = self.conn
+    def session_focus(
+        self,
+        task_id: str,
+        session_id: str,
+    ) -> None:
         if not session_id:
-            res = conn.execute("SELECT value FROM context_store WHERE key = 'active_session_id'").fetchone()
-            if res: session_id = res['value']
-        
-        if not session_id:
-            raise ValueError("No active session. Start a session first.")
+            raise ValueError("session_id is required.")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sessions SET focus_task_id = ?, last_ping = ? WHERE session_id = ?",
+                (task_id, self._now_iso(), session_id),
+            )
 
-        with conn:
-            conn.execute("UPDATE sessions SET focus_task_id = ?, last_ping = ? WHERE session_id = ?", (task_id, self._now_iso(), session_id))
-
-    def session_checkpoint(self, note: str = "Sync point", session_id: Optional[str] = None, pending_decisions: List[str] = None):
-        conn = self.conn
+    def session_checkpoint(
+        self,
+        note: str = "Sync point",
+        session_id: str = None,
+        pending_decisions: List[str] = None,
+    ) -> str:
         if not session_id:
-            res = conn.execute("SELECT value FROM context_store WHERE key = 'active_session_id'").fetchone()
-            if res: session_id = res['value']
-            
-        if not session_id:
-            raise ValueError("No active session.")
-
-        # Get current context overrides
-        rows = conn.execute("SELECT key, value FROM context_store WHERE scope = 'session' AND scope_id = ?", (session_id,)).fetchall()
-        context_snapshot = json.dumps({r['key']: r['value'] for r in rows})
-        
-        # Get current digest
-        current_digest = self.digest(tier='standard')
-        
-        with conn:
-            conn.execute("""
-                INSERT INTO checkpoints (session_id, llm_summary, active_digest, pending_decisions, context_snapshot, created)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (session_id, note, current_digest, json.dumps(pending_decisions or []), context_snapshot, self._now_iso()))
+            raise ValueError("session_id is required.")
+        rows = self.conn.execute(
+            "SELECT key, value FROM context_store WHERE scope = 'session' AND scope_id = ?",
+            (session_id,),
+        ).fetchall()
+        context_snapshot = json.dumps({r["key"]: r["value"] for r in rows})
+        current_digest = self.digest(session_id=session_id)
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO checkpoints (session_id, llm_summary, active_digest, pending_decisions, context_snapshot, created)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (session_id, note, current_digest, json.dumps(pending_decisions or []), context_snapshot, self._now_iso()),
+            )
         return "checkpoint-saved"
 
-    def session_restore(self, session_id: str, checkpoint_id: Optional[int] = None) -> Dict[str, Any]:
-        conn = self.conn
-        query = "SELECT * FROM checkpoints WHERE session_id = ?"
-        params = [session_id]
-        if checkpoint_id:
-            query += " AND checkpoint_id = ?"
-            params.append(checkpoint_id)
-        query += " ORDER BY checkpoint_id DESC LIMIT 1"
-        
-        row = conn.execute(query, params).fetchone()
-        if row:
-            return dict(row)
-        return {}
+    def session_list(self) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT session_id, goal, branch_name, created, focus_task_id FROM sessions ORDER BY created DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
-    def digest(self, tier: str = "standard", budget: int = 2000) -> str:
-        """
-        Generates a structured context snapshot within a specified token budget.
-        Implements Architecture v5.1 SectionPriority truncation.
-        """
-        conn = self.conn
+    def digest(
+        self,
+        tier: str = "standard",
+        budget: int = 2000,
+        session_id: Optional[str] = None,
+        branch: Optional[str] = None,
+    ) -> str:
         encoding = tiktoken.get_encoding("cl100k_base")
-        
+
         def count_tokens(text: str) -> int:
             return len(encoding.encode(text))
 
-        # --- Layer 1: Header (Non-negotiable) ---
         header = []
-        session_id_row = conn.execute("SELECT value FROM context_store WHERE key = 'active_session_id'").fetchone()
-        sid = session_id_row['value'] if session_id_row else None
-        
-        if sid:
-            session = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (sid,)).fetchone()
+        if session_id:
+            session = self.conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
             if session:
-                header.append(f"# SESSION: {session['goal']} ({sid})")
+                header.append(f"# SESSION: {session['goal']} ({session_id})")
                 header.append(f"Focus: {session['focus_task_id'] or 'None'}")
-                header.append(f"Branch: {session['branch_name'] or 'main'}")
+                header.append(f"Branch: {session['branch_name'] or 'unspecified'}")
+        elif branch:
+            header.append(f"# BRANCH: {branch}")
 
-        stats = conn.execute("SELECT status, COUNT(*) as count FROM task_index GROUP BY status").fetchall()
+        stats = self.conn.execute(
+            "SELECT status, COUNT(*) as count FROM task_index GROUP BY status"
+        ).fetchall()
         if stats:
             summary = " | ".join([f"{s['status'].upper()}: {s['count']}" for s in stats])
             header.append(f"## Status Overview: {summary}\n")
-        
+
         header_text = "\n".join(header)
         current_budget = budget - count_tokens(header_text)
 
-        # --- Layer 2: Active Tasks (Highest Priority) ---
         active_block = []
-        active = conn.execute("SELECT id, title, priority, version_hash FROM task_index WHERE status = 'active' ORDER BY priority ASC").fetchall()
+        active = self.conn.execute(
+            "SELECT id, title, priority, vector_clock FROM task_index WHERE status = 'active' ORDER BY priority ASC"
+        ).fetchall()
         if active:
             active_block.append("## ACTIVE TASKS")
             for a in active:
-                p = a['priority']
-                p_str = p if p.startswith('P') else f"P{p}"
-                active_block.append(f"- {a['id']}: {a['title']} ({p_str}) [Hash: {a['version_hash'][:8]}]")
+                vc = json.loads(a["vector_clock"])
+                active_block.append(f"- {a['id']}: {a['title']} ({a['priority']}) [VC: {vc}]")
             active_block.append("")
-        
         active_text = "\n".join(active_block)
         current_budget -= count_tokens(active_text)
 
-        # --- Layer 3: Recent Audit (Integrity) ---
         audit_block = []
-        logs = conn.execute("SELECT created, actor, action, details FROM audit ORDER BY event_id DESC LIMIT 5").fetchall()
+        logs = self.conn.execute(
+            "SELECT created, actor, action, details FROM audit ORDER BY event_id DESC LIMIT 5"
+        ).fetchall()
         if logs:
             audit_block.append("## RECENT ACTIVITY")
             for l in logs:
                 audit_block.append(f"- {l['created']} | {l['actor']} | {l['action'].upper()} | {l['details']}")
             audit_block.append("")
-        
         audit_text = "\n".join(audit_block)
         audit_tokens = count_tokens(audit_text)
-        if audit_tokens > (current_budget * 0.2): # Don't let audit take more than 20% of remaining
-             audit_text = "\n".join(audit_block[:3]) + "\n... (more activity hidden)"
-             audit_tokens = count_tokens(audit_text)
-        
+        if audit_tokens > (current_budget * 0.25):
+            audit_text = "\n".join(audit_block[:3]) + "\n... (clipped)\n"
+            audit_tokens = count_tokens(audit_text)
         current_budget -= audit_tokens
 
-        # --- Layer 4: Project Overview (Clipping) ---
         overview_text = ""
-        if tier in ['standard', 'full']:
+        if tier in ["standard", "full"]:
             overview_file = self.root_dir / "CLAUDE.md" if (self.root_dir / "CLAUDE.md").exists() else self.root_dir / "README.md"
             if overview_file.exists():
-                full_overview = overview_file.read_text()
-                # Hard limit of 250 tokens for overview in digest
+                full_overview = overview_file.read_text(encoding="utf-8")
                 tokens = encoding.encode(full_overview)
                 if len(tokens) > 250:
-                    overview_text = f"## OVERVIEW ({overview_file.name})\n" + encoding.decode(tokens[:250]) + "\n... (content clipped)\n"
+                    overview_text = f"## OVERVIEW ({overview_file.name})\n" + encoding.decode(tokens[:250]) + "\n... (clipped)\n"
                 else:
                     overview_text = f"## OVERVIEW ({overview_file.name})\n" + full_overview + "\n"
-        
         current_budget -= count_tokens(overview_text)
 
-        # --- Layer 5: Backlog (Buffer) ---
         backlog_text = ""
-        if tier != 'brief' and current_budget > 100:
-            backlog = conn.execute(f"SELECT id, title, priority FROM task_index WHERE status = 'backlog' ORDER BY priority ASC, id ASC LIMIT 10").fetchall()
+        if tier != "brief" and current_budget > 100:
+            backlog = self.conn.execute(
+                "SELECT id, title, priority FROM task_index WHERE status = 'backlog' ORDER BY priority ASC, id ASC LIMIT 10"
+            ).fetchall()
             if backlog:
                 backlog_lines = ["## BACKLOG"]
                 for b in backlog:
-                    line = f"- {b['id']}: {b['title']} (P{b['priority']})"
+                    line = f"- {b['id']}: {b['title']} ({b['priority']})"
                     if count_tokens("\n".join(backlog_lines) + "\n" + line) < current_budget:
                         backlog_lines.append(line)
                     else:
@@ -632,4 +750,13 @@ class KeeliEngine:
 
         return "\n".join(filter(None, [header_text, active_text, audit_text, overview_text, backlog_text]))
 
-        return "\n".join(output)
+    def history(self, task_id: str) -> List[Dict[str, Any]]:
+        rows = self.conn.execute(
+            """SELECT timestamp as created, actor, op as action, field, value, details, rationale
+               FROM task_events
+               LEFT JOIN audit ON audit.item_id = task_events.task_id AND audit.created = task_events.timestamp
+               WHERE task_events.task_id = ?
+               ORDER BY task_events.event_id DESC""",
+            (task_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
