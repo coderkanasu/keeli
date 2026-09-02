@@ -12,11 +12,14 @@ import json
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 from dataclasses import dataclass, field
 from collections import defaultdict
 
 from keeli.crdt import VectorClock, Event
+
+if TYPE_CHECKING:
+    from keeli.engine import KeeliEngine
 
 
 @dataclass
@@ -38,13 +41,14 @@ class MemoryCRDTStore:
     maintaining data persistence through periodic synchronization.
     """
     
-    def __init__(self, sync_interval_seconds: int = 30):
+    def __init__(self, sync_interval_seconds: int = 30, engine: Optional["KeeliEngine"] = None):
         self._state: Dict[str, MemoryState] = {}
         self._event_log: List[Event] = []
         self._sync_interval = sync_interval_seconds
         self._sync_thread: Optional[threading.Thread] = None
         self._stop_sync = threading.Event()
         self._lock = threading.RLock()
+        self.engine = engine  # Optional KeeliEngine for persistence
         
         # Start background sync thread
         self._start_sync_thread()
@@ -179,11 +183,32 @@ class MemoryCRDTStore:
             return {"synced": synced_count, "skipped": skipped_count}
     
     def _sync_task_to_file(self, task_id: str, state: MemoryState) -> None:
-        """Sync a single task to filesystem (placeholder for actual implementation)."""
-        # This would integrate with the existing engine's filesystem operations
-        # For now, this is a placeholder that would be connected to the existing
-        # KeeliEngine's _write_task_markdown method
-        pass
+        """Sync a single task to filesystem via the engine."""
+        if not self.engine:
+            # No engine available, skip filesystem sync
+            return
+        
+        try:
+            # Extract task data from in-memory state
+            task_data = {
+                "id": task_id,
+                "title": state.fields.get("title", ""),
+                "description": state.fields.get("description", ""),
+                "status": state.fields.get("status", ""),
+                "priority": state.fields.get("priority", ""),
+                "tags": list(state.tags),
+                "last_modified": state.last_modified.isoformat(),
+                "metadata": state.fields.get("metadata", {})
+            }
+            
+            # Call engine's write method to persist to filesystem
+            if hasattr(self.engine, '_write_task_markdown'):
+                self.engine._write_task_markdown(task_id, task_data)
+            elif hasattr(self.engine, 'update_task'):
+                self.engine.update_task(task_id, task_data)
+        except Exception as e:
+            # Log sync failure but don't raise - data remains in memory for retry
+            print(f"Warning: Failed to sync {task_id} to filesystem: {e}")
     
     def force_sync(self) -> Dict[str, int]:
         """Force immediate sync of all pending changes."""

@@ -90,8 +90,13 @@ class TelemetryStore:
         self._init_db()
     
     def _init_db(self) -> None:
-        """Initialize database schema."""
+        """Initialize database schema with concurrency support."""
         with sqlite3.connect(self.db_path) as conn:
+            # Enable Write-Ahead Logging for better concurrency
+            conn.execute("PRAGMA journal_mode=WAL;")
+            # Set 5-second timeout for locked database (prevents immediate failures)
+            conn.execute("PRAGMA busy_timeout=5000;")
+            
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS telemetry_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,6 +130,10 @@ class TelemetryStore:
     def log_event(self, event: TelemetryEvent) -> None:
         """Log a telemetry event."""
         with sqlite3.connect(self.db_path) as conn:
+            # Enable WAL and busy timeout for this connection too
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            
             conn.execute("""
                 INSERT INTO telemetry_events (
                     timestamp, checkpoint, request_text, intent_type, confidence,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-__DEFAULT_VERSION = "6.0.0"
+__DEFAULT_VERSION = "7.0.0"
 _VERSION_FILE = "VERSION"
 _APPEND_ENV = "KEELI_VERSION_APPEND"
 

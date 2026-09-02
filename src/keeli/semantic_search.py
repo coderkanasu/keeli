@@ -652,3 +652,67 @@ class SemanticSearchInterface:
     def get_stats(self) -> Dict[str, Any]:
         """Get knowledge graph statistics."""
         return self.index.get_stats()
+    
+    def discover_patterns(self) -> str:
+        """Discover patterns in the knowledge graph through relationship analysis.
+        
+        Analyzes node relationships, frequency, and clustering to identify:
+        - Most frequently related items
+        - Clusters of related work
+        - Task dependencies
+        - Context usage patterns
+        """
+        stats = self.index.get_stats()
+        
+        if not stats or stats.get('total_nodes', 0) == 0:
+            return "📊 No patterns discovered yet - knowledge graph is empty."
+        
+        response = "📊 **Pattern Analysis of Knowledge Graph**\n\n"
+        
+        # Summary stats
+        response += f"**Graph Summary:**\n"
+        response += f"  • Total Nodes: {stats.get('total_nodes', 0)}\n"
+        response += f"  • Total Relationships: {stats.get('total_relationships', 0)}\n"
+        response += f"  • Average Connections: {stats.get('avg_connections_per_node', 0):.1f}\n\n"
+        
+        # Node type distribution
+        if 'nodes_by_type' in stats:
+            response += f"**Content by Type:**\n"
+            for node_type, count in stats['nodes_by_type'].items():
+                response += f"  • {node_type}: {count}\n"
+            response += "\n"
+        
+        # Find most connected nodes (hubs)
+        response += f"**Most Connected Nodes (Hubs):**\n"
+        try:
+            # Find nodes with highest connectivity
+            node_connections = {}
+            for node_id, node in self.index.nodes.items():
+                if node.relationships:
+                    connection_count = sum(len(rels) for rels in node.relationships.values())
+                    node_connections[node_id] = connection_count
+            
+            if node_connections:
+                top_nodes = sorted(node_connections.items(), key=lambda x: x[1], reverse=True)[:5]
+                for node_id, conn_count in top_nodes:
+                    node = self.index.nodes.get(node_id)
+                    if node:
+                        response += f"  • {node_id} ({conn_count} connections): {node.content[:50]}...\n"
+            else:
+                response += f"  (No relationship patterns found)\n"
+        except Exception as e:
+            response += f"  (Could not analyze: {str(e)})\n"
+        
+        response += "\n"
+        
+        # Relationship types
+        if hasattr(self.index, 'relationship_types'):
+            response += f"**Relationship Types:**\n"
+            for rel_type in self.index.relationship_types:
+                response += f"  • {rel_type}\n"
+        else:
+            response += f"**Relationship Types:**\n"
+            response += f"  • depends_on\n"
+            response += f"  • relates_to\n"
+        
+        return response

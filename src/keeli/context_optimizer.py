@@ -172,7 +172,7 @@ class ContextWindowMonitor:
         if self.count_tokens(content) <= target_tokens:
             return content
         
-        # Simple compression: truncate intelligently
+        # Simple compression: truncate intelligently by lines
         lines = content.split('\n')
         compressed_lines = []
         current_tokens = 0
@@ -186,6 +186,15 @@ class ContextWindowMonitor:
                 break
         
         result = '\n'.join(compressed_lines)
+        
+        # Edge case: if no lines fit (first line too long), fall back to character-based truncation
+        if not result:
+            # Use character-level truncation: roughly 4 chars per token
+            max_chars = (target_tokens - 50) * 4
+            result = content[:max_chars]
+            if len(result) < len(content):
+                result += "\n... [truncated]"
+        
         if result and self.count_tokens(result) < target_tokens:
             result += "\n... [content truncated to fit token budget]"
         

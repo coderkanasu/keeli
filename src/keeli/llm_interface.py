@@ -98,6 +98,7 @@ class LLMInterface:
         self._auto_session_id: Optional[str] = None
         self._session_start_time: Optional[datetime] = None
         self._activity_log: List[Dict[str, Any]] = []
+        self._current_request_text: str = ""  # Store for telemetry logging
         self._context_cache: Dict[str, Any] = {}
         self._intent_log: List[ParsedIntent] = []  # For telemetry
         
@@ -110,7 +111,7 @@ class LLMInterface:
         self.workflow_orchestrator = WorkflowOrchestrator(self)
         
         # New v7.0 components
-        self.memory_store = MemoryCRDTStore(sync_interval_seconds=30)
+        self.memory_store = MemoryCRDTStore(sync_interval_seconds=30, engine=self.engine)
         self.predictive_cache = PredictiveCache(max_cache_size=100)
         self.semantic_search = SemanticSearchInterface(self)
         self.template_library = WorkflowTemplateLibrary()
@@ -373,6 +374,9 @@ class LLMInterface:
         4. Routes to appropriate handler
         5. Logs all actions for telemetry (Phase 3)
         """
+        # ── Store request for telemetry ──
+        self._current_request_text = request
+        
         # ── Telemetry: Start Request ──
         self.telemetry_logger.start_request(request)
         
@@ -506,7 +510,7 @@ class LLMInterface:
     def _log_telemetry_success(self, parsed: ParsedIntent, route: str) -> None:
         """Helper to log successful intent execution to telemetry."""
         self.telemetry_logger.log_request_lifecycle(
-            request_text="",  # Already captured in ask()
+            request_text=self._current_request_text,  # Use stored request text
             intent_type=parsed.intent.value,
             confidence=parsed.confidence,
             parameters=parsed.parameters,

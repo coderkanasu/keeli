@@ -10,13 +10,28 @@ Core Philosophy: "I understand how you work, let me help automatically"
 from mcp.server.fastmcp import FastMCP
 from keeli.llm_interface import LLMInterface
 import json
+from typing import Optional
 
 mcp = FastMCP("keeli_llm")
 
+# ── Persistent Interface Singleton ──
+# Maintains state across multiple MCP tool calls to support multi-turn conversations
+_INTERFACE_INSTANCE: Optional[LLMInterface] = None
+
 
 def _get_interface() -> LLMInterface:
-    """Get fresh interface instance per request (thread-safe)."""
-    return LLMInterface()
+    """Get persistent interface instance (singleton pattern).
+    
+    Returns the same LLMInterface across all MCP tool calls, ensuring that:
+    - Session state persists
+    - Memory/CRDT state is retained
+    - Workflow state is preserved
+    - Telemetry accumulates correctly
+    """
+    global _INTERFACE_INSTANCE
+    if _INTERFACE_INSTANCE is None:
+        _INTERFACE_INSTANCE = LLMInterface()
+    return _INTERFACE_INSTANCE
 
 
 @mcp.tool()
