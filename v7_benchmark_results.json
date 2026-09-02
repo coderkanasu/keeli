@@ -1,0 +1,404 @@
+{
+  "timestamp": "2026-09-02T15:59:14Z",
+  "phase": "4_measurement_benchmarking",
+  "metrics": {
+    "total": 43,
+    "correct_intent": 43,
+    "wrong_intent": 0,
+    "clarification": 0,
+    "failed": 0,
+    "success_rate": 1.0,
+    "avg_confidence": 0.796,
+    "avg_execution_ms": 1.6,
+    "by_intent": {
+      "CREATE_TASK": {
+        "count": 8,
+        "correct": 8,
+        "success_rate": 1.0
+      },
+      "LIST_TASKS": {
+        "count": 8,
+        "correct": 8,
+        "success_rate": 1.0
+      },
+      "COMPLETE_TASK": {
+        "count": 5,
+        "correct": 5,
+        "success_rate": 1.0
+      },
+      "GET_NEXT_TASK": {
+        "count": 4,
+        "correct": 4,
+        "success_rate": 1.0
+      },
+      "GET_STATUS": {
+        "count": 4,
+        "correct": 4,
+        "success_rate": 1.0
+      },
+      "STORE_CONTEXT": {
+        "count": 3,
+        "correct": 3,
+        "success_rate": 1.0
+      },
+      "GET_CONTEXT": {
+        "count": 2,
+        "correct": 2,
+        "success_rate": 1.0
+      },
+      "SEMANTIC_SEARCH": {
+        "count": 2,
+        "correct": 2,
+        "success_rate": 1.0
+      },
+      "DISCOVER_PATTERNS": {
+        "count": 2,
+        "correct": 2,
+        "success_rate": 1.0
+      },
+      "SUMMARIZE": {
+        "count": 2,
+        "correct": 2,
+        "success_rate": 1.0
+      },
+      "HELP": {
+        "count": 2,
+        "correct": 2,
+        "success_rate": 1.0
+      },
+      "UNKNOWN": {
+        "count": 1,
+        "correct": 1,
+        "success_rate": 1.0
+      }
+    },
+    "total_telemetry_requests": 49
+  },
+  "results_by_intent": {
+    "CREATE_TASK": [
+      {
+        "prompt": "create a task to fix the authentication bug",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "add a new task: implement data ingestion caching layer",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "i need to track: deploy to production by friday",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "create task for dashboard integration with circuit breaker",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "make a task to finalize keeli v4.0 release",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "new task: refactor jwt validation logic",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "log this: need to review security patterns",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "start tracking work on mongodb integration",
+        "category": "CREATE_TASK",
+        "expected_intent": "create_task",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "LIST_TASKS": [
+      {
+        "prompt": "show me all tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "what are my current tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "list all active tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "show me the task list",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "what tasks do i have pending",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "display all my tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "tell me about all the tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "give me a breakdown of my tasks",
+        "category": "LIST_TASKS",
+        "expected_intent": "list_tasks",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "COMPLETE_TASK": [
+      {
+        "prompt": "mark task 1 as done",
+        "category": "COMPLETE_TASK",
+        "expected_intent": "complete_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "finish the authentication bug fix",
+        "category": "COMPLETE_TASK",
+        "expected_intent": "complete_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "i finished implementing the caching layer",
+        "category": "COMPLETE_TASK",
+        "expected_intent": "complete_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "complete task T-0010",
+        "category": "COMPLETE_TASK",
+        "expected_intent": "complete_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "check off the dashboard integration work",
+        "category": "COMPLETE_TASK",
+        "expected_intent": "complete_task",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "GET_NEXT_TASK": [
+      {
+        "prompt": "what's next",
+        "category": "GET_NEXT_TASK",
+        "expected_intent": "get_next_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "what should i work on next",
+        "category": "GET_NEXT_TASK",
+        "expected_intent": "get_next_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "give me the next task",
+        "category": "GET_NEXT_TASK",
+        "expected_intent": "get_next_task",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "which task should be done first",
+        "category": "GET_NEXT_TASK",
+        "expected_intent": "get_next_task",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "GET_STATUS": [
+      {
+        "prompt": "tell me the status",
+        "category": "GET_STATUS",
+        "expected_intent": "get_status",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "what's the current state",
+        "category": "GET_STATUS",
+        "expected_intent": "get_status",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "how are things progressing",
+        "category": "GET_STATUS",
+        "expected_intent": "get_status",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "where do we stand on the project",
+        "category": "GET_STATUS",
+        "expected_intent": "get_status",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "STORE_CONTEXT": [
+      {
+        "prompt": "remember that this is a critical production bug",
+        "category": "STORE_CONTEXT",
+        "expected_intent": "store_context",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "note: the database migration is blocked by schema changes",
+        "category": "STORE_CONTEXT",
+        "expected_intent": "store_context",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "save this context: mongodb is the primary data store",
+        "category": "STORE_CONTEXT",
+        "expected_intent": "store_context",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "GET_CONTEXT": [
+      {
+        "prompt": "what context have we stored so far",
+        "category": "GET_CONTEXT",
+        "expected_intent": "get_context",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "remind me of the key context we've noted",
+        "category": "GET_CONTEXT",
+        "expected_intent": "get_context",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "SEMANTIC_SEARCH": [
+      {
+        "prompt": "search for tasks related to authentication",
+        "category": "SEMANTIC_SEARCH",
+        "expected_intent": "semantic_search",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "find all work items about performance optimization",
+        "category": "SEMANTIC_SEARCH",
+        "expected_intent": "semantic_search",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "DISCOVER_PATTERNS": [
+      {
+        "prompt": "what patterns do you see in our task history",
+        "category": "DISCOVER_PATTERNS",
+        "expected_intent": "discover_patterns",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "analyze the trends in our work priorities",
+        "category": "DISCOVER_PATTERNS",
+        "expected_intent": "discover_patterns",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "SUMMARIZE": [
+      {
+        "prompt": "give me a summary of what we've accomplished",
+        "category": "SUMMARIZE",
+        "expected_intent": "summarize",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "summarize the current project state",
+        "category": "SUMMARIZE",
+        "expected_intent": "summarize",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "HELP": [
+      {
+        "prompt": "help",
+        "category": "HELP",
+        "expected_intent": "help",
+        "result": "correct_intent",
+        "success": true
+      },
+      {
+        "prompt": "what can you do for me",
+        "category": "HELP",
+        "expected_intent": "help",
+        "result": "correct_intent",
+        "success": true
+      }
+    ],
+    "UNKNOWN": [
+      {
+        "prompt": "xyzzy plugh",
+        "category": "UNKNOWN",
+        "expected_intent": "unknown",
+        "result": "correct_intent",
+        "success": true
+      }
+    ]
+  }
+}
