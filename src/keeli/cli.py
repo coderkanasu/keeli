@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Keeli v6.0 CLI — Event-sourced CRDT task engine with isolated workspace.
+Keeli v6.0 CLI — LEGACY INTERFACE (DEPRECATED)
+
+This CLI is disabled by default. Keeli is designed for MCP integration with AI tools.
+To enable this CLI, set environment variable: KEELI_ENABLE_CLI=1
+
+For MCP integration, use: python -m keeli.mcp_server
 
 Critical fixes applied:
   • Input validation on field mutations
@@ -8,6 +13,21 @@ Critical fixes applied:
   • Explicit --actor, --branch, --session on all commands
   • doctor command verifies .gitignore isolation
 """
+
+import os
+import sys
+
+# Check if CLI is explicitly enabled
+if not os.getenv("KEELI_ENABLE_CLI"):
+    print("Keeli CLI is disabled by default.", file=sys.stderr)
+    print("Keeli is designed for MCP (Model Context Protocol) integration with AI tools.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To use Keeli:", file=sys.stderr)
+    print("1. Configure MCP server in your AI tool (Cursor, GitHub Copilot, etc.)", file=sys.stderr)
+    print("2. Use the MCP tools: keeli_tasks, keeli_context, keeli_sessions, keeli_memory, keeli_knowledge, keeli_system", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To enable this legacy CLI, set: KEELI_ENABLE_CLI=1", file=sys.stderr)
+    sys.exit(1)
 
 import argparse
 import json

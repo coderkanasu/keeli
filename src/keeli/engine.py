@@ -17,7 +17,7 @@ import sqlite3
 import string
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +40,7 @@ class KeeliEngine:
         self.status_dirs = {s: self.tasks_dir / s for s in self.valid_statuses}
         self._conn: Optional[sqlite3.Connection] = None
         self._actor = os.getenv("KEELI_ACTOR") or os.getenv("USER", "agent")
+        self._current_branch = None
 
     # ── Internal Utilities ──
 
@@ -62,6 +63,29 @@ class KeeliEngine:
                 break
             curr = curr.parent
         return start_path.absolute()
+
+    def _get_current_branch(self) -> str:
+        """Get current git branch name."""
+        if self._current_branch:
+            return self._current_branch
+        
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.root_dir,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip()
+                if branch and branch != "HEAD":
+                    self._current_branch = branch
+                    return branch
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        
+        return "main"
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -600,6 +624,358 @@ class KeeliEngine:
                 (key, value, scope, scope_id, source, self._now_iso()),
             )
 
+    # ── Working Memory Management ──
+
+    def working_memory_set(
+        self,
+        key: str,
+        value: str,
+        session_id: str,
+        ttl_minutes: int = 60,
+    ) -> None:
+        """Store working memory item with TTL."""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO working_memory (session_id, key, value, ttl_minutes, updated)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id, key) DO UPDATE SET
+                   value = excluded.value, ttl_minutes = excluded.ttl_minutes, updated = excluded.updated""",
+                (session_id, key, value, ttl_minutes, self._now_iso()),
+            )
+
+    def working_memory_get(self, key: str, session_id: str) -> Optional[str]:
+        """Get working memory item if not expired."""
+        row = self.conn.execute(
+            """SELECT value, ttl_minutes, updated FROM working_memory 
+               WHERE session_id = ? AND key = ?""",
+            (session_id, key),
+        ).fetchone()
+        
+        if not row:
+            return None
+        
+        # Check TTL
+        if row["ttl_minutes"]:
+            updated = datetime.fromisoformat(row["updated"])
+            if datetime.now(timezone.utc) - updated > timedelta(minutes=row["ttl_minutes"]):
+                # Expired, delete and return None
+                self.working_memory_delete(key, session_id)
+                return None
+        
+        return row["value"]
+
+    def working_memory_delete(self, key: str, session_id: str) -> None:
+        """Delete working memory item."""
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM working_memory WHERE session_id = ? AND key = ?",
+                (session_id, key),
+            )
+
+    def working_memory_list(self, session_id: str) -> List[Dict[str, Any]]:
+        """List all working memory items for a session (excluding expired)."""
+        rows = self.conn.execute(
+            """SELECT key, value, ttl_minutes, updated FROM working_memory 
+               WHERE session_id = ?""",
+            (session_id,),
+        ).fetchall()
+        
+        valid_items = []
+        now = datetime.now(timezone.utc)
+        
+        for row in rows:
+            if row["ttl_minutes"]:
+                updated = datetime.fromisoformat(row["updated"])
+                if now - updated > timedelta(minutes=row["ttl_minutes"]):
+                    # Expired, skip
+                    continue
+            valid_items.append(dict(row))
+        
+        return valid_items
+
+    def working_memory_clear_expired(self, session_id: str = None) -> int:
+        """Clear expired working memory items. Returns count of cleared items."""
+        if session_id:
+            rows = self.conn.execute(
+                """SELECT key, ttl_minutes, updated FROM working_memory 
+                   WHERE session_id = ? AND ttl_minutes IS NOT NULL""",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT session_id, key, ttl_minutes, updated FROM working_memory 
+                   WHERE ttl_minutes IS NOT NULL""",
+            ).fetchall()
+        
+        expired_keys = []
+        now = datetime.now(timezone.utc)
+        
+        for row in rows:
+            updated = datetime.fromisoformat(row["updated"])
+            if now - updated > timedelta(minutes=row["ttl_minutes"]):
+                if session_id:
+                    expired_keys.append((row["key"],))
+                else:
+                    expired_keys.append((row["session_id"], row["key"]))
+        
+        if expired_keys:
+            with self.conn:
+                if session_id:
+                    self.conn.executemany(
+                        "DELETE FROM working_memory WHERE session_id = ? AND key = ?",
+                        [(session_id, key) for key, in expired_keys]
+                    )
+                else:
+                    self.conn.executemany(
+                        "DELETE FROM working_memory WHERE session_id = ? AND key = ?",
+                        expired_keys
+                    )
+        
+        return len(expired_keys)
+
+    # ── Project Context Tracking ──
+
+    def get_project_context(self) -> Dict[str, Any]:
+        """Get current project context (branch, active session, focused task)."""
+        branch = self._get_current_branch()
+        
+        # Get most recent active session
+        session = self.conn.execute(
+            """SELECT session_id, goal, focus_task_id, branch_name 
+               FROM sessions 
+               WHERE status = 'active' 
+               ORDER BY last_ping DESC LIMIT 1"""
+        ).fetchone()
+        
+        context = {
+            "project_root": str(self.root_dir),
+            "branch": branch,
+            "active_session": session["session_id"] if session else None,
+            "session_goal": session["goal"] if session else None,
+            "focus_task_id": session["focus_task_id"] if session else None,
+            "session_branch": session["branch_name"] if session else None,
+        }
+        
+        # Get focused task details if available
+        if context["focus_task_id"]:
+            task = self.conn.execute(
+                "SELECT id, title, status, priority FROM task_index WHERE id = ?",
+                (context["focus_task_id"],),
+            ).fetchone()
+            if task:
+                context["focus_task"] = {
+                    "id": task["id"],
+                    "title": task["title"],
+                    "status": task["status"],
+                    "priority": task["priority"],
+                }
+        
+        return context
+
+    def save_project_analysis(
+        self,
+        analysis_type: str,
+        content: str,
+        session_id: str = None,
+        branch: str = None,
+        tags: List[str] = None,
+    ) -> str:
+        """Save project analysis to working memory for fast context retrieval."""
+        branch = branch or self._get_current_branch()
+        
+        # Create a structured key for the analysis
+        key = f"analysis_{analysis_type}_{branch}"
+        
+        # Store with extended TTL (24 hours for analysis cache)
+        self.working_memory_set(
+            key=key,
+            value=content,
+            session_id=session_id or "global",
+            ttl_minutes=1440,  # 24 hours
+        )
+        
+        # Also store tags for retrieval
+        if tags:
+            tags_key = f"analysis_tags_{analysis_type}_{branch}"
+            self.working_memory_set(
+                key=tags_key,
+                value=json.dumps(tags),
+                session_id=session_id or "global",
+                ttl_minutes=1440,
+            )
+        
+        return f"Analysis saved as {key}"
+
+    def get_project_analysis(
+        self,
+        analysis_type: str,
+        session_id: str = None,
+        branch: str = None,
+    ) -> Optional[str]:
+        """Retrieve cached project analysis."""
+        branch = branch or self._get_current_branch()
+        key = f"analysis_{analysis_type}_{branch}"
+        return self.working_memory_get(key, session_id or "global")
+
+    # ── Knowledge Management ──
+
+    def extract_knowledge_from_session(self, session_id: str) -> Dict[str, Any]:
+        """Extract and summarize knowledge from a session's working memory and context."""
+        # Get working memory
+        working_mem = self.working_memory_list(session_id)
+        
+        # Get session context
+        session = self.conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        
+        # Get checkpoints
+        checkpoints = self.conn.execute(
+            """SELECT llm_summary, pending_decisions, created 
+               FROM checkpoints WHERE session_id = ? ORDER BY created DESC""",
+            (session_id,),
+        ).fetchall()
+        
+        # Get audit trail for the session
+        audit_trail = self.conn.execute(
+            """SELECT action, details, created FROM audit 
+               WHERE session_id = ? ORDER BY created DESC LIMIT 20""",
+            (session_id,),
+        ).fetchall()
+        
+        knowledge = {
+            "session_id": session_id,
+            "session_goal": session["goal"] if session else None,
+            "working_memory_items": len(working_mem),
+            "checkpoints_count": len(checkpoints),
+            "audit_entries": len(audit_trail),
+            "key_insights": [],
+            "decisions_made": [],
+            "patterns_discovered": [],
+        }
+        
+        # Extract key insights from checkpoints
+        for cp in checkpoints:
+            if cp["llm_summary"]:
+                knowledge["key_insights"].append(cp["llm_summary"])
+            
+            if cp["pending_decisions"]:
+                try:
+                    decisions = json.loads(cp["pending_decisions"])
+                    knowledge["decisions_made"].extend(decisions)
+                except:
+                    pass
+        
+        # Extract patterns from working memory
+        for mem in working_mem:
+            if "pattern" in mem["key"].lower() or "insight" in mem["key"].lower():
+                knowledge["patterns_discovered"].append({
+                    "key": mem["key"],
+                    "value": mem["value"][:200],  # Truncate for summary
+                })
+        
+        return knowledge
+
+    def save_project_knowledge(
+        self,
+        knowledge_type: str,
+        content: str,
+        source_session: str = None,
+        tags: List[str] = None,
+        branch: str = None,
+    ) -> str:
+        """Save extracted knowledge as persistent project knowledge."""
+        branch = branch or self._get_current_branch()
+        
+        # Use global scope for knowledge persistence
+        key = f"knowledge_{knowledge_type}"
+        
+        # Store in context_store with global scope for persistence
+        self.context_set(
+            key=key,
+            value=content,
+            scope="global",
+            scope_id=None,
+            source=f"session:{source_session}" if source_session else "manual",
+        )
+        
+        # Store metadata about the knowledge
+        metadata_key = f"knowledge_meta_{knowledge_type}"
+        metadata = {
+            "created": self._now_iso(),
+            "source_session": source_session,
+            "branch": branch,
+            "tags": tags or [],
+        }
+        self.context_set(
+            key=metadata_key,
+            value=json.dumps(metadata),
+            scope="global",
+            scope_id=None,
+            source="system",
+        )
+        
+        return f"Knowledge saved as {key}"
+
+    def get_project_knowledge(self, knowledge_type: str = None) -> List[Dict[str, Any]]:
+        """Retrieve project knowledge, optionally filtered by type."""
+        if knowledge_type:
+            key = f"knowledge_{knowledge_type}"
+            row = self.conn.execute(
+                "SELECT value, source, updated FROM context_store WHERE key = ? AND scope = 'global'",
+                (key,),
+            ).fetchone()
+            
+            if row:
+                # Get metadata
+                metadata_key = f"knowledge_meta_{knowledge_type}"
+                meta_row = self.conn.execute(
+                    "SELECT value FROM context_store WHERE key = ? AND scope = 'global'",
+                    (metadata_key,),
+                ).fetchone()
+                
+                metadata = json.loads(meta_row["value"]) if meta_row else {}
+                
+                return [{
+                    "type": knowledge_type,
+                    "content": row["value"],
+                    "source": row["source"],
+                    "updated": row["updated"],
+                    "metadata": metadata,
+                }]
+            return []
+        else:
+            # Get all knowledge
+            rows = self.conn.execute(
+                """SELECT key, value, source, updated FROM context_store 
+                   WHERE scope = 'global' AND key LIKE 'knowledge_%' 
+                   AND key NOT LIKE 'knowledge_meta_%'""",
+            ).fetchall()
+            
+            knowledge_items = []
+            for row in rows:
+                knowledge_type = row["key"].replace("knowledge_", "")
+                
+                # Get metadata
+                metadata_key = f"knowledge_meta_{knowledge_type}"
+                meta_row = self.conn.execute(
+                    "SELECT value FROM context_store WHERE key = ? AND scope = 'global'",
+                    (metadata_key,),
+                ).fetchone()
+                
+                metadata = json.loads(meta_row["value"]) if meta_row else {}
+                
+                knowledge_items.append({
+                    "type": knowledge_type,
+                    "content": row["value"],
+                    "source": row["source"],
+                    "updated": row["updated"],
+                    "metadata": metadata,
+                })
+            
+            return knowledge_items
+
     def session_start(
         self,
         name: str = "Investigation",
@@ -664,6 +1040,8 @@ class KeeliEngine:
         budget: int = 2000,
         session_id: Optional[str] = None,
         branch: Optional[str] = None,
+        include_working_memory: bool = True,
+        include_knowledge: bool = False,
     ) -> str:
         encoding = tiktoken.get_encoding("cl100k_base")
 
@@ -721,6 +1099,38 @@ class KeeliEngine:
             audit_tokens = count_tokens(audit_text)
         current_budget -= audit_tokens
 
+        # Add working memory if requested and session_id provided
+        working_memory_text = ""
+        if include_working_memory and session_id:
+            working_mem = self.working_memory_list(session_id)
+            if working_mem:
+                working_memory_lines = ["## WORKING MEMORY"]
+                for mem in working_mem[:5]:  # Limit to top 5 items
+                    line = f"- {mem['key']}: {mem['value'][:150]}{'...' if len(mem['value']) > 150 else ''}"
+                    if count_tokens("\n".join(working_memory_lines) + "\n" + line) < (current_budget * 0.15):
+                        working_memory_lines.append(line)
+                    else:
+                        break
+                if len(working_memory_lines) > 1:  # Only add if we have items beyond the header
+                    working_memory_text = "\n".join(working_memory_lines) + "\n"
+                    current_budget -= count_tokens(working_memory_text)
+
+        # Add knowledge if requested
+        knowledge_text = ""
+        if include_knowledge:
+            knowledge = self.get_project_knowledge()
+            if knowledge:
+                knowledge_lines = ["## PROJECT KNOWLEDGE"]
+                for k in knowledge[:3]:  # Limit to top 3 knowledge items
+                    line = f"- {k['type']}: {k['content'][:100]}{'...' if len(k['content']) > 100 else ''}"
+                    if count_tokens("\n".join(knowledge_lines) + "\n" + line) < (current_budget * 0.15):
+                        knowledge_lines.append(line)
+                    else:
+                        break
+                if len(knowledge_lines) > 1:  # Only add if we have items beyond the header
+                    knowledge_text = "\n".join(knowledge_lines) + "\n"
+                    current_budget -= count_tokens(knowledge_text)
+
         overview_text = ""
         if tier in ["standard", "full"]:
             overview_file = self.root_dir / "CLAUDE.md" if (self.root_dir / "CLAUDE.md").exists() else self.root_dir / "README.md"
@@ -748,7 +1158,7 @@ class KeeliEngine:
                         break
                 backlog_text = "\n".join(backlog_lines) + "\n"
 
-        return "\n".join(filter(None, [header_text, active_text, audit_text, overview_text, backlog_text]))
+        return "\n".join(filter(None, [header_text, active_text, audit_text, working_memory_text, knowledge_text, overview_text, backlog_text]))
 
     def history(self, task_id: str) -> List[Dict[str, Any]]:
         rows = self.conn.execute(

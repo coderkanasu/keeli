@@ -5,7 +5,7 @@ Fixes applied:
   • LWWRegister: deterministic (timestamp, actor) tuple tiebreaker
   • ORSet: tag-aware observed-remove (only deletes observed tag instances)
   • VectorClock: defensive deep-copy semantics
-  • Event: sqlite3 import fixed
+  • Event: sqlite3 import fixed, made mutable to allow event_id assignment after DB insertion
 """
 
 import json
@@ -16,9 +16,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime, timezone
 
 
-@dataclass(frozen=True)
+@dataclass
 class Event:
-    """Immutable CRDT event representing a single field mutation."""
+    """CRDT event representing a single field mutation. event_id is set after DB insertion."""
     task_id: str
     field: str
     op: str

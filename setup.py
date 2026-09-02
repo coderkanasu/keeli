@@ -13,7 +13,7 @@ def _externalized_version() -> str:
 setup(
     name="keeli",
     version=_externalized_version(),
-    description="Keeli CLI — Host-local MCP tool and structured grounding framework for AI-assisted workflows.",
+    description="Keeli MCP Server — Structured grounding framework for AI-assisted workflows with context management.",
     license="MIT",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
@@ -25,9 +25,4 @@ setup(
     classifiers=[
         "License :: OSI Approved :: MIT License",
     ],
-    entry_points={
-        "console_scripts": [
-            "keeli=keeli.main:main",
-        ],
-    },
 )

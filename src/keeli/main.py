@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """
-Keeli v4.0.1 CLI — Source of truth is the filesystem.
-Directory = Status.
-Index = Performance.
-Audit = Integrity.
+Keeli v6.0 - Legacy CLI Interface (DEPRECATED)
+
+This CLI interface is disabled by default. Keeli is designed to be used
+primarily through the MCP (Model Context Protocol) server for AI integration.
+
+To enable the CLI, set the environment variable: KEELI_ENABLE_CLI=1
+
+For MCP integration, use: python -m keeli.mcp_server
 """
 
-import argparse
 import os
-import re
-import sqlite3
 import sys
+
+# Check if CLI is explicitly enabled
+if not os.getenv("KEELI_ENABLE_CLI"):
+    print("Keeli CLI is disabled by default.", file=sys.stderr)
+    print("Keeli is designed for MCP (Model Context Protocol) integration with AI tools.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To use Keeli:", file=sys.stderr)
+    print("1. Configure MCP server in your AI tool (Cursor, GitHub Copilot, etc.)", file=sys.stderr)
+    print("2. Use the MCP tools: keeli_tasks, keeli_context, keeli_sessions, keeli_memory, keeli_knowledge, keeli_system", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("To enable this legacy CLI, set: KEELI_ENABLE_CLI=1", file=sys.stderr)
+    sys.exit(1)
+
+# Legacy CLI implementation (only runs if KEELI_ENABLE_CLI=1)
+import argparse
+import re
 import json
-import string
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +40,7 @@ from keeli.engine import KeeliEngine
 
 VERSION = "6.0.0"
 
-# --- CLI Wrappers ---
+# --- Legacy CLI Wrappers ---
 engine = KeeliEngine()
 
 def start(args):
@@ -148,14 +164,14 @@ def doctor(args):
         print(f"  Folder {s:10}: {status}")
     
     count, corrected = engine.sync()
-    print(f"✅ Indexing: {count} tasks found, {corrected} corrected for v5.1 compliance.")
+    print(f"✅ Indexing: {count} tasks found, {corrected} corrected.")
     
     # MCP Check
     mcp_config_path = engine.root_dir / ".vscode" / "mcp.json"
     if mcp_config_path.exists():
         print(f"✅ MCP Configuration: Found at {mcp_config_path}")
     else:
-        print("💡 Tip: Run 'keeli mcp-config' to see how to enable GitHub Copilot / Cursor integration.")
+        print("💡 Configure MCP integration for AI tool usage.")
 
 def mcp_config(args):
     py_path = sys.executable
@@ -176,7 +192,7 @@ def mcp_config(args):
     print("---------------------------------------------------\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Keeli v5.0.0 Task Manager")
+    parser = argparse.ArgumentParser(description="Keeli v6.0 Legacy CLI (DEPRECATED - Use MCP instead)")
     parser.add_argument("--version", action="version", version=f"Keeli {VERSION}")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -256,10 +272,6 @@ def main():
         mcp_main()
     elif cmd == "mcp-config": mcp_config(args)
     elif cmd == "doctor": doctor(args)
-
-if __name__ == "__main__":
-    main()
-
 
 if __name__ == "__main__":
     main()
