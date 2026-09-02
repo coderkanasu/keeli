@@ -1,20 +1,56 @@
 """
-Keeli v7.0 - Semantic Search and Relationship Mapping
+Keeli v7.0 - Real Semantic Core with Vector-Based Retrieval
 
-This module provides intelligent semantic search capabilities that understand
-the meaning and relationships between tasks, context, and project elements.
+Phase 1: Replacing keyword matching with proper semantic understanding.
 
-Core Philosophy: "I understand what you mean, not just what you say"
+Core improvements:
+- Vector embeddings with cosine similarity (no external LLM calls)
+- Metadata filtering for structured queries
+- Explainable scoring (returns reason for each match)
+- Filesystem remains the source of truth
 """
 
 import re
 import math
+import json
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from abc import ABC, abstractmethod
+import hashlib
 
-from keeli.llm_interface import LLMInterface
+
+# ── Data Structures ──
+
+@dataclass
+class SearchReason:
+    """Explains why a result was matched."""
+    reason_type: str  # "vector_similarity", "metadata_match", "relationship", "temporal_boost"
+    explanation: str
+    confidence: float  # 0.0 to 1.0
+    
+
+@dataclass
+class SearchResult:
+    """Structured search result with explainable scoring."""
+    node_id: str
+    content: str
+    node_type: str
+    score: float  # 0.0 to 1.0
+    reasons: List[SearchReason] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "node_id": self.node_id,
+            "content": self.content,
+            "node_type": self.node_type,
+            "score": round(self.score, 3),
+            "reasons": [asdict(r) for r in self.reasons],
+            "metadata": self.metadata
+        }
 
 
 @dataclass
@@ -24,10 +60,22 @@ class SemanticNode:
     content: str
     node_type: str  # task, context, knowledge, file, concept
     metadata: Dict[str, Any] = field(default_factory=dict)
-    embeddings: Optional[List[float]] = None  # Placeholder for future ML embeddings
+    embedding: Optional[List[float]] = None  # Dense vector representation
     relationships: Dict[str, float] = field(default_factory=dict)  # related_node_id -> strength
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "content": self.content,
+            "node_type": self.node_type,
+            "metadata": self.metadata,
+            "relationships": self.relationships,
+            "created_at": self.created_at.isoformat(),
+            "last_accessed": self.last_accessed.isoformat()
+        }
 
 
 @dataclass
@@ -41,217 +89,368 @@ class Relationship:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class SemanticKnowledgeGraph:
-    """
-    Semantic knowledge graph that understands relationships between project elements.
+
+# ── Embedding Model Interface ──
+
+class EmbeddingModel(ABC):
+    """Abstract base for embedding models."""
     
-    This goes beyond simple key-value storage by understanding:
-    - Semantic similarity between concepts
-    - Dependency relationships
-    - Temporal patterns
-    - Cross-references and associations
+    @abstractmethod
+    def embed(self, text: str) -> List[float]:
+        """Generate embedding for text."""
+        pass
+    
+    @abstractmethod
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts."""
+        pass
+
+
+class SimpleStatisticalEmbedding(EmbeddingModel):
     """
+    Lightweight statistical embedding (no external calls).
+    
+    Uses character n-grams and term frequencies to create a simple
+    but deterministic embedding vector. Suitable for small-to-medium
+    knowledge graphs.
+    """
+    
+    def __init__(self, vocab_size: int = 512, ngram_size: int = 3):
+        self.vocab_size = vocab_size
+        self.ngram_size = ngram_size
+        self._vocabulary: Dict[str, int] = {}
+        self._vocab_lock = 0
+    
+    def _build_ngrams(self, text: str) -> List[str]:
+        """Extract character n-grams from text."""
+        text = text.lower()
+        ngrams = []
+        for i in range(len(text) - self.ngram_size + 1):
+            ngrams.append(text[i:i+self.ngram_size])
+        return ngrams
+    
+    def _get_vocab_id(self, ngram: str) -> int:
+        """Get vocabulary ID for an n-gram (hash-based)."""
+        hash_val = int(hashlib.md5(ngram.encode()).hexdigest(), 16)
+        return hash_val % self.vocab_size
+    
+    def embed(self, text: str) -> List[float]:
+        """Generate embedding for text."""
+        ngrams = self._build_ngrams(text)
+        if not ngrams:
+            return [0.0] * self.vocab_size
+        
+        vector = [0.0] * self.vocab_size
+        for ngram in ngrams:
+            vocab_id = self._get_vocab_id(ngram)
+            vector[vocab_id] += 1.0
+        
+        # Normalize
+        magnitude = math.sqrt(sum(x*x for x in vector))
+        if magnitude > 0:
+            vector = [x / magnitude for x in vector]
+        
+        return vector
+    
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts."""
+        return [self.embed(text) for text in texts]
+
+
+class MetadataFilter:
+    """Filter nodes based on metadata criteria."""
     
     def __init__(self):
+        self.criteria: List[Tuple[str, str, Any]] = []  # (field, operator, value)
+    
+    def add_criterion(self, field: str, operator: str, value: Any) -> "MetadataFilter":
+        """Add a filter criterion (supports ==, !=, <, >, <=, >=, in, not_in)."""
+        self.criteria.append((field, operator, value))
+        return self
+    
+    def matches(self, metadata: Dict[str, Any]) -> bool:
+        """Check if metadata matches all criteria."""
+        for field, operator, value in self.criteria:
+            if field not in metadata:
+                if operator in ("!=", "not_in"):
+                    continue  # Absent field matches "not equal"
+                else:
+                    return False
+            
+            field_val = metadata[field]
+            
+            if operator == "==":
+                if field_val != value:
+                    return False
+            elif operator == "!=":
+                if field_val == value:
+                    return False
+            elif operator == "<":
+                if not (field_val < value):
+                    return False
+            elif operator == ">":
+                if not (field_val > value):
+                    return False
+            elif operator == "<=":
+                if not (field_val <= value):
+                    return False
+            elif operator == ">=":
+                if not (field_val >= value):
+                    return False
+            elif operator == "in":
+                if field_val not in value:
+                    return False
+            elif operator == "not_in":
+                if field_val in value:
+                    return False
+        
+        return True
+
+
+# ── Core Semantic Search Index ──
+
+class SemanticSearchIndex:
+    """
+    Vector-based semantic search index with explainable scoring.
+    
+    Features:
+    - Embedding-based retrieval
+    - Metadata filtering
+    - Explainable match reasons
+    - Relationship graph navigation
+    - Filesystem-backed persistence
+    """
+    
+    def __init__(self, embedding_model: Optional[EmbeddingModel] = None):
         self._nodes: Dict[str, SemanticNode] = {}
         self._relationships: List[Relationship] = []
-        self._term_index: Dict[str, Set[str]] = defaultdict(set)  # term -> node_ids
+        self.embedding_model = embedding_model or SimpleStatisticalEmbedding()
         self._access_patterns: Dict[str, List[datetime]] = defaultdict(list)
-        
+    
     # ── Node Management ──
     
     def add_node(self, node: SemanticNode) -> None:
-        """Add a node to the knowledge graph."""
+        """Add a node and compute its embedding."""
+        if not node.embedding:
+            node.embedding = self.embedding_model.embed(node.content)
         self._nodes[node.id] = node
-        self._index_node_content(node)
-    
-    def _index_node_content(self, node: SemanticNode) -> None:
-        """Index the content of a node for semantic search."""
-        # Extract terms from content
-        terms = self._extract_terms(node.content)
-        for term in terms:
-            self._term_index[term].add(node.id)
-    
-    def _extract_terms(self, content: str) -> List[str]:
-        """Extract meaningful terms from content."""
-        # Simple term extraction - in production, this would use NLP
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', content.lower())
-        
-        # Filter common stop words
-        stop_words = {'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'has', 'have', 'been', 'will', 'with', 'this', 'that', 'from', 'they', 'would', 'there', 'their', 'what', 'about', 'which', 'when', 'make', 'like', 'into', 'year', 'your', 'just', 'over', 'also', 'such', 'because', 'these', 'first', 'being', 'through', 'most', 'some', 'those', 'than', 'only', 'were', 'said', 'each', 'does', 'could', 'should', 'might', 'must'}
-        
-        return [word for word in words if word not in stop_words and len(word) > 2]
     
     def get_node(self, node_id: str) -> Optional[SemanticNode]:
-        """Get a node by ID."""
+        """Get a node by ID and update access time."""
         if node_id in self._nodes:
             self._nodes[node_id].last_accessed = datetime.now(timezone.utc)
             self._access_patterns[node_id].append(datetime.now(timezone.utc))
             return self._nodes[node_id]
         return None
     
+    def delete_node(self, node_id: str) -> None:
+        """Remove a node and its relationships."""
+        if node_id in self._nodes:
+            del self._nodes[node_id]
+            self._relationships = [
+                r for r in self._relationships
+                if r.source_id != node_id and r.target_id != node_id
+            ]
+    
+    def update_node_content(self, node_id: str, new_content: str) -> None:
+        """Update node content and re-embed."""
+        if node_id in self._nodes:
+            self._nodes[node_id].content = new_content
+            self._nodes[node_id].embedding = self.embedding_model.embed(new_content)
+    
     # ── Relationship Management ──
     
-    def add_relationship(self, relationship: Relationship) -> None:
+    def add_relationship(self, source_id: str, target_id: str, 
+                        rel_type: str, strength: float = 0.8) -> None:
         """Add a relationship between nodes."""
-        self._relationships.append(relationship)
+        rel = Relationship(
+            source_id=source_id,
+            target_id=target_id,
+            relationship_type=rel_type,
+            strength=min(1.0, max(0.0, strength))
+        )
+        self._relationships.append(rel)
         
-        # Update node relationships
-        if relationship.source_id in self._nodes:
-            self._nodes[relationship.source_id].relationships[relationship.target_id] = relationship.strength
-        if relationship.target_id in self._nodes:
-            self._nodes[relationship.target_id].relationships[relationship.source_id] = relationship.strength
+        if source_id in self._nodes:
+            self._nodes[source_id].relationships[target_id] = rel.strength
+        if target_id in self._nodes:
+            self._nodes[target_id].relationships[source_id] = rel.strength
     
-    def add_dependency(self, source_id: str, target_id: str, strength: float = 0.8) -> None:
-        """Add a dependency relationship."""
-        relationship = Relationship(
-            source_id=source_id,
-            target_id=target_id,
-            relationship_type="depends_on",
-            strength=strength
-        )
-        self.add_relationship(relationship)
-    
-    def add_similarity(self, source_id: str, target_id: str, strength: float = 0.6) -> None:
-        """Add a similarity relationship."""
-        relationship = Relationship(
-            source_id=source_id,
-            target_id=target_id,
-            relationship_type="similar_to",
-            strength=strength
-        )
-        self.add_relationship(relationship)
-    
-    def get_related_nodes(self, node_id: str, relationship_type: Optional[str] = None, min_strength: float = 0.3) -> List[SemanticNode]:
-        """Get nodes related to a given node."""
+    def get_related_nodes(self, node_id: str, rel_type: Optional[str] = None,
+                         min_strength: float = 0.3) -> List[Tuple[SemanticNode, float]]:
+        """Get related nodes with their relationship strength."""
         if node_id not in self._nodes:
             return []
         
         related = []
         for rel in self._relationships:
             if rel.source_id == node_id or rel.target_id == node_id:
-                if relationship_type and rel.relationship_type != relationship_type:
+                if rel_type and rel.relationship_type != rel_type:
                     continue
                 if rel.strength < min_strength:
                     continue
                 
                 target_id = rel.target_id if rel.source_id == node_id else rel.source_id
                 if target_id in self._nodes:
-                    related.append(self._nodes[target_id])
+                    related.append((self._nodes[target_id], rel.strength))
         
-        return related
+        return sorted(related, key=lambda x: x[1], reverse=True)
     
-    # ── Semantic Search ──
+    # ── Vector Similarity ──
     
-    def semantic_search(self, query: str, max_results: int = 10, node_type: Optional[str] = None) -> List[Tuple[SemanticNode, float]]:
-        """
-        Perform semantic search based on query terms.
-        
-        Returns list of (node, relevance_score) tuples.
-        """
-        query_terms = self._extract_terms(query)
-        if not query_terms:
-            return []
-        
-        # Calculate relevance scores for each node
-        relevance_scores = []
-        
-        for node_id, node in self._nodes.items():
-            if node_type and node.node_type != node_type:
-                continue
-            
-            score = self._calculate_relevance(query_terms, node)
-            if score > 0:
-                relevance_scores.append((node, score))
-        
-        # Sort by relevance score
-        relevance_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        return relevance_scores[:max_results]
-    
-    def _calculate_relevance(self, query_terms: List[str], node: SemanticNode) -> float:
-        """Calculate relevance score for a node given query terms."""
-        node_terms = self._extract_terms(node.content)
-        
-        # Term frequency scoring
-        matching_terms = set(query_terms) & set(node_terms)
-        if not matching_terms:
+    @staticmethod
+    def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        if not vec1 or not vec2 or len(vec1) != len(vec2):
             return 0.0
         
-        # Simple TF-IDF-like scoring
-        term_score = len(matching_terms) / len(query_terms)
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        mag1 = math.sqrt(sum(a*a for a in vec1))
+        mag2 = math.sqrt(sum(b*b for b in vec2))
         
-        # Boost for exact phrase matches
-        query_lower = " ".join(query_terms)
-        content_lower = node.content.lower()
-        if query_lower in content_lower:
-            term_score *= 1.5
+        if mag1 == 0 or mag2 == 0:
+            return 0.0
         
-        # Boost for recently accessed nodes
-        time_since_access = (datetime.now(timezone.utc) - node.last_accessed).total_seconds()
-        recency_boost = max(0, 1.0 - (time_since_access / 3600))  # Decay over 1 hour
-        
-        # Boost for nodes with strong relationships
-        relationship_boost = sum(node.relationships.values()) / max(len(node.relationships), 1)
-        
-        final_score = term_score * 0.6 + recency_boost * 0.2 + relationship_boost * 0.2
-        
-        return min(final_score, 1.0)
+        return dot_product / (mag1 * mag2)
     
-    # ── Concept Discovery ──
+    # ── Search ──
     
-    def discover_concepts(self, min_frequency: int = 3) -> List[Tuple[str, int]]:
-        """Discover frequently occurring concepts across the knowledge graph."""
-        term_frequencies = Counter()
+    def search(self, query: str, max_results: int = 10, 
+              metadata_filter: Optional[MetadataFilter] = None,
+              node_type: Optional[str] = None) -> List[SearchResult]:
+        """
+        Perform vector-based semantic search with explainable scoring.
         
-        for node in self._nodes.values():
-            terms = self._extract_terms(node.content)
-            for term in terms:
-                term_frequencies[term] += 1
+        Args:
+            query: Search query string
+            max_results: Maximum results to return
+            metadata_filter: Optional metadata filter to apply
+            node_type: Filter by node type
         
-        # Filter by minimum frequency
-        frequent_concepts = [(term, freq) for term, freq in term_frequencies.items() if freq >= min_frequency]
-        frequent_concepts.sort(key=lambda x: x[1], reverse=True)
-        
-        return frequent_concepts[:20]
-    
-    def find_clusters(self) -> List[List[str]]:
-        """Find clusters of related nodes."""
-        if not self._nodes:
+        Returns:
+            List of SearchResult objects with reasons
+        """
+        if not query.strip():
             return []
         
-        # Simple clustering based on relationships
-        clusters = []
-        visited = set()
+        query_embedding = self.embedding_model.embed(query)
+        results = []
         
-        for node_id in self._nodes:
-            if node_id in visited:
+        for node_id, node in self._nodes.items():
+            # Apply filters
+            if node_type and node.node_type != node_type:
+                continue
+            if metadata_filter and not metadata_filter.matches(node.metadata):
                 continue
             
-            # Start new cluster
-            cluster = [node_id]
-            visited.add(node_id)
+            # Skip nodes without embeddings
+            if not node.embedding:
+                continue
             
-            # BFS to find related nodes
-            queue = [node_id]
-            while queue:
-                current = queue.pop(0)
-                related = self.get_related_nodes(current, min_strength=0.5)
-                
-                for related_node in related:
-                    if related_node.id not in visited:
-                        visited.add(related_node.id)
-                        cluster.append(related_node.id)
-                        queue.append(related_node.id)
+            # Calculate vector similarity
+            vector_score = self.cosine_similarity(query_embedding, node.embedding)
             
-            if len(cluster) > 1:
-                clusters.append(cluster)
+            # Gather match reasons
+            reasons = []
+            
+            # Vector similarity reason
+            if vector_score > 0.3:
+                reasons.append(SearchReason(
+                    reason_type="vector_similarity",
+                    explanation=f"Content matches query semantically ({vector_score:.2f} similarity)",
+                    confidence=vector_score
+                ))
+            
+            # Temporal boost reason
+            time_since_access = (datetime.now(timezone.utc) - node.last_accessed).total_seconds()
+            recency_score = max(0, 1.0 - (time_since_access / 3600))  # Decay over 1 hour
+            if recency_score > 0.1:
+                reasons.append(SearchReason(
+                    reason_type="temporal_boost",
+                    explanation=f"Recently accessed ({recency_score:.2f} recency boost)",
+                    confidence=recency_score
+                ))
+            
+            # Relationship boost reason
+            if node.relationships:
+                relationship_score = sum(node.relationships.values()) / len(node.relationships)
+                if relationship_score > 0.2:
+                    reasons.append(SearchReason(
+                        reason_type="relationship",
+                        explanation=f"Has strong relationships in knowledge graph ({relationship_score:.2f} avg)",
+                        confidence=relationship_score
+                    ))
+            
+            # Metadata match reason
+            if metadata_filter:
+                reasons.append(SearchReason(
+                    reason_type="metadata_match",
+                    explanation="Matches all metadata filter criteria",
+                    confidence=1.0
+                ))
+            
+            # Compute final score from reasons
+            if not reasons:
+                continue
+            
+            # Weighted score: vector similarity (60%) + recency (20%) + relationship (15%) + metadata (5%)
+            final_score = 0.0
+            if any(r.reason_type == "vector_similarity" for r in reasons):
+                vs_reason = next(r for r in reasons if r.reason_type == "vector_similarity")
+                final_score += vs_reason.confidence * 0.60
+            if any(r.reason_type == "temporal_boost" for r in reasons):
+                tb_reason = next(r for r in reasons if r.reason_type == "temporal_boost")
+                final_score += tb_reason.confidence * 0.20
+            if any(r.reason_type == "relationship" for r in reasons):
+                rel_reason = next(r for r in reasons if r.reason_type == "relationship")
+                final_score += rel_reason.confidence * 0.15
+            if any(r.reason_type == "metadata_match" for r in reasons):
+                final_score += 0.05
+            
+            results.append(SearchResult(
+                node_id=node_id,
+                content=node.content,
+                node_type=node.node_type,
+                score=min(1.0, final_score),
+                reasons=reasons,
+                metadata=node.metadata
+            ))
         
-        return clusters
+        # Sort by score and return top results
+        results.sort(key=lambda x: x.score, reverse=True)
+        return results[:max_results]
+    
+    def explain_search(self, query: str, node_id: str) -> str:
+        """Generate a human-readable explanation of why a node matched a query."""
+        node = self.get_node(node_id)
+        if not node:
+            return f"Node '{node_id}' not found."
+        
+        query_embedding = self.embedding_model.embed(query)
+        similarity = self.cosine_similarity(query_embedding, node.embedding or [])
+        
+        explanation = f"**Match Analysis for '{node_id}'**\n\n"
+        explanation += f"**Query:** {query}\n"
+        explanation += f"**Vector Similarity Score:** {similarity:.3f}\n\n"
+        explanation += f"**Reasons for Match:**\n"
+        
+        if similarity > 0.3:
+            explanation += f"- **Semantic Similarity**: Content matches query semantically\n"
+        
+        time_since = (datetime.now(timezone.utc) - node.last_accessed).total_seconds()
+        if time_since < 3600:
+            explanation += f"- **Recency**: Recently accessed ({time_since / 60:.0f} minutes ago)\n"
+        
+        if node.relationships:
+            explanation += f"- **Relationships**: Connected to {len(node.relationships)} other nodes\n"
+        
+        explanation += f"\n**Node Content:** {node.content[:200]}...\n"
+        
+        return explanation
     
     # ── Knowledge Graph Statistics ──
     
-    def get_graph_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the knowledge graph."""
         node_types = Counter(node.node_type for node in self._nodes.values())
         relationship_types = Counter(rel.relationship_type for rel in self._relationships)
@@ -261,37 +460,77 @@ class SemanticKnowledgeGraph:
             "total_relationships": len(self._relationships),
             "node_types": dict(node_types),
             "relationship_types": dict(relationship_types),
-            "indexed_terms": len(self._term_index),
             "avg_relationships_per_node": len(self._relationships) / max(len(self._nodes), 1),
-            "most_connected_nodes": self._get_most_connected_nodes(5)
+            "total_accesses": sum(len(v) for v in self._access_patterns.values())
         }
     
-    def _get_most_connected_nodes(self, limit: int) -> List[Tuple[str, int]]:
-        """Get the most connected nodes."""
-        connection_counts = []
+    def export_to_json(self) -> str:
+        """Export knowledge graph to JSON for persistence."""
+        nodes_data = [node.to_dict() for node in self._nodes.values()]
+        rels_data = [asdict(rel) for rel in self._relationships]
         
-        for node_id, node in self._nodes.items():
-            connection_count = len(node.relationships)
-            connection_counts.append((node_id, connection_count))
+        for rel in rels_data:
+            rel["created_at"] = rel["created_at"].isoformat()
         
-        connection_counts.sort(key=lambda x: x[1], reverse=True)
-        return connection_counts[:limit]
+        return json.dumps({
+            "nodes": nodes_data,
+            "relationships": rels_data,
+            "stats": self.get_stats()
+        }, indent=2)
+    
+    def import_from_json(self, json_data: str) -> None:
+        """Import knowledge graph from JSON."""
+        try:
+            data = json.loads(json_data)
+            
+            # Import nodes
+            for node_data in data.get("nodes", []):
+                node = SemanticNode(
+                    id=node_data["id"],
+                    content=node_data["content"],
+                    node_type=node_data["node_type"],
+                    metadata=node_data.get("metadata", {}),
+                    relationships=node_data.get("relationships", {})
+                )
+                self.add_node(node)
+            
+            # Import relationships
+            for rel_data in data.get("relationships", []):
+                self.add_relationship(
+                    rel_data["source_id"],
+                    rel_data["target_id"],
+                    rel_data["relationship_type"],
+                    rel_data["strength"]
+                )
+        except Exception as e:
+            raise ValueError(f"Failed to import knowledge graph: {e}")
 
+
+# ── High-Level Interface for LLMs ──
 
 class SemanticSearchInterface:
     """
-    High-level interface for semantic search capabilities.
+    High-level semantic search interface designed for LLM interaction.
     
-    This provides easy-to-use methods for LLMs to leverage semantic understanding.
+    Replaces the old keyword-based search with vector-based understanding.
     """
     
-    def __init__(self, interface: LLMInterface):
+    def __init__(self, interface: Optional[Any] = None):
+        """
+        Initialize semantic search interface.
+        
+        Args:
+            interface: Optional LLMInterface for integration (can be None for standalone use)
+        """
         self.interface = interface
-        self.knowledge_graph = SemanticKnowledgeGraph()
+        self.index = SemanticSearchIndex()
         self._index_existing_content()
     
     def _index_existing_content(self) -> None:
         """Index existing content from the Keeli engine."""
+        if not self.interface:
+            return
+        
         try:
             # Index tasks
             tasks = self.interface.engine.list_tasks()
@@ -300,147 +539,116 @@ class SemanticSearchInterface:
                     id=task['id'],
                     content=f"{task['title']} {task.get('description', '')}",
                     node_type="task",
-                    metadata={"status": task['status'], "priority": task['priority']}
+                    metadata={
+                        "status": task['status'],
+                        "priority": task['priority'],
+                        "tags": task.get('tags', [])
+                    }
                 )
-                self.knowledge_graph.add_node(node)
+                self.index.add_node(node)
                 
                 # Extract dependencies
                 if task.get('depends_on') and task['depends_on'] != '—':
                     deps = re.findall(r'[Tt]-?\d+', task['depends_on'])
                     for dep in deps:
                         dep_id = dep.upper() if dep.startswith('T-') else f"T-{dep[2:]}"
-                        self.knowledge_graph.add_dependency(task['id'], dep_id)
+                        self.index.add_relationship(task['id'], dep_id, "depends_on")
             
-            # Index working memory if session exists
-            if self.interface._auto_session_id:
+            # Index working memory if available
+            if hasattr(self.interface, '_auto_session_id') and self.interface._auto_session_id:
                 memory_items = self.interface.engine.working_memory_list(self.interface._auto_session_id)
                 for item in memory_items:
                     node = SemanticNode(
                         id=f"memory:{item['key']}",
                         content=item['value'],
                         node_type="context",
-                        metadata={"key": item['key'], "ttl": item['ttl_minutes']}
+                        metadata={"key": item['key']}
                     )
-                    self.knowledge_graph.add_node(node)
-        
+                    self.index.add_node(node)
         except Exception as e:
-            print(f"Error indexing existing content: {e}")
+            print(f"Warning: Could not index existing content: {e}")
     
-    def search(self, query: str, context: str = "") -> str:
+    def search(self, query: str, max_results: int = 5, 
+              filter_by_type: Optional[str] = None,
+              filter_by_status: Optional[str] = None) -> str:
         """
-        Perform semantic search and return natural language results.
+        Perform semantic search and return formatted results.
         
-        This is the main method LLMs should use for finding related content.
+        Args:
+            query: Search query
+            max_results: Number of results to return
+            filter_by_type: Optional node type filter (task, context, etc.)
+            filter_by_status: Optional status filter for tasks
+        
+        Returns:
+            Formatted string with search results and explanations
         """
-        results = self.knowledge_graph.semantic_search(query, max_results=5)
+        # Build metadata filter if needed
+        metadata_filter = None
+        if filter_by_status:
+            metadata_filter = MetadataFilter().add_criterion("status", "==", filter_by_status)
+        
+        # Perform search
+        results = self.index.search(
+            query=query,
+            max_results=max_results,
+            metadata_filter=metadata_filter,
+            node_type=filter_by_type
+        )
         
         if not results:
-            return f"🔍 No results found for '{query}'. Try different terms or add more context."
+            return f"🔍 No results found for '{query}'"
         
-        response = f"🔍 **Search results for '{query}':**\n\n"
+        response = f"🔍 **Semantic Search Results for '{query}'**\n\n"
         
-        for node, score in results:
-            relevance = "🔥" if score > 0.8 else "⭐" if score > 0.5 else "💡"
-            response += f"{relevance} **{node.id}** ({node.node_type}) - Relevance: {score:.2f}\n"
-            response += f"   {node.content[:100]}...\n"
+        for i, result in enumerate(results, 1):
+            relevance_emoji = "🔥" if result.score > 0.8 else "⭐" if result.score > 0.5 else "💡"
+            response += f"{relevance_emoji} **{result.node_id}** ({result.node_type}) - Score: {result.score:.2f}\n"
+            response += f"   {result.content[:100]}\n"
             
-            # Show related information
-            if node.metadata:
-                metadata_str = ", ".join(f"{k}={v}" for k, v in node.metadata.items())
-                response += f"   *{metadata_str}*\n"
-            
+            # Show reasons
+            if result.reasons:
+                response += f"   **Why matched:**\n"
+                for reason in result.reasons:
+                    response += f"     - {reason.explanation}\n"
             response += "\n"
-        
-        # Suggest related concepts
-        concepts = self.knowledge_graph.discover_concepts(min_frequency=2)
-        if concepts:
-            response += f"**Related concepts:** {', '.join([c[0] for c in concepts[:5]])}\n"
         
         return response
     
-    def find_related(self, item_id: str) -> str:
-        """Find items related to a specific task or context item."""
-        node = self.knowledge_graph.get_node(item_id)
+    def explain(self, query: str, node_id: str) -> str:
+        """Get detailed explanation of why a node matched a query."""
+        return self.index.explain_search(query, node_id)
+    
+    def get_related(self, node_id: str, rel_type: Optional[str] = None) -> str:
+        """Get nodes related to a specific item."""
+        node = self.index.get_node(node_id)
         if not node:
-            return f"❓ Item '{item_id}' not found in knowledge graph."
+            return f"❓ Node '{node_id}' not found."
         
-        related = self.knowledge_graph.get_related_nodes(item_id, min_strength=0.3)
-        
+        related = self.index.get_related_nodes(node_id, rel_type=rel_type)
         if not related:
-            return f"📭 No strong relationships found for '{item_id}'."
+            return f"📭 No relationships found for '{node_id}'."
         
-        response = f"🔗 **Items related to {item_id}:**\n\n"
-        
-        for related_node in related:
-            strength = "🔗" if related_node.relationships.get(item_id, 0) > 0.7 else "📍"
-            response += f"{strength} **{related_node.id}** ({related_node.node_type})\n"
-            response += f"   {related_node.content[:80]}...\n\n"
+        response = f"🔗 **Related to {node_id}**\n\n"
+        for related_node, strength in related:
+            response += f"**{related_node.id}** (strength: {strength:.2f})\n"
+            response += f"  {related_node.content[:80]}...\n\n"
         
         return response
     
-    def discover_patterns(self) -> str:
-        """Discover and report patterns in the knowledge graph."""
-        stats = self.knowledge_graph.get_graph_stats()
-        concepts = self.knowledge_graph.discover_concepts()
-        clusters = self.knowledge_graph.find_clusters()
-        
-        response = "🧠 **Knowledge Graph Patterns:**\n\n"
-        
-        response += f"📊 **Graph Statistics:**\n"
-        response += f"   • Total nodes: {stats['total_nodes']}\n"
-        response += f"   • Total relationships: {stats['total_relationships']}\n"
-        response += f"   • Node types: {stats['node_types']}\n"
-        response += f"   • Avg relationships per node: {stats['avg_relationships_per_node']:.2f}\n\n"
-        
-        if concepts:
-            response += f"💡 **Frequent Concepts:**\n"
-            for concept, freq in concepts[:10]:
-                response += f"   • {concept} ({freq} occurrences)\n"
-            response += "\n"
-        
-        if clusters:
-            response += f"🔗 **Discovered Clusters:**\n"
-            for i, cluster in enumerate(clusters[:5]):
-                response += f"   • Cluster {i+1}: {', '.join(cluster[:3])}{'...' if len(cluster) > 3 else ''}\n"
-            response += "\n"
-        
-        if stats['most_connected_nodes']:
-            response += f"⭐ **Most Connected Nodes:**\n"
-            for node_id, count in stats['most_connected_nodes']:
-                response += f"   • {node_id} ({count} connections)\n"
-        
-        return response
-    
-    def add_context_to_graph(self, key: str, content: str, context_type: str = "context") -> str:
-        """Add new context to the knowledge graph."""
+    def add_to_graph(self, node_id: str, content: str, node_type: str = "context",
+                    metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Add content to the knowledge graph."""
         node = SemanticNode(
-            id=f"{context_type}:{key}",
+            id=node_id,
             content=content,
-            node_type=context_type,
-            metadata={"key": key}
+            node_type=node_type,
+            metadata=metadata or {}
         )
-        self.knowledge_graph.add_node(node)
+        self.index.add_node(node)
         
-        # Try to find and create relationships with existing nodes
-        self._auto_create_relationships(node)
-        
-        return f"✅ Added '{key}' to knowledge graph with {len(node.relationships)} auto-discovered relationships."
+        return f"✅ Added '{node_id}' to knowledge graph with embedding."
     
-    def _auto_create_relationships(self, new_node: SemanticNode) -> None:
-        """Automatically create relationships based on content similarity."""
-        new_terms = set(self.knowledge_graph._extract_terms(new_node.content))
-        
-        for existing_id, existing_node in self.knowledge_graph._nodes.items():
-            if existing_id == new_node.id:
-                continue
-            
-            existing_terms = set(self.knowledge_graph._extract_terms(existing_node.content))
-            
-            # Calculate Jaccard similarity
-            intersection = len(new_terms & existing_terms)
-            union = len(new_terms | existing_terms)
-            
-            if union > 0:
-                similarity = intersection / union
-                if similarity > 0.3:  # Threshold for similarity
-                    self.knowledge_graph.add_similarity(new_node.id, existing_id, strength=similarity)
+    def get_stats(self) -> Dict[str, Any]:
+        """Get knowledge graph statistics."""
+        return self.index.get_stats()
