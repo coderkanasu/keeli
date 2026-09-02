@@ -164,6 +164,11 @@ class TelemetryStore:
                     FROM telemetry_events
                     WHERE intent_type = ? AND outcome IS NOT NULL
                 """, (OutcomeType.SUCCESS.value, intent_type))
+                row = cursor.fetchone()
+                if not row or row[0] == 0:
+                    return {"total_requests": 0, "success_rate": 0.0}
+                
+                total, successes, avg_conf, avg_time, min_conf, max_conf = row
             else:
                 # Overall stats
                 cursor = conn.execute("""
@@ -175,12 +180,13 @@ class TelemetryStore:
                     FROM telemetry_events
                     WHERE outcome IS NOT NULL
                 """, (OutcomeType.SUCCESS.value,))
+                
+                row = cursor.fetchone()
+                if not row or row[0] == 0:
+                    return {"total_requests": 0, "success_rate": 0.0}
+                
+                total, successes, avg_conf, avg_time = row
             
-            row = cursor.fetchone()
-            if not row or row[0] == 0:
-                return {"total_requests": 0, "success_rate": 0.0}
-            
-            total, successes, avg_conf, avg_time = row
             success_rate = (successes / total) if total > 0 else 0.0
             
             return {
