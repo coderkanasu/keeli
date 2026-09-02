@@ -695,7 +695,7 @@ class LLMInterface:
             "confidence": parsed.confidence,
             "evidence": parsed.evidence
         })
-        self._log_telemetry_success(parsed, "unknown", request)
+        self._log_telemetry_success(parsed, "unknown", original_request)
         return f"🤔 I didn't understand '{original_request}'. Try asking for help with 'help' or rephrase your request."
 
     
