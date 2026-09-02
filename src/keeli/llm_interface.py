@@ -1,7 +1,8 @@
 """
-Keeli v7.0 - LLM-Centric Unified Interface with Structured Intent Routing
+Keeli v7.0 - LLM-Centric Unified Interface with Structured Intent Routing & Telemetry
 
-Phase 2: Structured Intent Routing - Replaces fragile NLP with typed schemas.
+Phase 2: Structured Intent Routing
+Phase 3: Telemetry & Learning Loop
 
 This module provides a simplified, natural language interface designed specifically
 for LLM workflows. It eliminates the complexity of multiple tools and parameters
@@ -24,6 +25,7 @@ from keeli.memory_crdt import MemoryCRDTStore, PredictiveCache
 from keeli.semantic_search import SemanticSearchInterface
 from keeli.workflow_templates import WorkflowTemplateLibrary
 from keeli.context_optimizer import IntelligentContextBuilder
+from keeli.telemetry import TelemetryStore, TelemetryLogger, OutcomeType, CheckpointType
 
 if TYPE_CHECKING:
     from keeli.workflow_orchestrator import WorkflowOrchestrator, WorkflowType
@@ -98,6 +100,10 @@ class LLMInterface:
         self._activity_log: List[Dict[str, Any]] = []
         self._context_cache: Dict[str, Any] = {}
         self._intent_log: List[ParsedIntent] = []  # For telemetry
+        
+        # Phase 3: Telemetry & Learning Loop
+        self.telemetry_store = TelemetryStore()
+        self.telemetry_logger = TelemetryLogger(self.telemetry_store)
         
         # Deferred import to avoid circular dependency
         from keeli.workflow_orchestrator import WorkflowOrchestrator
@@ -365,17 +371,35 @@ class LLMInterface:
         2. Validates intent (confidence threshold, missing fields)
         3. Falls back to clarification if needed
         4. Routes to appropriate handler
-        5. Logs all actions for telemetry
+        5. Logs all actions for telemetry (Phase 3)
         """
+        # ── Telemetry: Start Request ──
+        self.telemetry_logger.start_request(request)
+        
         session_id = self._ensure_session(f"Natural language request: {request[:50]}")
         
         # ── Phase 1: Parse Intent ──
         parsed_intent = self._parse_intent(request)
         self._intent_log.append(parsed_intent)
+        self.telemetry_logger.checkpoint(CheckpointType.INTENT_PARSED)
         
         # ── Phase 2: Validate Intent ──
         is_valid, clarification_prompt = self._validate_intent(parsed_intent)
+        self.telemetry_logger.checkpoint(CheckpointType.VALIDATION_CHECKED)
+        
         if not is_valid:
+            # Log clarification request
+            self.telemetry_logger.log_request_lifecycle(
+                request_text=request,
+                intent_type=parsed_intent.intent.value,
+                confidence=parsed_intent.confidence,
+                parameters=parsed_intent.parameters,
+                missing_fields=parsed_intent.missing_fields,
+                validation_passed=False,
+                route_chosen="clarification_request",
+                outcome=OutcomeType.CLARIFICATION_REQUESTED,
+                metadata={"evidence": parsed_intent.evidence}
+            )
             return self._request_clarification(parsed_intent, request, clarification_prompt, session_id)
         
         # ── Phase 3: Check Workflow Triggers ──
@@ -386,9 +410,30 @@ class LLMInterface:
                 template_info = self.template_library.format_template_for_display(matching_template)
                 workflow_start = self.workflow_orchestrator.start_workflow(workflow_type, request)
                 self._log_activity("workflow_started", {"workflow_type": workflow_type.value})
+                # Log workflow start
+                self.telemetry_logger.log_request_lifecycle(
+                    request_text=request,
+                    intent_type=parsed_intent.intent.value,
+                    confidence=parsed_intent.confidence,
+                    parameters=parsed_intent.parameters,
+                    missing_fields=[],
+                    validation_passed=True,
+                    route_chosen="workflow_template",
+                    outcome=OutcomeType.SUCCESS
+                )
                 return f"{workflow_start}\n\n📋 **Suggested Template:**\n{template_info}"
             workflow_start = self.workflow_orchestrator.start_workflow(workflow_type, request)
             self._log_activity("workflow_started", {"workflow_type": workflow_type.value})
+            self.telemetry_logger.log_request_lifecycle(
+                request_text=request,
+                intent_type=parsed_intent.intent.value,
+                confidence=parsed_intent.confidence,
+                parameters=parsed_intent.parameters,
+                missing_fields=[],
+                validation_passed=True,
+                route_chosen="workflow",
+                outcome=OutcomeType.SUCCESS
+            )
             return workflow_start
         
         # ── Phase 4: Handle Workflow Continuation ──
@@ -404,6 +449,8 @@ class LLMInterface:
         
         # ── Phase 5: Route to Handler ──
         try:
+            self.telemetry_logger.checkpoint(CheckpointType.ROUTE_CHOSEN)
+            
             if parsed_intent.intent == IntentType.CREATE_TASK:
                 return self._handle_create_task(parsed_intent, session_id)
             
@@ -442,7 +489,32 @@ class LLMInterface:
         
         except Exception as e:
             self._log_activity("execution_error", {"intent": parsed_intent.intent.value, "error": str(e)})
+            # Log error to telemetry
+            self.telemetry_logger.log_request_lifecycle(
+                request_text=request,
+                intent_type=parsed_intent.intent.value,
+                confidence=parsed_intent.confidence,
+                parameters=parsed_intent.parameters,
+                missing_fields=parsed_intent.missing_fields,
+                validation_passed=True,
+                route_chosen=parsed_intent.intent.value,
+                outcome=OutcomeType.FAILURE,
+                error_message=str(e)
+            )
             return f"❌ Error executing intent '{parsed_intent.intent.value}': {str(e)}"
+    
+    def _log_telemetry_success(self, parsed: ParsedIntent, route: str) -> None:
+        """Helper to log successful intent execution to telemetry."""
+        self.telemetry_logger.log_request_lifecycle(
+            request_text="",  # Already captured in ask()
+            intent_type=parsed.intent.value,
+            confidence=parsed.confidence,
+            parameters=parsed.parameters,
+            missing_fields=[],
+            validation_passed=True,
+            route_chosen=route,
+            outcome=OutcomeType.SUCCESS
+        )
     
     # ── Intent Handlers (Structured Execution) ──
     
@@ -463,6 +535,7 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
+        self._log_telemetry_success(parsed, "create_task")
         return f"✅ Created task {task_id}: {title}"
     
     def _handle_get_next_task(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -471,13 +544,16 @@ class LLMInterface:
         if task:
             self.engine.session_focus(task["id"], session_id=session_id)
             self._log_activity("task_focused", {"task_id": task["id"], "intent": parsed.intent.value})
+            self._log_telemetry_success(parsed, "get_next_task")
             return f"🎯 Next task: {task['id']} - {task['title']} (Priority: {task['priority']}, Status: {task['status']})"
+        self._log_telemetry_success(parsed, "get_next_task_empty")
         return "📭 No pending tasks. Good job!"
     
     def _handle_list_tasks(self, parsed: ParsedIntent, session_id: str) -> str:
         """Handle task listing."""
         tasks = self.engine.list_tasks()
         if not tasks:
+            self._log_telemetry_success(parsed, "list_tasks_empty")
             return "📭 No tasks found."
         response = "📋 Current tasks:\n"
         for task in tasks[:10]:
@@ -485,6 +561,7 @@ class LLMInterface:
         if len(tasks) > 10:
             response += f"  ... and {len(tasks) - 10} more"
         self._log_activity("tasks_listed", {"count": len(tasks), "intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "list_tasks")
         return response
     
     def _handle_complete_task(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -494,6 +571,7 @@ class LLMInterface:
             return "❓ Which task? Please specify the task ID (e.g., T-0001)"
         self.engine.move_task(task_id, "archive", session_id=session_id)
         self._log_activity("task_completed", {"task_id": task_id, "intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "complete_task")
         return f"✅ Completed task {task_id}"
     
     def _handle_get_status(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -517,6 +595,7 @@ class LLMInterface:
                 response += f"  • {task['id']}: {task['title']}\n"
         
         self._log_activity("status_requested", {"intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "get_status")
         return response
     
     def _handle_store_context(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -534,6 +613,7 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
+        self._log_telemetry_success(parsed, "store_context")
         return f"🧠 Remembered: {content[:50]}..."
     
     def _handle_get_context(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -541,6 +621,7 @@ class LLMInterface:
         items = self.engine.working_memory_list(session_id)
         
         if not items:
+            self._log_telemetry_success(parsed, "get_context_empty")
             return "🧠 Nothing remembered yet. Tell me what to remember!"
         
         response = "🧠 **What I remember:**\n"
@@ -548,6 +629,7 @@ class LLMInterface:
             response += f"  • {item['key']}: {item['value'][:80]}...\n"
         
         self._log_activity("context_retrieved", {"count": len(items), "intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "get_context")
         return response
     
     def _handle_semantic_search(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -559,12 +641,14 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
+        self._log_telemetry_success(parsed, "semantic_search")
         return result
     
     def _handle_discover_patterns(self, parsed: ParsedIntent, session_id: str) -> str:
         """Handle pattern discovery."""
         result = self.semantic_search.discover_patterns()
         self._log_activity("patterns_discovered", {"intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "discover_patterns")
         return result
     
     def _handle_summarize(self, parsed: ParsedIntent, session_id: str) -> str:
@@ -592,11 +676,13 @@ class LLMInterface:
         )
         
         self._log_activity("session_summarized", {"intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "summarize")
         return summary
     
     def _handle_help(self, parsed: ParsedIntent, session_id: str) -> str:
         """Handle help request."""
         self._log_activity("help_requested", {"intent": parsed.intent.value})
+        self._log_telemetry_success(parsed, "help")
         return self._get_help()
     
     def _handle_unknown(self, parsed: ParsedIntent, session_id: str, original_request: str) -> str:
@@ -606,6 +692,7 @@ class LLMInterface:
             "confidence": parsed.confidence,
             "evidence": parsed.evidence
         })
+        self._log_telemetry_success(parsed, "unknown")
         return f"🤔 I didn't understand '{original_request}'. Try asking for help with 'help' or rephrase your request."
 
     
@@ -759,3 +846,21 @@ Just ask naturally!
             digest += f"\n\n💡 **Suggestion:** {suggestion}"
         
         return digest
+    
+    # ── Telemetry & Learning Loop ──
+    
+    def get_telemetry_stats(self, intent_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get telemetry statistics for v7.0 validation."""
+        return self.telemetry_store.get_stats(intent_type)
+    
+    def get_confidence_calibration(self, intent_type: Optional[str] = None) -> Dict[str, Any]:
+        """Get confidence calibration analysis."""
+        return self.telemetry_store.get_confidence_calibration(intent_type)
+    
+    def get_intent_distribution(self) -> Dict[str, int]:
+        """Get distribution of intents across all requests."""
+        return self.telemetry_store.get_intent_distribution()
+    
+    def export_telemetry(self, output_path: Path, intent_type: Optional[str] = None) -> None:
+        """Export telemetry events to JSON for analysis."""
+        self.telemetry_store.export_to_json(output_path, intent_type)

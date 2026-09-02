@@ -214,7 +214,7 @@ class WorkflowTemplateLibrary:
                         "Performance check if needed"
                     ],
                     success_criteria=["All tests pass", "Integration verified"],
-                    common_pitfalls["Insufficient testing", "Integration issues"]
+                    common_pitfalls=["Insufficient testing", "Integration issues"]
                 ),
                 WorkflowStep(
                     step_number=5,
@@ -229,7 +229,7 @@ class WorkflowTemplateLibrary:
                         "Update API docs if needed"
                     ],
                     success_criteria=["Documentation updated", "Code is clean"],
-                    common_pitfalls["Skipping documentation", "Leaving debug code"]
+                    common_pitfalls=["Skipping documentation", "Leaving debug code"]
                 )
             ],
             prerequisites=["Clear feature requirements", "Development environment setup"],
@@ -258,7 +258,7 @@ class WorkflowTemplateLibrary:
                         "Check the scope of changes"
                     ],
                     success_criteria=["Purpose of changes understood", "Scope known"],
-                    common_pitfalls["Skipping context", "Missing the big picture"]
+                    common_pitfalls=["Skipping context", "Missing the big picture"]
                 ),
                 WorkflowStep(
                     step_number=2,
@@ -288,7 +288,7 @@ class WorkflowTemplateLibrary:
                         "Review integration points"
                     ],
                     success_criteria=["Functionality verified", "Edge cases considered"],
-                    common_pitfalls["Not testing mentally", "Missing edge cases"]
+                    common_pitfalls=["Not testing mentally", "Missing edge cases"]
                 ),
                 WorkflowStep(
                     step_number=4,
@@ -303,7 +303,7 @@ class WorkflowTemplateLibrary:
                         "Balance positive and constructive feedback"
                     ],
                     success_criteria=["Clear feedback provided", "Actionable suggestions given"],
-                    common_pitfalls["Vague comments", "Being overly critical"]
+                    common_pitfalls=["Vague comments", "Being overly critical"]
                 )
             ],
             prerequisites=["Access to code changes", "Understanding of codebase"],
@@ -358,7 +358,7 @@ class WorkflowTemplateLibrary:
                         "Implement business logic"
                     ],
                     success_criteria=["Endpoints implemented", "Validation working"],
-                    common_pitfalls["Missing validation", "Poor error handling"]
+                    common_pitfalls=["Missing validation", "Poor error handling"]
                 ),
                 WorkflowStep(
                     step_number=3,
@@ -373,7 +373,7 @@ class WorkflowTemplateLibrary:
                         "Test with example requests"
                     ],
                     success_criteria=["Tests pass", "Documentation complete"],
-                    common_pitfalls["Insufficient testing", "Missing documentation"]
+                    common_pitfalls=["Insufficient testing", "Missing documentation"]
                 )
             ],
             prerequisites=["API framework knowledge", "Backend development environment"],
