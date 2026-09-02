@@ -187,13 +187,16 @@ class ContextWindowMonitor:
         
         result = '\n'.join(compressed_lines)
         
-        # Edge case: if no lines fit (first line too long), fall back to character-based truncation
+        # Edge case: if no lines fit (first line too long), fall back to token-based truncation
         if not result:
-            # Use character-level truncation: roughly 4 chars per token
-            max_chars = (target_tokens - 50) * 4
-            result = content[:max_chars]
-            if len(result) < len(content):
+            # Use encoding to slice at token boundary, avoiding char-estimation errors
+            tokens = self.encoding.encode(content)
+            allowed_tokens = max(0, target_tokens - 50)
+            if len(tokens) > allowed_tokens:
+                result = self.encoding.decode(tokens[:allowed_tokens])
                 result += "\n... [truncated]"
+            else:
+                result = content
         
         if result and self.count_tokens(result) < target_tokens:
             result += "\n... [content truncated to fit token budget]"

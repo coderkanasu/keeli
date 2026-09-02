@@ -98,7 +98,6 @@ class LLMInterface:
         self._auto_session_id: Optional[str] = None
         self._session_start_time: Optional[datetime] = None
         self._activity_log: List[Dict[str, Any]] = []
-        self._current_request_text: str = ""  # Store for telemetry logging
         self._context_cache: Dict[str, Any] = {}
         self._intent_log: List[ParsedIntent] = []  # For telemetry
         
@@ -456,37 +455,37 @@ class LLMInterface:
             self.telemetry_logger.checkpoint(CheckpointType.ROUTE_CHOSEN)
             
             if parsed_intent.intent == IntentType.CREATE_TASK:
-                return self._handle_create_task(parsed_intent, session_id)
+                return self._handle_create_task(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.GET_NEXT_TASK:
-                return self._handle_get_next_task(parsed_intent, session_id)
+                return self._handle_get_next_task(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.LIST_TASKS:
-                return self._handle_list_tasks(parsed_intent, session_id)
+                return self._handle_list_tasks(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.COMPLETE_TASK:
-                return self._handle_complete_task(parsed_intent, session_id)
+                return self._handle_complete_task(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.GET_STATUS:
-                return self._handle_get_status(parsed_intent, session_id)
+                return self._handle_get_status(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.STORE_CONTEXT:
-                return self._handle_store_context(parsed_intent, session_id)
+                return self._handle_store_context(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.GET_CONTEXT:
-                return self._handle_get_context(parsed_intent, session_id)
+                return self._handle_get_context(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.SEMANTIC_SEARCH:
-                return self._handle_semantic_search(parsed_intent, session_id)
+                return self._handle_semantic_search(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.DISCOVER_PATTERNS:
-                return self._handle_discover_patterns(parsed_intent, session_id)
+                return self._handle_discover_patterns(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.SUMMARIZE:
-                return self._handle_summarize(parsed_intent, session_id)
+                return self._handle_summarize(parsed_intent, session_id, request)
             
             elif parsed_intent.intent == IntentType.HELP:
-                return self._handle_help(parsed_intent, session_id)
+                return self._handle_help(parsed_intent, session_id, request)
             
             else:  # UNKNOWN
                 return self._handle_unknown(parsed_intent, session_id, request)
@@ -507,10 +506,10 @@ class LLMInterface:
             )
             return f"❌ Error executing intent '{parsed_intent.intent.value}': {str(e)}"
     
-    def _log_telemetry_success(self, parsed: ParsedIntent, route: str) -> None:
+    def _log_telemetry_success(self, parsed: ParsedIntent, route: str, request_text: str = "") -> None:
         """Helper to log successful intent execution to telemetry."""
         self.telemetry_logger.log_request_lifecycle(
-            request_text=self._current_request_text,  # Use stored request text
+            request_text=request_text,
             intent_type=parsed.intent.value,
             confidence=parsed.confidence,
             parameters=parsed.parameters,
@@ -522,7 +521,7 @@ class LLMInterface:
     
     # ── Intent Handlers (Structured Execution) ──
     
-    def _handle_create_task(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_create_task(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle task creation with extracted parameters."""
         title = parsed.parameters.get("title", "").strip()
         if not title:
@@ -539,25 +538,25 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
-        self._log_telemetry_success(parsed, "create_task")
+        self._log_telemetry_success(parsed, "create_task", request)
         return f"✅ Created task {task_id}: {title}"
     
-    def _handle_get_next_task(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_get_next_task(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle next task retrieval."""
         task = self.engine.next_task(session_id=session_id)
         if task:
             self.engine.session_focus(task["id"], session_id=session_id)
             self._log_activity("task_focused", {"task_id": task["id"], "intent": parsed.intent.value})
-            self._log_telemetry_success(parsed, "get_next_task")
+            self._log_telemetry_success(parsed, "get_next_task", request)
             return f"🎯 Next task: {task['id']} - {task['title']} (Priority: {task['priority']}, Status: {task['status']})"
-        self._log_telemetry_success(parsed, "get_next_task_empty")
+        self._log_telemetry_success(parsed, "get_next_task_empty", request)
         return "📭 No pending tasks. Good job!"
     
-    def _handle_list_tasks(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_list_tasks(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle task listing."""
         tasks = self.engine.list_tasks()
         if not tasks:
-            self._log_telemetry_success(parsed, "list_tasks_empty")
+            self._log_telemetry_success(parsed, "list_tasks_empty", request)
             return "📭 No tasks found."
         response = "📋 Current tasks:\n"
         for task in tasks[:10]:
@@ -565,20 +564,20 @@ class LLMInterface:
         if len(tasks) > 10:
             response += f"  ... and {len(tasks) - 10} more"
         self._log_activity("tasks_listed", {"count": len(tasks), "intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "list_tasks")
+        self._log_telemetry_success(parsed, "list_tasks", request)
         return response
     
-    def _handle_complete_task(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_complete_task(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle task completion."""
         task_id = parsed.parameters.get("task_id")
         if not task_id:
             return "❓ Which task? Please specify the task ID (e.g., T-0001)"
         self.engine.move_task(task_id, "archive", session_id=session_id)
         self._log_activity("task_completed", {"task_id": task_id, "intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "complete_task")
+        self._log_telemetry_success(parsed, "complete_task", request)
         return f"✅ Completed task {task_id}"
     
-    def _handle_get_status(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_get_status(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle status request."""
         context = self.engine.get_project_context()
         tasks = self.engine.list_tasks()
@@ -599,10 +598,10 @@ class LLMInterface:
                 response += f"  • {task['id']}: {task['title']}\n"
         
         self._log_activity("status_requested", {"intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "get_status")
+        self._log_telemetry_success(parsed, "get_status", request)
         return response
     
-    def _handle_store_context(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_store_context(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle context storage."""
         content = parsed.parameters.get("content", "").strip()
         if not content:
@@ -617,15 +616,15 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
-        self._log_telemetry_success(parsed, "store_context")
+        self._log_telemetry_success(parsed, "store_context", request)
         return f"🧠 Remembered: {content[:50]}..."
     
-    def _handle_get_context(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_get_context(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle context retrieval."""
         items = self.engine.working_memory_list(session_id)
         
         if not items:
-            self._log_telemetry_success(parsed, "get_context_empty")
+            self._log_telemetry_success(parsed, "get_context_empty", request)
             return "🧠 Nothing remembered yet. Tell me what to remember!"
         
         response = "🧠 **What I remember:**\n"
@@ -633,10 +632,10 @@ class LLMInterface:
             response += f"  • {item['key']}: {item['value'][:80]}...\n"
         
         self._log_activity("context_retrieved", {"count": len(items), "intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "get_context")
+        self._log_telemetry_success(parsed, "get_context", request)
         return response
     
-    def _handle_semantic_search(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_semantic_search(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle semantic search."""
         query = parsed.parameters.get("query", "")
         result = self.semantic_search.search(query)
@@ -645,17 +644,17 @@ class LLMInterface:
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
-        self._log_telemetry_success(parsed, "semantic_search")
+        self._log_telemetry_success(parsed, "semantic_search", request)
         return result
     
-    def _handle_discover_patterns(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_discover_patterns(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle pattern discovery."""
         result = self.semantic_search.discover_patterns()
         self._log_activity("patterns_discovered", {"intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "discover_patterns")
+        self._log_telemetry_success(parsed, "discover_patterns", request)
         return result
     
-    def _handle_summarize(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_summarize(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle session summarization."""
         recent_activity = [a for a in self._activity_log if a["type"] in ["task_created", "task_completed", "task_focused"]]
         
@@ -680,13 +679,13 @@ class LLMInterface:
         )
         
         self._log_activity("session_summarized", {"intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "summarize")
+        self._log_telemetry_success(parsed, "summarize", request)
         return summary
     
-    def _handle_help(self, parsed: ParsedIntent, session_id: str) -> str:
+    def _handle_help(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle help request."""
         self._log_activity("help_requested", {"intent": parsed.intent.value})
-        self._log_telemetry_success(parsed, "help")
+        self._log_telemetry_success(parsed, "help", request)
         return self._get_help()
     
     def _handle_unknown(self, parsed: ParsedIntent, session_id: str, original_request: str) -> str:
@@ -696,7 +695,7 @@ class LLMInterface:
             "confidence": parsed.confidence,
             "evidence": parsed.evidence
         })
-        self._log_telemetry_success(parsed, "unknown")
+        self._log_telemetry_success(parsed, "unknown", request)
         return f"🤔 I didn't understand '{original_request}'. Try asking for help with 'help' or rephrase your request."
 
     

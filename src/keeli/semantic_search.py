@@ -673,12 +673,12 @@ class SemanticSearchInterface:
         response += f"**Graph Summary:**\n"
         response += f"  • Total Nodes: {stats.get('total_nodes', 0)}\n"
         response += f"  • Total Relationships: {stats.get('total_relationships', 0)}\n"
-        response += f"  • Average Connections: {stats.get('avg_connections_per_node', 0):.1f}\n\n"
+        response += f"  • Average Connections: {stats.get('avg_relationships_per_node', 0):.1f}\n\n"
         
         # Node type distribution
-        if 'nodes_by_type' in stats:
+        if 'node_types' in stats:
             response += f"**Content by Type:**\n"
-            for node_type, count in stats['nodes_by_type'].items():
+            for node_type, count in stats['node_types'].items():
                 response += f"  • {node_type}: {count}\n"
             response += "\n"
         
@@ -687,15 +687,15 @@ class SemanticSearchInterface:
         try:
             # Find nodes with highest connectivity
             node_connections = {}
-            for node_id, node in self.index.nodes.items():
+            for node_id, node in self.index._nodes.items():
                 if node.relationships:
-                    connection_count = sum(len(rels) for rels in node.relationships.values())
+                    connection_count = len(node.relationships)
                     node_connections[node_id] = connection_count
             
             if node_connections:
                 top_nodes = sorted(node_connections.items(), key=lambda x: x[1], reverse=True)[:5]
                 for node_id, conn_count in top_nodes:
-                    node = self.index.nodes.get(node_id)
+                    node = self.index._nodes.get(node_id)
                     if node:
                         response += f"  • {node_id} ({conn_count} connections): {node.content[:50]}...\n"
             else:

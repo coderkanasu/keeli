@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-02T15:59:14Z",
+  "timestamp": "2026-09-02T19:20:29Z",
   "phase": "4_measurement_benchmarking",
   "metrics": {
     "total": 43,
@@ -8,8 +8,8 @@
     "clarification": 0,
     "failed": 0,
     "success_rate": 1.0,
-    "avg_confidence": 0.796,
-    "avg_execution_ms": 1.6,
+    "avg_confidence": 0.785,
+    "avg_execution_ms": 1.3,
     "by_intent": {
       "CREATE_TASK": {
         "count": 8,
@@ -72,7 +72,7 @@
         "success_rate": 1.0
       }
     },
-    "total_telemetry_requests": 49
+    "total_telemetry_requests": 135
   },
   "results_by_intent": {
     "CREATE_TASK": [
