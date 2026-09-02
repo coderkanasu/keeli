@@ -1,5 +1,7 @@
 """
-Keeli v7.0 - LLM-Centric Unified Interface
+Keeli v7.0 - LLM-Centric Unified Interface with Structured Intent Routing
+
+Phase 2: Structured Intent Routing - Replaces fragile NLP with typed schemas.
 
 This module provides a simplified, natural language interface designed specifically
 for LLM workflows. It eliminates the complexity of multiple tools and parameters
@@ -12,25 +14,79 @@ import re
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 from pathlib import Path
+from dataclasses import dataclass, field, asdict
+from enum import Enum
 
 from keeli.engine import KeeliEngine
-from keeli.workflow_orchestrator import WorkflowOrchestrator, WorkflowType
 from keeli.memory_crdt import MemoryCRDTStore, PredictiveCache
 from keeli.semantic_search import SemanticSearchInterface
 from keeli.workflow_templates import WorkflowTemplateLibrary
 from keeli.context_optimizer import IntelligentContextBuilder
 
+if TYPE_CHECKING:
+    from keeli.workflow_orchestrator import WorkflowOrchestrator, WorkflowType
+else:
+    WorkflowOrchestrator = None
+    WorkflowType = None
+
+
+# ── Intent Schema ──
+
+class IntentType(str, Enum):
+    """Enumeration of all supported intents."""
+    CREATE_TASK = "create_task"
+    GET_NEXT_TASK = "get_next_task"
+    LIST_TASKS = "list_tasks"
+    COMPLETE_TASK = "complete_task"
+    GET_STATUS = "get_status"
+    STORE_CONTEXT = "store_context"
+    GET_CONTEXT = "get_context"
+    SEMANTIC_SEARCH = "semantic_search"
+    DISCOVER_PATTERNS = "discover_patterns"
+    SUMMARIZE = "summarize"
+    HELP = "help"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class ParsedIntent:
+    """Structured intent with explainable routing information."""
+    intent: IntentType
+    confidence: float  # 0.0 to 1.0
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    missing_fields: List[str] = field(default_factory=list)
+    evidence: str = ""
+    
+    def is_valid(self, confidence_threshold: float = 0.75) -> bool:
+        """Check if intent passes validation gates."""
+        if self.confidence < confidence_threshold:
+            return False
+        if self.missing_fields:
+            return False
+        return True
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for logging/serialization."""
+        return {
+            "intent": self.intent.value,
+            "confidence": round(self.confidence, 3),
+            "parameters": self.parameters,
+            "missing_fields": self.missing_fields,
+            "evidence": self.evidence
+        }
+
 
 class LLMInterface:
     """
-    Unified LLM-friendly interface that handles complexity automatically.
+    Unified LLM-friendly interface with structured intent routing.
     
     This class provides a single entry point for all Keeli operations with:
     - Automatic session management
-    - Intelligent defaults
-    - Natural language processing
+    - Typed schema-based intent routing (replaces fragile NLP)
+    - Validation and fallback mechanisms
+    - Natural language UX with structured internal processing
     - Context-aware responses
     - Roundtrip reduction
     """
@@ -41,6 +97,10 @@ class LLMInterface:
         self._session_start_time: Optional[datetime] = None
         self._activity_log: List[Dict[str, Any]] = []
         self._context_cache: Dict[str, Any] = {}
+        self._intent_log: List[ParsedIntent] = []  # For telemetry
+        
+        # Deferred import to avoid circular dependency
+        from keeli.workflow_orchestrator import WorkflowOrchestrator
         self.workflow_orchestrator = WorkflowOrchestrator(self)
         
         # New v7.0 components
@@ -80,47 +140,170 @@ class LLMInterface:
         if len(self._activity_log) > 100:
             self._activity_log = self._activity_log[-100:]
     
-    # ── Natural Language Processing ──
+    # ── Structured Intent Routing ──
     
-    def _parse_intent(self, natural_request: str) -> Dict[str, Any]:
-        """Parse natural language request into structured intent."""
+    def _parse_intent(self, natural_request: str) -> ParsedIntent:
+        """
+        Parse natural language request into structured intent with validation.
+        
+        Returns a ParsedIntent with typed fields, confidence score,
+        extracted parameters, and evidence for the classification.
+        """
         request_lower = natural_request.lower().strip()
         
-        # Task-related intents
+        # ── Task Creation Intent ──
         if any(word in request_lower for word in ["create", "add", "new", "make"]):
-            return {"intent": "create_task", "confidence": 0.9}
+            details = self._extract_task_details(natural_request)
+            return ParsedIntent(
+                intent=IntentType.CREATE_TASK,
+                confidence=0.95 if details["title"] else 0.7,
+                parameters=details,
+                missing_fields=[] if details["title"] else ["title"],
+                evidence="Request contains task creation keywords (create/add/new/make) and extracted task details"
+            )
         
-        if any(word in request_lower for word in ["next", "what's next", "what should i"]):
-            return {"intent": "get_next_task", "confidence": 0.95}
+        # ── Get Next Task Intent ──
+        if any(word in request_lower for word in ["next", "what's next", "what should i", "upcoming", "what do i"]):
+            return ParsedIntent(
+                intent=IntentType.GET_NEXT_TASK,
+                confidence=0.95,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains next-task keywords (next/upcoming/what should i)"
+            )
         
-        if any(word in request_lower for word in ["show", "list", "what are", "tell me"]):
-            return {"intent": "list_tasks", "confidence": 0.85}
+        # ── List Tasks Intent ──
+        if any(word in request_lower for word in ["show", "list", "what are", "tell me", "all tasks"]):
+            return ParsedIntent(
+                intent=IntentType.LIST_TASKS,
+                confidence=0.90,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains listing keywords (show/list/what are/tell me)"
+            )
         
-        if any(word in request_lower for word in ["complete", "done", "finish", "archive"]):
-            return {"intent": "complete_task", "confidence": 0.9}
+        # ── Complete Task Intent ──
+        if any(word in request_lower for word in ["complete", "done", "finish", "archive", "mark complete"]):
+            task_id = self._extract_task_id(natural_request)
+            return ParsedIntent(
+                intent=IntentType.COMPLETE_TASK,
+                confidence=0.9 if task_id else 0.6,
+                parameters={"task_id": task_id},
+                missing_fields=[] if task_id else ["task_id"],
+                evidence=f"Request contains completion keywords; task_id {'found' if task_id else 'not found in request'}"
+            )
         
-        if any(word in request_lower for word in ["status", "progress", "how's"]):
-            return {"intent": "get_status", "confidence": 0.85}
+        # ── Get Status Intent ──
+        if any(word in request_lower for word in ["status", "progress", "how's", "current state", "what's happening"]):
+            return ParsedIntent(
+                intent=IntentType.GET_STATUS,
+                confidence=0.90,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains status keywords (status/progress/how's/current)"
+            )
         
-        # Context-related intents
-        if any(word in request_lower for word in ["remember", "save", "store", "cache"]):
-            return {"intent": "store_context", "confidence": 0.9}
+        # ── Store Context Intent ──
+        if any(word in request_lower for word in ["remember", "save", "store", "cache", "note that"]):
+            content = self._extract_context_content(natural_request, ["remember", "save", "store", "cache", "note that"])
+            return ParsedIntent(
+                intent=IntentType.STORE_CONTEXT,
+                confidence=0.95 if content else 0.7,
+                parameters={"content": content},
+                missing_fields=[] if content else ["content"],
+                evidence=f"Request contains context storage keywords; content {'extracted' if content else 'not found'}"
+            )
         
-        if any(word in request_lower for word in ["recall", "get", "retrieve", "what did"]):
-            return {"intent": "get_context", "confidence": 0.85}
+        # ── Get Context Intent ──
+        if any(word in request_lower for word in ["recall", "get", "retrieve", "what did", "what do you remember", "remind me"]):
+            return ParsedIntent(
+                intent=IntentType.GET_CONTEXT,
+                confidence=0.90,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains retrieval keywords (recall/retrieve/what did/remind me)"
+            )
         
-        # Search-related intents
-        if any(word in request_lower for word in ["search", "find", "look for", "related to", "similar"]):
-            return {"intent": "semantic_search", "confidence": 0.9}
+        # ── Semantic Search Intent ──
+        if any(word in request_lower for word in ["search", "find", "look for", "related to", "similar to"]):
+            return ParsedIntent(
+                intent=IntentType.SEMANTIC_SEARCH,
+                confidence=0.92,
+                parameters={"query": natural_request},
+                missing_fields=[],
+                evidence="Request contains search keywords (search/find/look for/related to)"
+            )
         
-        if any(word in request_lower for word in ["patterns", "discover", "analyze", "insights"]):
-            return {"intent": "discover_patterns", "confidence": 0.85}
+        # ── Discover Patterns Intent ──
+        if any(word in request_lower for word in ["patterns", "discover", "analyze", "insights", "trends", "concepts"]):
+            return ParsedIntent(
+                intent=IntentType.DISCOVER_PATTERNS,
+                confidence=0.90,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains analysis keywords (patterns/discover/analyze/insights)"
+            )
         
-        if any(word in request_lower for word in ["summarize", "summary", "wrap up"]):
-            return {"intent": "summarize", "confidence": 0.95}
+        # ── Summarize Intent ──
+        if any(word in request_lower for word in ["summarize", "summary", "wrap up", "recap", "tldr"]):
+            return ParsedIntent(
+                intent=IntentType.SUMMARIZE,
+                confidence=0.95,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains summarization keywords (summarize/summary/wrap up/recap)"
+            )
         
-        # Default to general help
-        return {"intent": "help", "confidence": 0.5}
+        # ── Help Intent ──
+        if any(word in request_lower for word in ["help", "how do i", "what can you", "guide", "teach"]):
+            return ParsedIntent(
+                intent=IntentType.HELP,
+                confidence=0.90,
+                parameters={},
+                missing_fields=[],
+                evidence="Request contains help keywords (help/how do i/what can you)"
+            )
+        
+        # ── Unknown Intent (Low Confidence Default) ──
+        return ParsedIntent(
+            intent=IntentType.UNKNOWN,
+            confidence=0.4,
+            parameters={"request": natural_request},
+            missing_fields=["intent"],
+            evidence="Request did not match any known intent patterns"
+        )
+    
+    def _validate_intent(self, parsed: ParsedIntent, confidence_threshold: float = 0.75) -> tuple[bool, Optional[str]]:
+        """
+        Validate parsed intent and determine if clarification is needed.
+        
+        Returns: (is_valid, clarification_prompt)
+        """
+        # Check confidence threshold
+        if parsed.confidence < confidence_threshold:
+            return False, f"I'm not sure what you mean (confidence: {parsed.confidence:.1%}). Could you clarify?"
+        
+        # Check for missing required fields
+        if parsed.missing_fields:
+            fields_str = ", ".join(parsed.missing_fields)
+            return False, f"I need more information to proceed. Missing: {fields_str}. Could you provide details?"
+        
+        # Intent is valid
+        return True, None
+    
+    def _request_clarification(self, parsed: ParsedIntent, original_request: str, clarification_prompt: str, session_id: str) -> str:
+        """
+        Handle low-confidence or incomplete intents with clarification loop.
+        
+        Returns response asking user for more information.
+        """
+        self._log_activity("clarification_requested", {
+            "intent": parsed.intent.value,
+            "confidence": parsed.confidence,
+            "missing_fields": parsed.missing_fields
+        })
+        
+        return f"❓ {clarification_prompt}\n\nYour request: \"{original_request}\"\nMy analysis: {parsed.evidence}"
     
     def _extract_task_details(self, natural_request: str) -> Dict[str, Any]:
         """Extract task details from natural language."""
@@ -138,48 +321,77 @@ class LLMInterface:
         title = natural_request
         for word in ["create", "add", "new", "task", "make", "urgent", "critical", "important", "low", "minor"]:
             title = re.sub(rf"\b{word}\b", "", title, flags=re.IGNORECASE)
-        details["title"] = title.strip() or "Untitled Task"
+        details["title"] = title.strip() or ""
         
         # Extract description (anything after "because" or "to")
         if "because" in natural_request.lower():
             parts = natural_request.lower().split("because")
             if len(parts) > 1:
                 details["description"] = parts[1].strip()
-        elif "to" in natural_request.lower():
-            parts = natural_request.lower().split("to", 1)
+        elif " to " in natural_request.lower():
+            parts = natural_request.lower().split(" to ", 1)
             if len(parts) > 1:
                 details["description"] = "To " + parts[1].strip()
         
         return details
     
+    def _extract_task_id(self, text: str) -> Optional[str]:
+        """Extract task ID from text."""
+        match = re.search(r'[Tt]-?\d+', text)
+        if match:
+            task_id = match.group(0).upper()
+            if not task_id.startswith("T-"):
+                task_id = f"T-{task_id[2:]}"
+            return task_id
+        return None
+    
+    def _extract_context_content(self, text: str, trigger_words: List[str]) -> str:
+        """Extract context content after trigger words."""
+        for word in trigger_words:
+            pattern = rf"{word}\s+(.*?)(?:\.|$)"
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+    
     # ── Unified Public Interface ──
     
     def ask(self, request: str) -> str:
         """
-        Main entry point - natural language interface.
+        Main entry point - natural language interface with structured intent routing.
         
-        This is the primary method LLMs should use. It automatically:
-        - Manages sessions
-        - Parses intent
-        - Detects workflows
-        - Executes appropriate actions
-        - Provides context-aware responses
+        This method:
+        1. Parses request into typed ParsedIntent
+        2. Validates intent (confidence threshold, missing fields)
+        3. Falls back to clarification if needed
+        4. Routes to appropriate handler
+        5. Logs all actions for telemetry
         """
         session_id = self._ensure_session(f"Natural language request: {request[:50]}")
-        intent = self._parse_intent(request)
         
-        # Check for workflow triggers
+        # ── Phase 1: Parse Intent ──
+        parsed_intent = self._parse_intent(request)
+        self._intent_log.append(parsed_intent)
+        
+        # ── Phase 2: Validate Intent ──
+        is_valid, clarification_prompt = self._validate_intent(parsed_intent)
+        if not is_valid:
+            return self._request_clarification(parsed_intent, request, clarification_prompt, session_id)
+        
+        # ── Phase 3: Check Workflow Triggers ──
         workflow_type = self.workflow_orchestrator.detect_workflow(request)
         if workflow_type and not self.workflow_orchestrator._active_workflow:
-            # First, check if there's a matching template
             matching_template = self.template_library.find_matching_template(request)
             if matching_template:
                 template_info = self.template_library.format_template_for_display(matching_template)
                 workflow_start = self.workflow_orchestrator.start_workflow(workflow_type, request)
+                self._log_activity("workflow_started", {"workflow_type": workflow_type.value})
                 return f"{workflow_start}\n\n📋 **Suggested Template:**\n{template_info}"
-            return self.workflow_orchestrator.start_workflow(workflow_type, request)
+            workflow_start = self.workflow_orchestrator.start_workflow(workflow_type, request)
+            self._log_activity("workflow_started", {"workflow_type": workflow_type.value})
+            return workflow_start
         
-        # Handle workflow continuation
+        # ── Phase 4: Handle Workflow Continuation ──
         if self.workflow_orchestrator._active_workflow:
             if "next" in request.lower() or "continue" in request.lower():
                 return self.workflow_orchestrator.advance_stage()
@@ -190,76 +402,102 @@ class LLMInterface:
             elif "templates" in request.lower() or "workflows" in request.lower():
                 return self.workflow_orchestrator.get_workflow_templates()
         
+        # ── Phase 5: Route to Handler ──
         try:
-            if intent["intent"] == "create_task":
-                details = self._extract_task_details(request)
-                task_id = self.engine.start(
-                    title=details["title"],
-                    priority_raw=details["priority"],
-                    description=details["description"],
-                    session_id=session_id
-                )
-                self._log_activity("task_created", {"task_id": task_id, "request": request})
-                return f"✅ Created task {task_id}: {details['title']}"
+            if parsed_intent.intent == IntentType.CREATE_TASK:
+                return self._handle_create_task(parsed_intent, session_id)
             
-            elif intent["intent"] == "get_next_task":
-                task = self.engine.next_task(session_id=session_id)
-                if task:
-                    # Auto-focus on this task
-                    self.engine.session_focus(task["id"], session_id=session_id)
-                    self._log_activity("task_focused", {"task_id": task["id"]})
-                    return f"🎯 Next task: {task['id']} - {task['title']} (Priority: {task['priority']}, Status: {task['status']})"
-                return "📭 No pending tasks. Good job!"
+            elif parsed_intent.intent == IntentType.GET_NEXT_TASK:
+                return self._handle_get_next_task(parsed_intent, session_id)
             
-            elif intent["intent"] == "list_tasks":
-                tasks = self.engine.list_tasks()
-                if not tasks:
-                    return "📭 No tasks found."
-                response = "📋 Current tasks:\n"
-                for task in tasks[:10]:  # Limit to 10 for brevity
-                    response += f"  • {task['id']}: {task['title']} ({task['status']}, {task['priority']})\n"
-                if len(tasks) > 10:
-                    response += f"  ... and {len(tasks) - 10} more"
-                return response
+            elif parsed_intent.intent == IntentType.LIST_TASKS:
+                return self._handle_list_tasks(parsed_intent, session_id)
             
-            elif intent["intent"] == "complete_task":
-                # Try to extract task ID from request
-                task_match = re.search(r'[Tt]-?\d+', request)
-                if task_match:
-                    task_id = task_match.group(0).upper()
-                    if not task_id.startswith("T-"):
-                        task_id = f"T-{task_id[2:]}"
-                    self.engine.move_task(task_id, "archive", session_id=session_id)
-                    self._log_activity("task_completed", {"task_id": task_id})
-                    return f"✅ Completed task {task_id}"
-                return "❓ Which task? Please specify the task ID (e.g., T-0001)"
+            elif parsed_intent.intent == IntentType.COMPLETE_TASK:
+                return self._handle_complete_task(parsed_intent, session_id)
             
-            elif intent["intent"] == "get_status":
-                return self._get_smart_status(session_id)
+            elif parsed_intent.intent == IntentType.GET_STATUS:
+                return self._handle_get_status(parsed_intent, session_id)
             
-            elif intent["intent"] == "store_context":
-                return self._smart_store_context(request, session_id)
+            elif parsed_intent.intent == IntentType.STORE_CONTEXT:
+                return self._handle_store_context(parsed_intent, session_id)
             
-            elif intent["intent"] == "get_context":
-                return self._smart_get_context(request, session_id)
+            elif parsed_intent.intent == IntentType.GET_CONTEXT:
+                return self._handle_get_context(parsed_intent, session_id)
             
-            elif intent["intent"] == "summarize":
-                return self._auto_summarize(session_id)
+            elif parsed_intent.intent == IntentType.SEMANTIC_SEARCH:
+                return self._handle_semantic_search(parsed_intent, session_id)
             
-            elif intent["intent"] == "semantic_search":
-                return self.semantic_search.search(request)
+            elif parsed_intent.intent == IntentType.DISCOVER_PATTERNS:
+                return self._handle_discover_patterns(parsed_intent, session_id)
             
-            elif intent["intent"] == "discover_patterns":
-                return self.semantic_search.discover_patterns()
+            elif parsed_intent.intent == IntentType.SUMMARIZE:
+                return self._handle_summarize(parsed_intent, session_id)
             
-            else:  # help
-                return self._get_help()
+            elif parsed_intent.intent == IntentType.HELP:
+                return self._handle_help(parsed_intent, session_id)
+            
+            else:  # UNKNOWN
+                return self._handle_unknown(parsed_intent, session_id, request)
         
         except Exception as e:
-            return f"❌ Error: {str(e)}. Try rephrasing your request."
+            self._log_activity("execution_error", {"intent": parsed_intent.intent.value, "error": str(e)})
+            return f"❌ Error executing intent '{parsed_intent.intent.value}': {str(e)}"
     
-    def _get_smart_status(self, session_id: str) -> str:
-        """Provide intelligent status overview."""
+    # ── Intent Handlers (Structured Execution) ──
+    
+    def _handle_create_task(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle task creation with extracted parameters."""
+        title = parsed.parameters.get("title", "").strip()
+        if not title:
+            return "❓ I need a task title to create a task. What should I create?"
+        
+        task_id = self.engine.start(
+            title=title,
+            priority_raw=parsed.parameters.get("priority", "p1"),
+            description=parsed.parameters.get("description", ""),
+            session_id=session_id
+        )
+        self._log_activity("task_created", {
+            "task_id": task_id,
+            "intent": parsed.intent.value,
+            "confidence": parsed.confidence
+        })
+        return f"✅ Created task {task_id}: {title}"
+    
+    def _handle_get_next_task(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle next task retrieval."""
+        task = self.engine.next_task(session_id=session_id)
+        if task:
+            self.engine.session_focus(task["id"], session_id=session_id)
+            self._log_activity("task_focused", {"task_id": task["id"], "intent": parsed.intent.value})
+            return f"🎯 Next task: {task['id']} - {task['title']} (Priority: {task['priority']}, Status: {task['status']})"
+        return "📭 No pending tasks. Good job!"
+    
+    def _handle_list_tasks(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle task listing."""
+        tasks = self.engine.list_tasks()
+        if not tasks:
+            return "📭 No tasks found."
+        response = "📋 Current tasks:\n"
+        for task in tasks[:10]:
+            response += f"  • {task['id']}: {task['title']} ({task['status']}, {task['priority']})\n"
+        if len(tasks) > 10:
+            response += f"  ... and {len(tasks) - 10} more"
+        self._log_activity("tasks_listed", {"count": len(tasks), "intent": parsed.intent.value})
+        return response
+    
+    def _handle_complete_task(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle task completion."""
+        task_id = parsed.parameters.get("task_id")
+        if not task_id:
+            return "❓ Which task? Please specify the task ID (e.g., T-0001)"
+        self.engine.move_task(task_id, "archive", session_id=session_id)
+        self._log_activity("task_completed", {"task_id": task_id, "intent": parsed.intent.value})
+        return f"✅ Completed task {task_id}"
+    
+    def _handle_get_status(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle status request."""
         context = self.engine.get_project_context()
         tasks = self.engine.list_tasks()
         
@@ -278,34 +516,28 @@ class LLMInterface:
             for task in pending_tasks[:3]:
                 response += f"  • {task['id']}: {task['title']}\n"
         
+        self._log_activity("status_requested", {"intent": parsed.intent.value})
         return response
     
-    def _smart_store_context(self, request: str, session_id: str) -> str:
-        """Intelligently store context based on request."""
-        # Extract what to remember
-        content = request.replace("remember", "").replace("save", "").replace("store", "").strip()
+    def _handle_store_context(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle context storage."""
+        content = parsed.parameters.get("content", "").strip()
+        if not content:
+            return "❓ What should I remember? Please provide content to store."
         
-        # Generate a semantic key
         key = self._generate_semantic_key(content)
-        
-        # Store in both engine working memory and predictive cache
         self.engine.working_memory_set(key, content, session_id, ttl_minutes=120)
         self.predictive_cache.set(f"context:{key}", content)
         
-        self._log_activity("context_stored", {"key": key})
+        self._log_activity("context_stored", {
+            "key": key,
+            "intent": parsed.intent.value,
+            "confidence": parsed.confidence
+        })
         return f"🧠 Remembered: {content[:50]}..."
     
-    def _smart_get_context(self, request: str, session_id: str) -> str:
-        """Intelligently retrieve context based on request."""
-        # Check predictive cache first
-        search_key = request.lower().replace("what do you remember about ", "").replace("?", "").strip()
-        cache_key = f"context:{search_key}"
-        cached_result = self.predictive_cache.get(cache_key)
-        
-        if cached_result:
-            return f"🧠 **From cache:** {cached_result}"
-        
-        # Fall back to working memory
+    def _handle_get_context(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle context retrieval."""
         items = self.engine.working_memory_list(session_id)
         
         if not items:
@@ -315,11 +547,28 @@ class LLMInterface:
         for item in items:
             response += f"  • {item['key']}: {item['value'][:80]}...\n"
         
+        self._log_activity("context_retrieved", {"count": len(items), "intent": parsed.intent.value})
         return response
     
-    def _auto_summarize(self, session_id: str) -> str:
-        """Automatically generate session summary."""
-        # Get session activity
+    def _handle_semantic_search(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle semantic search."""
+        query = parsed.parameters.get("query", "")
+        result = self.semantic_search.search(query)
+        self._log_activity("semantic_search", {
+            "query": query,
+            "intent": parsed.intent.value,
+            "confidence": parsed.confidence
+        })
+        return result
+    
+    def _handle_discover_patterns(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle pattern discovery."""
+        result = self.semantic_search.discover_patterns()
+        self._log_activity("patterns_discovered", {"intent": parsed.intent.value})
+        return result
+    
+    def _handle_summarize(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle session summarization."""
         recent_activity = [a for a in self._activity_log if a["type"] in ["task_created", "task_completed", "task_focused"]]
         
         summary = f"📝 **Session Summary**\n"
@@ -330,21 +579,35 @@ class LLMInterface:
             for activity in recent_activity[-5:]:
                 summary += f"  • {activity['type']}: {activity['details']}\n"
         
-        # Get working memory
         memory_items = self.engine.working_memory_list(session_id)
         if memory_items:
             summary += f"🧠 **Key insights remembered:**\n"
             for item in memory_items:
                 summary += f"  • {item['key']}\n"
         
-        # Auto-save as checkpoint
         self.engine.session_checkpoint(
             note="Auto-generated summary",
             session_id=session_id,
             pending_decisions=[]
         )
         
+        self._log_activity("session_summarized", {"intent": parsed.intent.value})
         return summary
+    
+    def _handle_help(self, parsed: ParsedIntent, session_id: str) -> str:
+        """Handle help request."""
+        self._log_activity("help_requested", {"intent": parsed.intent.value})
+        return self._get_help()
+    
+    def _handle_unknown(self, parsed: ParsedIntent, session_id: str, original_request: str) -> str:
+        """Handle unknown intent."""
+        self._log_activity("unknown_intent", {
+            "request": original_request,
+            "confidence": parsed.confidence,
+            "evidence": parsed.evidence
+        })
+        return f"🤔 I didn't understand '{original_request}'. Try asking for help with 'help' or rephrase your request."
+
     
     def _generate_semantic_key(self, content: str) -> str:
         """Generate a semantic key from content."""
