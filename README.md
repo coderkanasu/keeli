@@ -42,11 +42,23 @@ Configure your `.vscode/mcp.json` or global `mcp.json`:
 
 Keeli provides 6 domain-based MCP tools:
 
+All MCP tool responses use a unified JSON envelope:
+- ok, tool, operation, timestamp
+- project: name/root/workspace
+- scope: branch/session_id/actor
+- data (payload), optional error, optional next_action
+
 1. **`keeli_tasks`** - Unified task management
    - Operations: `create`, `query`, `get`, `get_state`, `next`, `update_status`, `update_field`, `update_tags`, `conflicts`
+   - Tag schema: tags must be `prefix:value` with prefix in `domain`, `area`, `risk`, `state`
 
 2. **`keeli_context`** - Context operations
-   - Operations: `get`, `set`, `digest` (enhanced with working memory and knowledge integration)
+   - Operations: `get`, `set`, `digest`, `fastcontext` (compact state-first digest for multi-pass LLM loops)
+   - fastcontext scoping: resolves context by session first, then project + branch + author when session is not provided
+
+Project-root guard:
+- MCP resolves project root deterministically (KEELI_ROOT override, then workspace/repo markers).
+- This prevents cross-project context bleed when multiple `.keeli` stores exist on the machine.
 
 3. **`keeli_sessions`** - Session management
    - Operations: `start`, `focus`, `checkpoint`, `list`
@@ -66,6 +78,12 @@ Keeli provides 6 domain-based MCP tools:
 # Create a task
 keeli_tasks(operation="create", title="Implement authentication", priority="p1")
 
+# Query tasks by tags (match any)
+keeli_tasks(operation="query", filters={"tags": ["area:auth"], "tag_match": "any"})
+
+# Query tasks by tags (match all)
+keeli_tasks(operation="query", filters={"tags": ["domain:backend", "area:auth"], "tag_match": "all"})
+
 # Get project context
 keeli_memory(operation="get_context")
 
@@ -74,6 +92,12 @@ keeli_memory(operation="save_analysis", analysis_type="code_structure", analysis
 
 # Get enhanced digest with working memory
 keeli_context(operation="digest", session_id="...", include_working_memory=True)
+
+# Get fast, announced context for multi-pass LLM use
+keeli_context(operation="fastcontext", session_id="...")
+
+# Let Keeli resolve best session using project + branch + author
+keeli_context(operation="fastcontext", branch="main", author="copilot")
 
 # Save important knowledge
 keeli_knowledge(operation="save", knowledge_type="architecture_pattern", content="...")
@@ -96,13 +120,20 @@ For detailed instructions on using Keeli with Devin AI, provide Devin with the f
 > - `keeli_system` - Sync filesystem and run diagnostics
 >
 > **Typical Workflow:**
-> 1. Start a session: `keeli_sessions(operation="start", context="...")`
-> 2. Get next task: `keeli_tasks(operation="next")`
-> 3. Move to active: `keeli_tasks(operation="update_status", task_id="T-XXXX", new_status="active")`
-> 4. Focus session: `keeli_sessions(operation="focus", task_id="T-XXXX")`
-> 5. Get context: `keeli_context(operation="digest", session_id="...", include_working_memory=True)`
-> 6. Perform work, create checkpoints, and save knowledge
-> 7. Move to review: `keeli_tasks(operation="update_status", task_id="T-XXXX", new_status="review")`
+> 1. Start a session: `keeli_sessions(operation="start", name="...", branch="...")`
+> 2. Get next task: `keeli_tasks(operation="next", session_id="...")`
+> 3. Move to active: `keeli_tasks(operation="update_status", task_id="T-XXXX", status="active", session_id="...")`
+> 4. Focus session: `keeli_sessions(operation="focus", session_id="...", focus_task_id="T-XXXX")`
+> 5. Get scoped context: `keeli_context(operation="digest", session_id="...", include_working_memory=True)`
+> 6. Perform work, checkpoint key decisions, and save knowledge
+> 7. Move to review: `keeli_tasks(operation="update_status", task_id="T-XXXX", status="review", session_id="...")`
+>
+> **Evidence-First Remediation Loop (for data integrity + bug fixes):**
+> 1. Baseline defect counts and save before-state in working memory.
+> 2. Isolate specific problematic records and root cause evidence.
+> 3. Apply minimal patch and checkpoint immediately.
+> 4. Re-run baseline checks and verify downstream outputs.
+> 5. Add monitoring hooks and persist lessons to project knowledge.
 >
 > **Best Practices:**
 > - Always handle conflicts using `keeli_tasks(operation="conflicts")` before updates

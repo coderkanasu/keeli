@@ -448,6 +448,8 @@ class KeeliEngine:
         self,
         status: Optional[str] = None,
         branch: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        tag_match: str = "any",
     ) -> List[Dict[str, Any]]:
         if branch:
             query = """
@@ -456,6 +458,7 @@ class KeeliEngine:
                 COALESCE(bs.title, ti.title) as title,
                 COALESCE(bs.status, ti.status) as status,
                 COALESCE(bs.priority, ti.priority) as priority,
+                ti.tags,
                 ti.vector_clock
             FROM task_index ti
             LEFT JOIN branch_snapshots bs ON ti.id = bs.task_id AND bs.branch = ?
@@ -463,14 +466,46 @@ class KeeliEngine:
             """
             rows = self.conn.execute(query, (branch,)).fetchall()
             if rows:
-                return [dict(r) for r in rows]
+                tasks = [dict(r) for r in rows]
+                return self._filter_tasks_by_tags(tasks, tags, tag_match)
 
-        query = "SELECT id, title, status, priority, vector_clock FROM task_index"
+        query = "SELECT id, title, status, priority, tags, vector_clock FROM task_index"
         params = []
         if status:
             query += " WHERE status = ? COLLATE NOCASE"
             params.append(status.lower())
-        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+        tasks = [dict(r) for r in self.conn.execute(query, params).fetchall()]
+        return self._filter_tasks_by_tags(tasks, tags, tag_match)
+
+    def _filter_tasks_by_tags(
+        self,
+        tasks: List[Dict[str, Any]],
+        tags: Optional[List[str]] = None,
+        tag_match: str = "any",
+    ) -> List[Dict[str, Any]]:
+        """Filter tasks by tags with any/all matching semantics."""
+        if not tags:
+            return tasks
+
+        requested = {t.strip().lower() for t in tags if t and t.strip()}
+        if not requested:
+            return tasks
+
+        mode = (tag_match or "any").strip().lower()
+        if mode not in {"any", "all"}:
+            mode = "any"
+
+        filtered: List[Dict[str, Any]] = []
+        for task in tasks:
+            raw_tags = task.get("tags") or ""
+            task_tags = {t.strip().lower() for t in raw_tags.split(",") if t.strip()}
+
+            if mode == "all" and requested.issubset(task_tags):
+                filtered.append(task)
+            elif mode == "any" and requested.intersection(task_tags):
+                filtered.append(task)
+
+        return filtered
 
     def get_task(self, task_id: str) -> str:
         """CRITICAL FIX: Generate markdown on-the-fly from CRDT state.

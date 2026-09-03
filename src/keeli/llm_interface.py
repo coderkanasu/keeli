@@ -314,13 +314,14 @@ class LLMInterface:
     def _extract_task_details(self, natural_request: str) -> Dict[str, Any]:
         """Extract task details from natural language."""
         details = {"title": "", "priority": "p1", "tags": [], "description": ""}
+        request_lower = natural_request.lower()
         
         # Extract priority
-        if "urgent" in natural_request.lower() or "critical" in natural_request.lower():
+        if "urgent" in request_lower or "critical" in request_lower:
             details["priority"] = "p0"
-        elif "important" in natural_request.lower():
+        elif "important" in request_lower:
             details["priority"] = "p1"
-        elif "low" in natural_request.lower() or "minor" in natural_request.lower():
+        elif "low" in request_lower or "minor" in request_lower:
             details["priority"] = "p2"
         
         # Extract title (remove common task-related words)
@@ -328,18 +329,70 @@ class LLMInterface:
         for word in ["create", "add", "new", "task", "make", "urgent", "critical", "important", "low", "minor"]:
             title = re.sub(rf"\b{word}\b", "", title, flags=re.IGNORECASE)
         details["title"] = title.strip() or ""
+
+        # Extract schema-based tags from intent keywords
+        details["tags"] = self._extract_tags_from_request(request_lower)
         
         # Extract description (anything after "because" or "to")
-        if "because" in natural_request.lower():
-            parts = natural_request.lower().split("because")
+        if "because" in request_lower:
+            parts = request_lower.split("because")
             if len(parts) > 1:
                 details["description"] = parts[1].strip()
-        elif " to " in natural_request.lower():
-            parts = natural_request.lower().split(" to ", 1)
+        elif " to " in request_lower:
+            parts = request_lower.split(" to ", 1)
             if len(parts) > 1:
                 details["description"] = "To " + parts[1].strip()
         
         return details
+
+    def _extract_tags_from_request(self, request_lower: str) -> List[str]:
+        """Extract structured tags using the enforced schema prefix:value."""
+        tag_set = set()
+
+        domain_map = {
+            "frontend": ["ui", "frontend", "dashboard", "streamlit"],
+            "backend": ["backend", "api", "server", "database", "db", "mcp"],
+            "data": ["data", "ingestion", "analytics", "sector", "integrity"],
+            "testing": ["test", "tests", "coverage", "benchmark"],
+            "security": ["auth", "authentication", "security", "vulnerability", "cve"],
+            "devops": ["deploy", "deployment", "infra", "docker", "kubernetes"],
+        }
+
+        area_map = {
+            "auth": ["auth", "authentication", "jwt"],
+            "dashboard": ["dashboard", "ui", "streamlit"],
+            "state-management": ["state", "session", "context", "memory", "crdt"],
+            "data-integrity": ["sector", "unknown", "missing", "integrity", "reconcile"],
+            "telemetry": ["telemetry", "metrics", "observability", "monitoring"],
+            "performance": ["performance", "optimize", "latency", "speed"],
+            "mcp": ["mcp", "tool", "agent"],
+        }
+
+        risk_map = {
+            "critical": ["critical", "urgent", "prod", "production", "outage", "sev1"],
+            "high": ["high", "blocking", "blocker", "sev2"],
+            "medium": ["important", "sev3"],
+            "low": ["minor", "low", "nice to have"],
+        }
+
+        state_map = {
+            "blocked": ["blocked", "waiting", "stuck"],
+            "review": ["review", "qa", "verify", "validation"],
+            "active": ["active", "in progress", "working on"],
+            "planned": ["plan", "planning", "todo", "backlog"],
+        }
+
+        def add_from_map(prefix: str, mapping: Dict[str, List[str]]) -> None:
+            for value, keywords in mapping.items():
+                if any(keyword in request_lower for keyword in keywords):
+                    tag_set.add(f"{prefix}:{value}")
+
+        add_from_map("domain", domain_map)
+        add_from_map("area", area_map)
+        add_from_map("risk", risk_map)
+        add_from_map("state", state_map)
+
+        return sorted(tag_set)
     
     def _extract_task_id(self, text: str) -> Optional[str]:
         """Extract task ID from text."""
@@ -530,6 +583,7 @@ class LLMInterface:
         task_id = self.engine.start(
             title=title,
             priority_raw=parsed.parameters.get("priority", "p1"),
+            tags=parsed.parameters.get("tags", []),
             description=parsed.parameters.get("description", ""),
             session_id=session_id
         )

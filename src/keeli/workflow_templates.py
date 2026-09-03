@@ -382,6 +382,106 @@ class WorkflowTemplateLibrary:
         )
         
         self._templates[api_template.template_id] = api_template
+
+        # Data Integrity Remediation Template
+        data_integrity_template = WorkflowTemplate(
+            template_id="data_integrity_remediation",
+            name="Data Integrity Remediation",
+            description="Evidence-first workflow for identifying, correcting, and preventing data quality defects",
+            domain=TaskDomain.DATA,
+            complexity=TaskComplexity.MODERATE,
+            estimated_total_time="30-90 minutes",
+            steps=[
+                WorkflowStep(
+                    step_number=1,
+                    title="Baseline Integrity",
+                    description="Run a deterministic integrity check and capture baseline defect counts",
+                    estimated_time="5-10 minutes",
+                    substeps=[
+                        "Run integrity checker against the canonical dataset",
+                        "Capture totals (valid/unknown/missing)",
+                        "Store baseline in session memory for traceability"
+                    ],
+                    success_criteria=["Baseline defect count is recorded", "Scope of impact is quantified"],
+                    common_pitfalls=["Patching before measuring", "Skipping reproducibility evidence"]
+                ),
+                WorkflowStep(
+                    step_number=2,
+                    title="Isolate Defective Records",
+                    description="Enumerate the exact entities with invalid or missing fields",
+                    estimated_time="5-10 minutes",
+                    dependencies=[1],
+                    substeps=[
+                        "Query canonical store for problematic records",
+                        "Collect identifiers and missing fields",
+                        "Persist defect list as working memory"
+                    ],
+                    success_criteria=["Defect list is explicit and finite", "Each record has a remediation target"],
+                    common_pitfalls=["Using aggregated-only views", "Not recording entity-level evidence"]
+                ),
+                WorkflowStep(
+                    step_number=3,
+                    title="Resolve Source of Truth",
+                    description="Resolve correct values from trusted sources or documented business rules",
+                    estimated_time="5-15 minutes",
+                    dependencies=[2],
+                    substeps=[
+                        "Attempt enrichment from authoritative providers",
+                        "Fallback to documented manual assignments when source data is incomplete",
+                        "Capture rationale for each resolved value"
+                    ],
+                    success_criteria=["Each target record has a chosen value", "Resolution source/rationale is documented"],
+                    common_pitfalls=["Blind external API trust", "Undocumented manual decisions"]
+                ),
+                WorkflowStep(
+                    step_number=4,
+                    title="Patch Canonical Data",
+                    description="Apply minimal updates to canonical storage with auditable changes",
+                    estimated_time="5-10 minutes",
+                    dependencies=[3],
+                    substeps=[
+                        "Update only required fields",
+                        "Log per-record update results",
+                        "Save checkpoint after mutation"
+                    ],
+                    success_criteria=["All targeted records are updated", "No unrelated fields changed"],
+                    common_pitfalls=["Broad updates", "No mutation audit trail"]
+                ),
+                WorkflowStep(
+                    step_number=5,
+                    title="Re-Validate End-to-End",
+                    description="Re-run integrity checks and validate downstream pipeline outputs",
+                    estimated_time="5-10 minutes",
+                    dependencies=[4],
+                    substeps=[
+                        "Re-run full integrity check",
+                        "Verify recent outputs contain zero unknown/missing entries",
+                        "Record before/after metrics"
+                    ],
+                    success_criteria=["Defect count drops to target", "Pipeline consumers observe corrected state"],
+                    common_pitfalls=["Skipping downstream verification", "Not confirming zero-regression state"]
+                ),
+                WorkflowStep(
+                    step_number=6,
+                    title="Instrument Prevention",
+                    description="Add monitoring and alerts to catch recurrence early",
+                    estimated_time="5-10 minutes",
+                    dependencies=[5],
+                    substeps=[
+                        "Add warnings for unknown/missing fields in processing paths",
+                        "Expose anomalies in user-facing views",
+                        "Document recurring maintenance runbook"
+                    ],
+                    success_criteria=["Future data defects become visible quickly", "Operational checks are documented"],
+                    common_pitfalls=["Fixing once without guardrails", "No operational handoff"]
+                )
+            ],
+            prerequisites=["Data integrity checker available", "Access to canonical data store"],
+            deliverables=["Baseline metrics", "Defect evidence", "Data patch", "Re-validation evidence", "Monitoring updates"],
+            related_templates=["bug_fix_simple", "feature_development_moderate"]
+        )
+
+        self._templates[data_integrity_template.template_id] = data_integrity_template
     
     def get_template(self, template_id: str) -> Optional[WorkflowTemplate]:
         """Get a template by ID."""
@@ -402,6 +502,13 @@ class WorkflowTemplateLibrary:
     def find_matching_template(self, natural_request: str) -> Optional[WorkflowTemplate]:
         """Find the best matching template based on natural language request."""
         request_lower = natural_request.lower()
+
+        data_integrity_keywords = [
+            "data integrity", "missing sector", "unknown sector", "sector assignment",
+            "missing data", "unknown values", "reconcile data", "data quality"
+        ]
+        if any(keyword in request_lower for keyword in data_integrity_keywords):
+            return self._templates.get("data_integrity_remediation")
         
         # Simple keyword matching
         if "bug" in request_lower or "fix" in request_lower:

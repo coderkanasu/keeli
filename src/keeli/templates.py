@@ -44,8 +44,31 @@ Current focus: {focus}
 - Field-level independence: editing `status` never conflicts with editing `priority`.
 - Always pass `session_id` and `branch` explicitly in MCP tool calls.
 - Use `keeli_detect_conflicts(task_id)` to observe concurrent edit history.
-"""
 
+## Evidence-First Remediation Protocol (Model-Agnostic)
+Use this loop for data integrity, bug fixing, and incident-style remediation whether the agent is Devin, Claude, or GPT.
+
+1. Baseline first
+- Start/confirm a session with `keeli_sessions(start)`.
+- Save measurable before-state with `keeli_memory(set)`.
+- Capture scoped digest with `keeli_context(digest)`.
+
+2. Isolate concrete defects
+- Move from aggregate symptoms to specific records/inputs.
+- Store defect list and hypotheses in working memory.
+
+3. Apply minimal patch
+- Change only required state/logic.
+- Checkpoint immediately after mutation with `keeli_sessions(checkpoint)`.
+
+4. Re-verify end-to-end
+- Re-run the baseline check and compare before/after.
+- Validate downstream consumers, not only local logic.
+
+5. Instrument prevention
+- Add anomaly logging or warnings at ingestion and analysis boundaries.
+- Save durable lesson with `keeli_knowledge(save)`.
+"""
 SKILL_TEMPLATE = """---
 name: keeli-task-manager
 description: Keeli v6.0 task management with field-level CRDTs, isolated workspace, and connection-scoped sessions.

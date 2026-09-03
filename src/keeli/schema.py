@@ -11,11 +11,12 @@ from pathlib import Path
 
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Initialize the Keeli v6.0 state database with CRDT event sourcing."""
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.row_factory = sqlite3.Row
 
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
     # ── CRDT Event Log (Append-Only Source of Truth) ──

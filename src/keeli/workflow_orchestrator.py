@@ -217,58 +217,58 @@ class WorkflowOrchestrator:
     def _bug_fixing_guidance(self, stage: WorkflowStage) -> str:
         guidance = {
             WorkflowStage.CONTEXT_GATHERING: """
-**Step 1: Understand the Bug**
-• Ask me to show related tasks and error logs
-• Identify when and how the bug occurs
-• Check recent changes that might have caused it
-• Understand the expected vs actual behavior
+**Step 1: Baseline the Problem (Evidence First)**
+• Reproduce with one deterministic check and capture before-state metrics
+• Save baseline snapshot in session memory (`keeli_memory set`)
+• Start/confirm scoped session and branch context (`keeli_sessions start`, `keeli_context digest`)
+• Define expected vs actual outcome in one measurable sentence
 
-*Say "show context" to proceed.*
+*Say "show context" to proceed with baseline evidence.*
 """,
             WorkflowStage.ANALYSIS: """
-**Step 2: Analyze Root Cause**
-• Trace through the code execution path
-• Identify the specific line or logic causing the issue
-• Consider edge cases and timing issues
-• Plan the minimal fix approach
+**Step 2: Isolate Root Cause**
+• Drill from aggregate symptoms into specific defective records/inputs
+• Validate each hypothesis with direct evidence (queries, logs, traces)
+• Record key findings as working memory for cross-model continuity
+• Prefer minimal-scope root cause over broad speculative rewrites
 
-*Say "analyze" when ready.*
+*Say "analyze" when root-cause evidence is concrete.*
 """,
             WorkflowStage.IMPLEMENTATION: """
-**Step 3: Implement Fix**
-• Apply the minimal, targeted fix
-• Ensure the fix doesn't break other functionality
-• Add appropriate error handling if needed
-• Write tests to prevent regression
+**Step 3: Apply Minimal Patch**
+• Update only the defective state/logic required to resolve the issue
+• Log per-item mutation outcomes and decisions
+• Checkpoint immediately after mutation (`keeli_sessions checkpoint`)
+• Add a regression test or invariant check when feasible
 
-*Say "implement" to apply the fix.*
+*Say "implement" to apply and checkpoint the patch.*
 """,
             WorkflowStage.VALIDATION: """
-**Step 4: Validate Fix**
-• Test the specific bug scenario
-• Verify no new issues are introduced
-• Check edge cases around the fix
-• Run existing test suite
+**Step 4: Re-Verify End-to-End**
+• Re-run the original baseline check and compare before/after metrics
+• Validate downstream outputs or consumers, not just the local fix path
+• Confirm zero remaining unknown/missing/error states for this defect class
+• Run relevant tests to guard against regressions
 
-*Say "validate" to test the fix.*
+*Say "validate" to prove the fix is complete.*
 """,
             WorkflowStage.DOCUMENTATION: """
-**Step 5: Document Fix**
-• Add comments explaining the fix
-• Update related documentation
-• Record the bug and its resolution
-• Note any lessons learned
+**Step 5: Instrument and Document Prevention**
+• Add warning/monitoring hooks for recurrence signals
+• Update runbook with checker command, defect signature, and fix pattern
+• Save durable insight to project knowledge (`keeli_knowledge save`)
+• Document what changed in behavior and why
 
-*Say "document" to complete.*
+*Say "document" to store prevention guidance.*
 """,
             WorkflowStage.COMPLETION: """
-**Step 6: Complete Bug Fix**
-• Mark the task as complete
-• Summarize the fix and its impact
-• Identify any related issues to address
-• Clean up debugging code
+**Step 6: Close with State Integrity**
+• Mark the task complete only after evidence is stored
+• Summarize baseline, patch, and verified outcome in one closure note
+• Capture any follow-up tasks discovered during remediation
+• Keep session state clean for handoff across Devin/Claude/GPT
 
-*Say "complete" to finish.*
+*Say "complete" to finalize the remediation loop.*
 """
         }
         return guidance.get(stage, "")
