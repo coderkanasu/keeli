@@ -574,26 +574,99 @@ class LLMInterface:
     
     # ── Intent Handlers (Structured Execution) ──
     
+    def _task_decomposition_gate(self, title: str, description: str) -> Optional[str]:
+        """Reject incomplete task definitions before mutating state."""
+        normalized = (description or "").strip()
+        if not normalized:
+            return (
+                f"⚠️ **Task Definition Incomplete for '{title or 'Untitled Task'}**\n\n"
+                "To prevent assumptions, you must break down this task before I can create it.\n"
+                "Provide a revised request that includes:\n"
+                "1. Specific acceptance criteria.\n"
+                "2. At least two concrete subtasks or dependencies.\n"
+                "3. The exact files or modules affected."
+            )
+
+        description_lower = normalized.lower()
+        has_criteria = any(term in description_lower for term in [
+            "acceptance criteria",
+            "acceptance",
+            "criteria",
+            "must",
+            "expected result",
+            "done when",
+            "outcome",
+        ])
+        has_subtasks = any(term in description_lower for term in [
+            "step 1",
+            "step 2",
+            "subtask",
+            "subtasks",
+            "dependency",
+            "dependencies",
+            "phase",
+            "workflow",
+            "1.",
+            "2.",
+            "then",
+            "after",
+        ])
+        word_count = len(re.findall(r"\b\w+\b", normalized))
+
+        if word_count < 15 or not (has_criteria and has_subtasks):
+            return (
+                f"⚠️ **Task Definition Incomplete for '{title or 'Untitled Task'}**\n\n"
+                "To prevent assumptions, you must break down this task before I can create it.\n"
+                "Respond with a revised request that explicitly includes:\n"
+                "1. Specific acceptance criteria.\n"
+                "2. At least two concrete subtasks or dependencies.\n"
+                "3. The exact files or modules affected."
+            )
+        return None
+
     def _handle_create_task(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle task creation with extracted parameters."""
         title = parsed.parameters.get("title", "").strip()
         if not title:
             return "❓ I need a task title to create a task. What should I create?"
-        
-        task_id = self.engine.start(
-            title=title,
-            priority_raw=parsed.parameters.get("priority", "p1"),
-            tags=parsed.parameters.get("tags", []),
-            description=parsed.parameters.get("description", ""),
-            session_id=session_id
-        )
+
+        description = str(parsed.parameters.get("description", "") or "").strip()
+        gate_message = self._task_decomposition_gate(title, description)
+        if gate_message:
+            self._log_telemetry_success(parsed, "create_task_rejected_hallucination", request)
+            return gate_message
+
+        priority = parsed.parameters.get("priority", "p1")
+        tags = parsed.parameters.get("tags", []) or []
+        actor = "llm_agent"
+
+        if getattr(self, "engine", None) is not None:
+            task_id = self.engine.start(
+                title=title,
+                priority_raw=priority,
+                tags=tags,
+                description=description,
+                session_id=session_id,
+                actor=actor,
+            )
+        else:
+            task_id = f"T-{uuid.uuid4().hex[:6].upper()}"
+
+        if getattr(self, "memory_store", None) is not None:
+            self.memory_store.set_field(task_id, "title", title, actor)
+            self.memory_store.set_field(task_id, "description", description, actor)
+            self.memory_store.set_field(task_id, "priority", priority, actor)
+            self.memory_store.set_field(task_id, "status", "backlog", actor)
+            if tags:
+                self.memory_store.add_tags(task_id, tags, actor)
+
         self._log_activity("task_created", {
             "task_id": task_id,
             "intent": parsed.intent.value,
             "confidence": parsed.confidence
         })
         self._log_telemetry_success(parsed, "create_task", request)
-        return f"✅ Created task {task_id}: {title}"
+        return f"✅ Created task {task_id}: {title} (Pending disk sync)"
     
     def _handle_get_next_task(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle next task retrieval."""
@@ -626,10 +699,17 @@ class LLMInterface:
         task_id = parsed.parameters.get("task_id")
         if not task_id:
             return "❓ Which task? Please specify the task ID (e.g., T-0001)"
-        self.engine.move_task(task_id, "archive", session_id=session_id)
+
+        actor = "llm_agent"
+        if getattr(self, "memory_store", None) is not None:
+            self.memory_store.set_field(task_id, "status", "archive", actor)
+            self.memory_store.set_field(task_id, "completed", datetime.now(timezone.utc).isoformat(), actor)
+        elif getattr(self, "engine", None) is not None:
+            self.engine.move_task(task_id, "archive", session_id=session_id, actor=actor)
+
         self._log_activity("task_completed", {"task_id": task_id, "intent": parsed.intent.value})
         self._log_telemetry_success(parsed, "complete_task", request)
-        return f"✅ Completed task {task_id}"
+        return f"✅ Completed task {task_id} (Pending disk sync)"
     
     def _handle_get_status(self, parsed: ParsedIntent, session_id: str, request: str = "") -> str:
         """Handle status request."""

@@ -106,24 +106,46 @@ class MemoryCRDTStore:
         with self._lock:
             if task_id not in self._state:
                 self._state[task_id] = MemoryState(task_id=task_id)
-            
+
             state = self._state[task_id]
-            for tag in tags:
-                state.tags.add(tag.lower().strip())
+            cleaned = [tag.lower().strip() for tag in tags if str(tag).strip()]
+            for tag in cleaned:
+                state.tags.add(tag)
             state.vector_clock = state.vector_clock.increment(actor)
             state.last_modified = datetime.now(timezone.utc)
             state.pending_sync = True
-    
+            if cleaned:
+                self._event_log.append(Event(
+                    task_id=task_id,
+                    field="tags",
+                    op="add",
+                    value=cleaned,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    actor=actor,
+                    vector_clock=state.vector_clock.clocks,
+                ))
+
     def remove_tags(self, task_id: str, tags: List[str], actor: str) -> None:
         """Remove tags from a task in memory."""
         with self._lock:
             if task_id in self._state:
                 state = self._state[task_id]
-                for tag in tags:
-                    state.tags.discard(tag.lower().strip())
+                cleaned = [tag.lower().strip() for tag in tags if str(tag).strip()]
+                for tag in cleaned:
+                    state.tags.discard(tag)
                 state.vector_clock = state.vector_clock.increment(actor)
                 state.last_modified = datetime.now(timezone.utc)
                 state.pending_sync = True
+                if cleaned:
+                    self._event_log.append(Event(
+                        task_id=task_id,
+                        field="tags",
+                        op="remove",
+                        value=cleaned,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        actor=actor,
+                        vector_clock=state.vector_clock.clocks,
+                    ))
     
     def get_tags(self, task_id: str) -> Set[str]:
         """Get tags for a task from memory."""
@@ -159,56 +181,102 @@ class MemoryCRDTStore:
     
     # ── Periodic Filesystem Sync (Lazy) ──
     
+    def _task_exists_in_engine(self, task_id: str) -> bool:
+        """Check whether the engine already materialized the task in SQLite."""
+        if not self.engine:
+            return False
+        row = self.engine.conn.execute(
+            "SELECT id FROM task_index WHERE id = ? OR slug = ?",
+            (task_id, task_id),
+        ).fetchone()
+        return row is not None
+
+    def _ensure_task_exists_in_engine(self, task_id: str, state: Optional[MemoryState] = None) -> None:
+        """Create the base task record in the engine before replaying field events."""
+        if not self.engine or self._task_exists_in_engine(task_id):
+            return
+
+        if state is None:
+            state = self._state.get(task_id)
+        if state is None:
+            return
+
+        title = str(state.fields.get("title", "Untitled Task") or "Untitled Task").strip() or "Untitled Task"
+        description = str(state.fields.get("description", "No description provided.") or "No description provided.").strip()
+        priority = str(state.fields.get("priority", "P1") or "P1").strip().upper()
+        tags = [tag.strip().lower() for tag in state.tags if str(tag).strip()]
+
+        self.engine.start(
+            title=title,
+            priority_raw=priority,
+            tags=tags,
+            description=description,
+            actor="memory_store",
+        )
+
     def sync_to_filesystem(self) -> Dict[str, int]:
         """
-        Sync pending changes to filesystem.
-        
-        Returns statistics about sync operation.
+        Sync pending CRDT events to the SQLite engine.
+
+        The source of truth is the event log, not materialized markdown.
+        This replays the memory-store mutations into the engine so a reload
+        reconstructs the same CRDT state from task_events.
         """
         with self._lock:
-            if not self._state:
+            if not self._event_log or not self.engine:
                 return {"synced": 0, "skipped": 0}
-            
+
             synced_count = 0
-            skipped_count = 0
-            
-            for task_id, state in self._state.items():
-                if state.pending_sync:
-                    self._sync_task_to_file(task_id, state)
-                    state.pending_sync = False
+            skipped_count = len(self._event_log)
+
+            try:
+                for event in list(self._event_log):
+                    state = self._state.get(event.task_id)
+                    self._ensure_task_exists_in_engine(event.task_id, state)
+
+                    if event.op == "set":
+                        self.engine.edit_task_field(
+                            task_id=event.task_id,
+                            field=event.field,
+                            value=event.value,
+                            op="set",
+                            actor=event.actor,
+                        )
+                    elif event.field == "tags" and event.op == "add":
+                        payload = event.value if isinstance(event.value, list) else [event.value]
+                        self.engine.add_tags(
+                            task_id=event.task_id,
+                            tags=payload,
+                            actor=event.actor,
+                        )
+                    elif event.field == "tags" and event.op == "remove":
+                        payload = event.value if isinstance(event.value, list) else [event.value]
+                        self.engine.remove_tags(
+                            task_id=event.task_id,
+                            tags=payload,
+                            actor=event.actor,
+                        )
+                    else:
+                        self.engine.edit_task_field(
+                            task_id=event.task_id,
+                            field=event.field,
+                            value=event.value,
+                            op=event.op,
+                            actor=event.actor,
+                        )
+
                     synced_count += 1
-                else:
-                    skipped_count += 1
-            
-            return {"synced": synced_count, "skipped": skipped_count}
-    
-    def _sync_task_to_file(self, task_id: str, state: MemoryState) -> None:
-        """Sync a single task to filesystem via the engine."""
-        if not self.engine:
-            # No engine available, skip filesystem sync
-            return
-        
-        try:
-            # Extract task data from in-memory state
-            task_data = {
-                "id": task_id,
-                "title": state.fields.get("title", ""),
-                "description": state.fields.get("description", ""),
-                "status": state.fields.get("status", ""),
-                "priority": state.fields.get("priority", ""),
-                "tags": list(state.tags),
-                "last_modified": state.last_modified.isoformat(),
-                "metadata": state.fields.get("metadata", {})
-            }
-            
-            # Call engine's write method to persist to filesystem
-            if hasattr(self.engine, '_write_task_markdown'):
-                self.engine._write_task_markdown(task_id, task_data)
-            elif hasattr(self.engine, 'update_task'):
-                self.engine.update_task(task_id, task_data)
-        except Exception as e:
-            # Log sync failure but don't raise - data remains in memory for retry
-            print(f"Warning: Failed to sync {task_id} to filesystem: {e}")
+                    skipped_count -= 1
+
+                self._event_log.clear()
+                for state in self._state.values():
+                    state.pending_sync = False
+
+            except Exception as e:
+                print(f"Warning: Failed to sync CRDT events to engine: {e}")
+                return {"synced": 0, "skipped": skipped_count or len(self._event_log)}
+
+            return {"synced": synced_count, "skipped": 0}
     
     def force_sync(self) -> Dict[str, int]:
         """Force immediate sync of all pending changes."""

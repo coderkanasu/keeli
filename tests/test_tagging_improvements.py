@@ -4,7 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.keeli.engine import KeeliEngine
-from src.keeli.llm_interface import LLMInterface
+from src.keeli.llm_interface import LLMInterface, ParsedIntent, IntentType
+from src.keeli.memory_crdt import MemoryCRDTStore
 from src.keeli.mcp_server import _normalize_and_validate_tags
 
 
@@ -66,3 +67,63 @@ def test_extract_task_details_infers_structured_tags():
     assert "area:data-integrity" in tags
     assert "area:state-management" in tags
     assert "state:blocked" in tags
+
+
+def test_create_task_rejects_incomplete_definition():
+    interface = LLMInterface.__new__(LLMInterface)
+    interface.memory_store = MemoryCRDTStore(sync_interval_seconds=60, engine=None)
+    interface._log_telemetry_success = lambda *args, **kwargs: None
+    interface._log_activity = lambda *args, **kwargs: None
+
+    parsed = ParsedIntent(
+        intent=IntentType.CREATE_TASK,
+        confidence=0.95,
+        parameters={
+            "title": "Fix auth issue",
+            "description": "Need to fix the auth bug",
+            "priority": "p1",
+            "tags": ["domain:backend"],
+        },
+    )
+
+    response = interface._handle_create_task(parsed, "session-1", "Create task to fix auth issue")
+
+    assert "Task Definition Incomplete" in response
+    assert "acceptance criteria" in response.lower()
+    assert interface.memory_store.get_all_task_ids() == []
+
+
+def test_complete_task_updates_memory_store_status():
+    interface = LLMInterface.__new__(LLMInterface)
+    interface.memory_store = MemoryCRDTStore(sync_interval_seconds=60, engine=None)
+    interface._log_telemetry_success = lambda *args, **kwargs: None
+    interface._log_activity = lambda *args, **kwargs: None
+    interface.memory_store.set_field("T-0001", "title", "Fix auth issue", actor="test")
+
+    parsed = ParsedIntent(
+        intent=IntentType.COMPLETE_TASK,
+        confidence=0.9,
+        parameters={"task_id": "T-0001"},
+    )
+
+    response = interface._handle_complete_task(parsed, "session-1", "Complete task T-0001")
+
+    assert "Completed task T-0001" in response
+    assert interface.memory_store.get_field("T-0001", "status") == "archive"
+
+
+def test_memory_store_sync_flushes_events_to_engine(tmp_path):
+    engine = KeeliEngine(root_dir=tmp_path)
+    memory_store = MemoryCRDTStore(sync_interval_seconds=60, engine=engine)
+
+    memory_store.set_field("T-0001", "title", "Fix auth issue", actor="llm_agent")
+    memory_store.set_field("T-0001", "description", "Need to fix login flow", actor="llm_agent")
+    memory_store.set_field("T-0001", "status", "backlog", actor="llm_agent")
+    memory_store.set_field("T-0001", "priority", "P1", actor="llm_agent")
+
+    stats = memory_store.sync_to_filesystem()
+
+    assert stats["synced"] >= 1
+    tasks = engine.list_tasks()
+    assert any(task["id"] == "T-0001" for task in tasks)
+    assert any(task["title"] == "Fix auth issue" for task in tasks)
