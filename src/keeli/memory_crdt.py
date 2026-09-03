@@ -212,6 +212,7 @@ class MemoryCRDTStore:
             tags=tags,
             description=description,
             actor="memory_store",
+            task_id=task_id,
         )
 
     def sync_to_filesystem(self) -> Dict[str, int]:
@@ -239,7 +240,6 @@ class MemoryCRDTStore:
                             task_id=event.task_id,
                             field=event.field,
                             value=event.value,
-                            op="set",
                             actor=event.actor,
                         )
                     elif event.field == "tags" and event.op == "add":
@@ -261,7 +261,6 @@ class MemoryCRDTStore:
                             task_id=event.task_id,
                             field=event.field,
                             value=event.value,
-                            op=event.op,
                             actor=event.actor,
                         )
 

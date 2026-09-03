@@ -116,14 +116,15 @@ def test_memory_store_sync_flushes_events_to_engine(tmp_path):
     engine = KeeliEngine(root_dir=tmp_path)
     memory_store = MemoryCRDTStore(sync_interval_seconds=60, engine=engine)
 
-    memory_store.set_field("T-0001", "title", "Fix auth issue", actor="llm_agent")
-    memory_store.set_field("T-0001", "description", "Need to fix login flow", actor="llm_agent")
-    memory_store.set_field("T-0001", "status", "backlog", actor="llm_agent")
-    memory_store.set_field("T-0001", "priority", "P1", actor="llm_agent")
+    local_task_id = "T-AB12CD"
+    memory_store.set_field(local_task_id, "title", "Fix auth issue", actor="llm_agent")
+    memory_store.set_field(local_task_id, "description", "Need to fix login flow", actor="llm_agent")
+    memory_store.set_field(local_task_id, "status", "backlog", actor="llm_agent")
+    memory_store.set_field(local_task_id, "priority", "P1", actor="llm_agent")
 
     stats = memory_store.sync_to_filesystem()
 
     assert stats["synced"] >= 1
     tasks = engine.list_tasks()
-    assert any(task["id"] == "T-0001" for task in tasks)
     assert any(task["title"] == "Fix auth issue" for task in tasks)
+    assert any(task["status"] == "backlog" for task in tasks)

@@ -638,19 +638,11 @@ class LLMInterface:
 
         priority = parsed.parameters.get("priority", "p1")
         tags = parsed.parameters.get("tags", []) or []
-        actor = "llm_agent"
 
-        if getattr(self, "engine", None) is not None:
-            task_id = self.engine.start(
-                title=title,
-                priority_raw=priority,
-                tags=tags,
-                description=description,
-                session_id=session_id,
-                actor=actor,
-            )
-        else:
-            task_id = f"T-{uuid.uuid4().hex[:6].upper()}"
+        # Generate ID locally for instant execution; the sync thread will materialize
+        # the record in the engine once the CRDT event queue flushes.
+        task_id = f"T-{uuid.uuid4().hex[:6].upper()}"
+        actor = "llm_agent"
 
         if getattr(self, "memory_store", None) is not None:
             self.memory_store.set_field(task_id, "title", title, actor)

@@ -266,11 +266,17 @@ class KeeliEngine:
         actor: Optional[str] = None,
         branch: Optional[str] = None,
         session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
     ) -> str:
-        """Create a new task via batched CRDT init events in a single transaction."""
+        """Create a new task via batched CRDT init events in a single transaction.
+
+        When task_id is supplied, it is reserved as the canonical task identifier.
+        This is used by the in-memory CRDT buffer to keep hot-path UUIDs aligned with
+        the engine's persisted state without forcing a synchronous disk write.
+        """
         p_map = {"high": "P0", "medium": "P1", "low": "P2", "p0": "P0", "p1": "P1", "p2": "P2"}
         priority = p_map.get(priority_raw.lower().split("/")[0], "P1")
-        task_id = self._get_next_task_id()
+        task_id = str(task_id).strip() if task_id else self._get_next_task_id()
         ts = self._now_iso()
         processed_tags = [t.strip().lower() for t in (tags or []) if t.strip()]
         actor = actor or self._actor
