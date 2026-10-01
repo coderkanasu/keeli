@@ -32,7 +32,7 @@ You must follow this cognitive cycle for every request:
 
 ### Rule 3: Context and Memory
 - When you learn important information, call `keeli_memory` with operation "set" to store it
-- Use `keeli_context` with operation "digest" to get a summary of current project state
+- Use `keeli_context` with operation "get" to retrieve specific context items on-demand
 - Call `keeli_context` with operation "fastcontext" for quick context retrieval
 
 ### Rule 4: Knowledge Preservation

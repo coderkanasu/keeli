@@ -95,11 +95,16 @@ class ReActLoop:
         return "\n".join(tools_desc)
     
     def _get_dynamic_context(self) -> str:
-        """Get current dynamic context for system prompt injection."""
+        """Get current dynamic context for system prompt injection.
+        
+        Note: Context is no longer forced into system prompts. LLMs should use
+        keeli_context tools on-demand when they need specific information.
+        This method now only provides basic session/branch information.
+        """
         try:
             return self.context_injector.format_for_system_prompt(
                 session_id=self.current_session_id,
-                include_digest=True,
+                include_digest=False,  # Changed from True to False
                 digest_tier="brief",
                 digest_budget=1200
             )

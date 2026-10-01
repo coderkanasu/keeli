@@ -303,38 +303,6 @@ class ToolDispatcher:
                 "message": f"Set context for {args['key']}"
             })
         
-        elif operation == "digest":
-            result = engine.digest(
-                tier=args.get("tier", "standard"),
-                budget=args.get("budget", 2000),
-                session_id=session_id,
-                branch=branch,
-                include_working_memory=args.get("include_working_memory", True),
-                include_knowledge=args.get("include_knowledge", False)
-            )
-            return self._success_response({
-                "tier": args.get("tier", "standard"),
-                "budget": args.get("budget", 2000),
-                "digest": result,
-                "message": "Generated context digest"
-            })
-        
-        elif operation == "fastcontext":
-            result = engine.digest(
-                tier=args.get("tier", "brief"),
-                budget=args.get("budget", 1200),
-                session_id=session_id,
-                branch=branch,
-                include_working_memory=True,
-                include_knowledge=True
-            )
-            return self._success_response({
-                "tier": args.get("tier", "brief"),
-                "budget": args.get("budget", 1200),
-                "digest": result,
-                "message": "Generated fast context"
-            })
-        
         else:
             return self._error_response("unknown_operation", f"Unknown operation: {operation}")
     

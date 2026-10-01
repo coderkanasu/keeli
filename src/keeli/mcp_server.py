@@ -3,7 +3,7 @@ Keeli v6.0 MCP Server — Model Context Protocol (Production-Hardened)
 
 Consolidated Architecture (6 Domain-Based Tools):
   • keeli_tasks: Unified task management (create, query, update, conflicts)
-  • keeli_context: Context operations (get, set, digest with working memory/knowledge)
+  • keeli_context: Context operations (get, set - on-demand only, no forced digest)
   • keeli_sessions: Session management (start, focus, checkpoint, list)
   • keeli_memory: Working memory and project analysis caching
   • keeli_knowledge: Knowledge extraction and persistent storage
@@ -14,7 +14,7 @@ Critical fixes applied:
   • Input validation guards on all mutation parameters
   • Explicit session_id + branch on every tool call
   • No global shared state
-  • LLM-focused context management with caching and knowledge extraction
+  • Removed forced context injection - LLMs call context tools on-demand
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -450,54 +450,21 @@ def keeli_context(
     scope: str = "session",
     scope_id: str = None,
     source: str = "agent_override",
-    tier: str = "standard",
-    budget: int = 2000,
     session_id: str = None,
     branch: str = None,
     author: str = None,
-    include_working_memory: bool = True,
-    include_knowledge: bool = False,
 ):
     """Unified context management tool for context operations.
 
     Operations:
     - get: Resolve context item via Session > Branch > Global precedence (requires key)
     - set: Set scoped context override (requires key, value)
-    - digest: Get token-budgeted prompt context digest scoped to session/branch
-    - fastcontext: Return compact, state-first digest with Keeli MCP announcement banner
 
     Scopes: session, branch, global
-    Tiers: nano, brief, standard, full
-    Additional digest options: include_working_memory, include_knowledge
+    
+    Note: Context is provided on-demand rather than forced. LLMs should call this tool
+    when they need specific context information, not have it injected automatically.
     """
-    def _format_fastcontext_result(
-        digest_text: str,
-        engine: KeeliEngine,
-        session_id_val: str = None,
-        branch_val: str = None,
-        author_val: str = None,
-        budget_val: int = 1200,
-        tier_val: str = "brief",
-    ) -> str:
-        return _response(
-            True,
-            "keeli_context",
-            "fastcontext",
-            engine,
-            data={
-                "default_profile": "fast_low_latency",
-                "overrides": ["tier", "budget", "session_id", "branch", "author"],
-                "tier": tier_val,
-                "budget": budget_val,
-                "author": author_val or "unspecified",
-                "digest": digest_text,
-            },
-            session_id=session_id_val,
-            branch=branch_val,
-            actor=author_val,
-            next_action="Use keeli_tasks operation next with this scope to pick work.",
-        )
-
     def _run():
         engine = _engine()
         if operation == "get":
@@ -534,65 +501,8 @@ def keeli_context(
                 actor=author,
             )
         
-        elif operation == "digest":
-            result = engine.digest(
-                tier=tier, 
-                budget=budget, 
-                session_id=session_id, 
-                branch=branch,
-                include_working_memory=include_working_memory,
-                include_knowledge=include_knowledge
-            )
-            components = []
-            if include_working_memory and session_id:
-                components.append("working_memory")
-            if include_knowledge:
-                components.append("project_knowledge")
-            return _response(
-                True,
-                "keeli_context",
-                operation,
-                engine,
-                data={"tier": tier, "budget": budget, "includes": components, "digest": result},
-                session_id=session_id,
-                branch=branch,
-                actor=author,
-            )
-
-        elif operation == "fastcontext":
-            fast_tier = tier or "brief"
-            # keeli_context has default budget=2000; fastcontext should default lower.
-            fast_budget = 1200 if not budget or budget == 2000 else budget
-            if fast_tier == "standard":
-                fast_tier = "brief"
-
-            resolved_branch = branch or engine._get_current_branch()
-            resolved_session_id = session_id or _resolve_session_for_scope(
-                engine,
-                branch=resolved_branch,
-                author=author,
-            )
-
-            result = engine.digest(
-                tier=fast_tier,
-                budget=fast_budget,
-                session_id=resolved_session_id,
-                branch=resolved_branch,
-                include_working_memory=True,
-                include_knowledge=True,
-            )
-            return _format_fastcontext_result(
-                result,
-                engine=engine,
-                session_id_val=resolved_session_id,
-                branch_val=resolved_branch,
-                author_val=author,
-                budget_val=fast_budget,
-                tier_val=fast_tier,
-            )
-        
         else:
-            return _response(False, "keeli_context", operation, engine, error=f"Unknown operation '{operation}'. Valid: get, set, digest, fastcontext", code="unknown_operation", session_id=session_id, branch=branch, actor=author)
+            return _response(False, "keeli_context", operation, engine, error=f"Unknown operation '{operation}'. Valid: get, set", code="unknown_operation", session_id=session_id, branch=branch, actor=author)
 
     try:
         return _retry_on_lock(_run)
