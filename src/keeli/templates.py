@@ -6,6 +6,7 @@ TASK_TEMPLATE = """# ${task_id}: ${title}
 
 **Status:** ${status}
 **Priority:** ${priority}
+**Feature:** ${feature}
 **Created:** ${timestamp}
 **Completed:** ${completed}
 **Depends On:** ${depends_on}
@@ -35,6 +36,51 @@ Current focus: {focus}
 ## Build & Test
 - Build: {build_command}
 - Test: {test_command}
+
+## Spec-Driven Development Workflow
+This project uses Spec-Driven Development methodology. Follow this workflow for features:
+
+### 1. Constitution (Project Standards)
+- Use `keeli_constitution` to read project standards
+- Constitution defines immutable: tech stack, coding conventions, testing strategy
+- Always consult constitution before implementing features
+
+### 2. Feature Development Loop
+For each feature, follow the plan-implement-verify cycle:
+
+**Step 1: Create Branch**
+- Use `keeli_branch(operation="create", branch_name="feature/<feature-name>")`
+- Isolates feature work from main
+
+**Step 2: Write Spec**
+- Use `keeli_specs(operation="create", title, feature, content)`
+- Define: goal, acceptance criteria, technical approach, dependencies
+- Keep spec in markdown for easy editing
+
+**Step 3: Plan Implementation**
+- Read spec, generate task breakdown
+- Create tasks with `keeli_tasks(operation="create", title, feature, ...)`
+- Link tasks to spec with `keeli_specs(operation="link_task", ...)`
+
+**Step 4: Implement**
+- Start session with `keeli_sessions(operation="start", name="implement <feature>")`
+- Work through tasks sequentially
+- Checkpoint after major progress: `keeli_sessions(operation="checkpoint", ...)`
+- Update spec status to "implemented"
+
+**Step 5: Verify**
+- Run acceptance tests
+- Check for regressions
+- Review against spec requirements
+- Update spec status to "approved"
+
+**Step 6: Clean Up**
+- If successful: merge to main
+- If failed: `keeli_branch(operation="cleanup", branch_name="feature/<feature-name>")`
+
+### 3. Greenfield vs Brownfield
+- **Greenfield**: Create constitution via conversation with agent first
+- **Brownfield**: Generate constitution from existing codebase analysis
 
 ## CRDT Context Protocol (v6.0)
 - Tasks live in `.keeli/tasks/` (gitignored, never indexed by LLM tools).
@@ -76,6 +122,50 @@ description: Keeli v6.0 task management with field-level CRDTs, isolated workspa
 
 # Keeli Task Management Skill (v6.0)
 
+## SPEC-DRIVEN DEVELOPMENT WORKFLOW
+This project uses Spec-Driven Development. Always follow this workflow for features:
+
+### 1. Read Constitution First
+- Use `keeli_constitution(operation="get")` to read project standards
+- Constitution defines: tech stack, coding conventions, testing strategy
+- Ensure your work aligns with these immutable standards
+
+### 2. Feature Development Loop
+Follow plan-implement-verify for each feature:
+
+**Create Branch:**
+```
+keeli_branch(operation="create", branch_name="feature/user-authentication")
+```
+
+**Write Spec:**
+```
+keeli_specs(operation="create", title="User Authentication", feature="authentication", content="...")
+```
+
+**Plan Tasks:**
+```
+keeli_tasks(operation="create", title="Add JWT validation", feature="authentication", ...)
+keeli_specs(operation="link_task", spec_id="SPEC-0001", task_id="T-0001")
+```
+
+**Implement with Checkpoints:**
+```
+keeli_sessions(operation="start", name="implement user auth")
+... work through tasks ...
+keeli_sessions(operation="checkpoint", note="JWT validation complete", ...)
+```
+
+**Verify:**
+- Run acceptance tests
+- Check regressions
+- Update spec status to "approved"
+
+**Clean Up:**
+```
+keeli_branch(operation="cleanup", branch_name="feature/user-authentication")
+```
+
 ## CRITICAL WORKFLOW: Field-Level Concurrency (No Locks!)
 v6.0 replaces v5.1's SHA-256 expected_hash with automatic CRDT merging.
 
@@ -85,7 +175,18 @@ v6.0 replaces v5.1's SHA-256 expected_hash with automatic CRDT merging.
 3. **Concurrent edits auto-merge**: Agent A changes `status` while Agent B changes `priority` → both succeed, no 409.
 4. **Observe**: Call `keeli_detect_conflicts(task_id)` to see if concurrent edits touched the SAME field.
 
+## Creating Tasks with Feature Context
+**IMPORTANT**: When creating tasks, ALWAYS specify the `feature` parameter to provide organizational context.
+- Use meaningful feature names like: "authentication", "database", "ui", "api", "messaging", "search"
+- This groups related tasks together and makes the task list meaningful
+- Example: `keeli_tasks(operation="create", title="Add JWT validation", feature="authentication", ...)`
+
 ## Tools Available
+- `keeli_constitution(operation="create/get/update", ...)` → Project constitution management
+- `keeli_specs(operation="create/get/list/update/link_task", ...)` → Feature specification management
+- `keeli_branch(operation="create/cleanup", ...)` → Branch automation for feature loops
+- `keeli_tasks(operation="create", title, feature, ...)` → Create new task with feature context
+- `keeli_tasks(operation="query", filters={"feature": "authentication"}, ...)` → Filter by feature
 - `keeli_get(task_id)` → Markdown + `VECTOR_CLOCK` header.
 - `keeli_get_state(task_id)` → Structured JSON state with vector clock.
 - `keeli_complete(task_id, rationale, actor, branch, session_id)` → Archive with audit trail.

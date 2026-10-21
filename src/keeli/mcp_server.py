@@ -1,13 +1,16 @@
 """
 Keeli v6.0 MCP Server — Model Context Protocol (Production-Hardened)
 
-Consolidated Architecture (6 Domain-Based Tools):
+Consolidated Architecture (9 Domain-Based Tools):
   • keeli_tasks: Unified task management (create, query, update, conflicts)
   • keeli_context: Context operations (get, set - on-demand only, no forced digest)
   • keeli_sessions: Session management (start, focus, checkpoint, list)
   • keeli_memory: Working memory and project analysis caching
   • keeli_knowledge: Knowledge extraction and persistent storage
   • keeli_system: System operations (sync, doctor)
+  • keeli_constitution: Project constitution management (create, get, update)
+  • keeli_specs: Feature specification management (create, get, list, update, link_task)
+  • keeli_branch: Branch automation for spec-driven workflows (create, cleanup)
 
 Critical fixes applied:
   • Per-request engine instantiation (eliminates SQLite threading errors)
@@ -19,6 +22,7 @@ Critical fixes applied:
 
 from mcp.server.fastmcp import FastMCP
 from keeli.engine import KeeliEngine
+import contextlib
 import json
 import re
 import sqlite3
@@ -35,6 +39,15 @@ mcp = FastMCP("keeli")
 # eliminate sqlite3.ProgrammingError from cross-thread object sharing.
 def _engine() -> KeeliEngine:
     return KeeliEngine(root_dir=_resolve_project_root())
+
+@contextlib.contextmanager
+def _with_engine():
+    """Context manager that ensures engine connection is closed after use."""
+    engine = _engine()
+    try:
+        yield engine
+    finally:
+        engine.close()
 
 
 def _resolve_project_root() -> Path:
@@ -132,35 +145,38 @@ def _resolve_session_for_scope(engine: KeeliEngine, branch: str = None, author: 
     2) If branch provided: choose most recent session on that branch.
     3) Fallback: most recent session overall.
     """
-    if author and branch:
-        row = engine.conn.execute(
-            """SELECT s.session_id
-               FROM sessions s
-               JOIN audit a ON a.session_id = s.session_id
-               WHERE s.branch_name = ? AND a.actor = ?
-               ORDER BY a.created DESC
-               LIMIT 1""",
-            (branch, author),
-        ).fetchone()
-        if row:
-            return row["session_id"]
+    def _query():
+        if author and branch:
+            row = engine.conn.execute(
+                """SELECT s.session_id
+                   FROM sessions s
+                   JOIN audit a ON a.session_id = s.session_id
+                   WHERE s.branch_name = ? AND a.actor = ?
+                   ORDER BY a.created DESC
+                   LIMIT 1""",
+                (branch, author),
+            ).fetchone()
+            if row:
+                return row["session_id"]
 
-    if branch:
-        row = engine.conn.execute(
-            "SELECT session_id FROM sessions WHERE branch_name = ? ORDER BY created DESC LIMIT 1",
-            (branch,),
-        ).fetchone()
-        if row:
-            return row["session_id"]
+        if branch:
+            row = engine.conn.execute(
+                "SELECT session_id FROM sessions WHERE branch_name = ? ORDER BY created DESC LIMIT 1",
+                (branch,),
+            ).fetchone()
+            if row:
+                return row["session_id"]
 
-    row = engine.conn.execute(
-        "SELECT session_id FROM sessions ORDER BY created DESC LIMIT 1"
-    ).fetchone()
-    return row["session_id"] if row else None
+        row = engine.conn.execute(
+            "SELECT session_id FROM sessions ORDER BY created DESC LIMIT 1"
+        ).fetchone()
+        return row["session_id"] if row else None
+
+    return _retry_on_lock(_query)
 
 
 # ── Input Validation ──
-_VALID_FIELDS = {"status", "priority", "title", "description", "depends_on", "completed"}
+_VALID_FIELDS = {"status", "priority", "title", "description", "depends_on", "completed", "feature"}
 _VALID_OPS = {"set", "add", "remove", "init"}
 _TAG_SCHEMA_PREFIXES = {"domain", "area", "risk", "state"}
 _TAG_SCHEMA_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -181,6 +197,8 @@ def _validate_value(value, field: str) -> any:
         if v not in {"P0", "P1", "P2"}:
             raise ValueError(f"Invalid priority '{v}'")
         return v
+    if field == "feature":
+        return str(value).strip().lower() if value else ""
     if field == "tags" and isinstance(value, list):
         return [str(t).strip().lower() for t in value if str(t).strip()]
     return str(value).strip()
@@ -229,6 +247,7 @@ def keeli_tasks(
     priority: str = None,
     tags: list = None,
     depends_on: str = None,
+    feature: str = None,
     status: str = None,
     field: str = None,
     value: str = None,
@@ -244,7 +263,8 @@ def keeli_tasks(
 
     Operations:
     - create: Create a new task (requires title)
-    - query: List tasks (optional filters: status, branch)
+      - feature: Optional - The feature/component this task belongs to (e.g., "authentication", "database", "ui")
+    - query: List tasks (optional filters: status, branch, feature)
     - get: Get full task markdown (requires task_id)
     - get_state: Get structured CRDT state (requires task_id)
     - next: Get next prioritized task
@@ -254,24 +274,29 @@ def keeli_tasks(
     - conflicts: Detect concurrent edits (requires task_id)
 
     Valid statuses: backlog, active, review, blocked, archive
-    Valid fields: status, priority, title, description, depends_on, completed
+    Valid fields: status, priority, title, description, depends_on, completed, feature
+
+    IMPORTANT: When creating tasks, always specify the 'feature' parameter to associate
+    the task with a specific component or feature area. This provides organizational context
+    and makes the task list meaningful.
     Tag operations: add, remove
     """
     def _run():
-        engine = _engine()
-        if operation == "create":
-            if not title:
-                return _response(False, "keeli_tasks", operation, engine, error="'title' required for create operation", code="missing_title")
-            tid = engine.start(
-                title=title,
-                priority_raw=priority or "p2",
-                tags=tags,
-                description=description or "",
-                depends_on=depends_on,
-                actor=actor,
-                branch=branch,
-                session_id=session_id,
-            )
+        with _with_engine() as engine:
+            if operation == "create":
+                if not title:
+                    return _response(False, "keeli_tasks", operation, engine, error="'title' required for create operation", code="missing_title")
+                tid = engine.start(
+                    title=title,
+                    priority_raw=priority or "p2",
+                    tags=tags,
+                    description=description or "",
+                    depends_on=depends_on,
+                    feature=feature,
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
             task_state = engine.get_task_state(tid)
             return _response(
                 True,
@@ -291,12 +316,14 @@ def keeli_tasks(
             branch_filter = filters_dict.get("branch") or branch
             tags_filter = filters_dict.get("tags")
             tag_match = filters_dict.get("tag_match", "any")
+            feature_filter = filters_dict.get("feature") or feature
             if tags_filter is not None:
                 tags_filter = _normalize_and_validate_tags(tags_filter)
 
             tasks = engine.list_tasks(
                 status=status_filter,
                 branch=branch_filter,
+                feature=feature_filter,
                 tags=tags_filter,
                 tag_match=tag_match,
             )
@@ -433,11 +460,11 @@ def keeli_tasks(
     try:
         return _retry_on_lock(_run)
     except ValueError as e:
-        engine = _engine()
-        return _response(False, "keeli_tasks", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch, actor=actor)
+        with _with_engine() as engine:
+            return _response(False, "keeli_tasks", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch, actor=actor)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_tasks", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch, actor=actor)
+        with _with_engine() as engine:
+            return _response(False, "keeli_tasks", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch, actor=actor)
 
 
 # ── Context Management Domain ──
@@ -466,8 +493,8 @@ def keeli_context(
     when they need specific context information, not have it injected automatically.
     """
     def _run():
-        engine = _engine()
-        if operation == "get":
+        with _with_engine() as engine:
+            if operation == "get":
             if not key:
                 return _response(False, "keeli_context", operation, engine, error="'key' required for get operation", code="missing_key", session_id=session_id, branch=branch, actor=author)
             # Use provided scope_id or fall back to session_id/branch parameters
@@ -507,11 +534,11 @@ def keeli_context(
     try:
         return _retry_on_lock(_run)
     except ValueError as e:
-        engine = _engine()
-        return _response(False, "keeli_context", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch, actor=author)
+        with _with_engine() as engine:
+            return _response(False, "keeli_context", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch, actor=author)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_context", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch, actor=author)
+        with _with_engine() as engine:
+            return _response(False, "keeli_context", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch, actor=author)
 
 # ── Session Management Domain ──
 
@@ -541,8 +568,8 @@ def keeli_sessions(
     - pending_decisions: List of pending decisions for checkpoint operation
     """
     def _run():
-        engine = _engine()
-        if operation == "start":
+        with _with_engine() as engine:
+            if operation == "start":
             sid = engine.session_start(name=name, branch=branch, focus_task_id=focus_task_id)
             return _response(
                 True,
@@ -577,11 +604,11 @@ def keeli_sessions(
     try:
         return _retry_on_lock(_run)
     except ValueError as e:
-        engine = _engine()
-        return _response(False, "keeli_sessions", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch)
+        with _with_engine() as engine:
+            return _response(False, "keeli_sessions", operation, engine, error=str(e), code="validation_error", session_id=session_id, branch=branch)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_sessions", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+        with _with_engine() as engine:
+            return _response(False, "keeli_sessions", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
 
 # ── System Management Domain ──
 
@@ -596,8 +623,8 @@ def keeli_system(operation: str = "sync"):
     System operations help maintain workspace integrity and consistency.
     """
     def _run():
-        engine = _engine()
-        if operation == "sync":
+        with _with_engine() as engine:
+            if operation == "sync":
             count, corrected = engine.sync()
             return _response(True, "keeli_system", operation, engine, data={"count": count, "corrected": corrected})
         
@@ -629,8 +656,8 @@ def keeli_system(operation: str = "sync"):
     try:
         return _retry_on_lock(_run)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_system", operation, engine, error=str(e), code="internal_error")
+        with _with_engine() as engine:
+            return _response(False, "keeli_system", operation, engine, error=str(e), code="internal_error")
 
 
 # ── Working Memory & Project Analysis Domain ──
@@ -662,8 +689,8 @@ def keeli_memory(
     Project analysis caching preserves expensive LLM analysis across sessions.
     """
     def _run():
-        engine = _engine()
-        if operation == "set":
+        with _with_engine() as engine:
+            if operation == "set":
             if not key or not value or not session_id:
                 return _response(False, "keeli_memory", operation, engine, error="'key', 'value', and 'session_id' required for set operation", code="missing_memory_inputs", session_id=session_id, branch=branch)
             engine.working_memory_set(key, value, session_id, ttl_minutes)
@@ -713,8 +740,8 @@ def keeli_memory(
     try:
         return _retry_on_lock(_run)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_memory", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+        with _with_engine() as engine:
+            return _response(False, "keeli_memory", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
 
 
 # ── Knowledge Management Domain ──
@@ -741,8 +768,8 @@ def keeli_knowledge(
     Extracted knowledge can be retrieved and summarized for new LLM interactions.
     """
     def _run():
-        engine = _engine()
-        if operation == "save":
+        with _with_engine() as engine:
+            if operation == "save":
             if not knowledge_type or not content:
                 return _response(False, "keeli_knowledge", operation, engine, error="'knowledge_type' and 'content' required for save operation", code="missing_knowledge_inputs", session_id=session_id, branch=branch)
             result = engine.save_project_knowledge(knowledge_type, content, source_session, tags, branch)
@@ -768,8 +795,212 @@ def keeli_knowledge(
     try:
         return _retry_on_lock(_run)
     except Exception as e:
-        engine = _engine()
-        return _response(False, "keeli_knowledge", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+        with _with_engine() as engine:
+            return _response(False, "keeli_knowledge", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+
+
+@mcp.tool()
+def keeli_constitution(
+    operation: str,
+    constitution_id: str = None,
+    content: str = None,
+    version: str = None,
+    actor: str = None,
+    branch: str = None,
+    session_id: str = None,
+):
+    """Project constitution management for spec-driven development.
+
+    Operations:
+    - create: Create a new project constitution (requires content)
+    - get: Get the current constitution (optional active_only)
+    - update: Update an existing constitution (requires constitution_id, content)
+
+    The constitution defines immutable standards for the project.
+    """
+    def _run():
+        with _with_engine() as engine:
+            if operation == "create":
+                if not content:
+                    return _response(False, "keeli_constitution", operation, engine, error="'content' required for create operation", code="missing_content")
+                cid = engine.constitution_create(
+                    content=content,
+                    version=version or "1.0",
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
+                constitution = engine.constitution_get()
+                return _response(True, "keeli_constitution", operation, engine, data={"constitution_id": cid, "constitution": constitution}, session_id=session_id, branch=branch, actor=actor)
+
+            elif operation == "get":
+                constitution = engine.constitution_get(active_only=True)
+                return _response(True, "keeli_constitution", operation, engine, data={"constitution": constitution}, session_id=session_id, branch=branch)
+
+            elif operation == "update":
+                if not constitution_id or not content:
+                    return _response(False, "keeli_constitution", operation, engine, error="'constitution_id' and 'content' required for update operation", code="missing_params")
+                cid = engine.constitution_update(
+                    constitution_id=constitution_id,
+                    content=content,
+                    version=version,
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
+                constitution = engine.constitution_get()
+                return _response(True, "keeli_constitution", operation, engine, data={"constitution_id": cid, "constitution": constitution}, session_id=session_id, branch=branch, actor=actor)
+
+            else:
+                return _response(False, "keeli_constitution", operation, engine, error=f"Unknown operation '{operation}'. Valid: create, get, update", code="unknown_operation", session_id=session_id, branch=branch)
+
+    try:
+        return _retry_on_lock(_run)
+    except Exception as e:
+        with _with_engine() as engine:
+            return _response(False, "keeli_constitution", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+
+
+@mcp.tool()
+def keeli_specs(
+    operation: str,
+    spec_id: str = None,
+    title: str = None,
+    feature: str = None,
+    content: str = None,
+    status: str = None,
+    linked_tasks: list = None,
+    task_id: str = None,
+    actor: str = None,
+    branch: str = None,
+    session_id: str = None,
+):
+    """Feature specification management for spec-driven development.
+
+    Operations:
+    - create: Create a new spec (requires title, feature, content)
+    - get: Get a spec by ID (requires spec_id)
+    - list: List specs with optional filters (feature, status)
+    - update: Update a spec (requires spec_id)
+    - link_task: Link a task to a spec (requires spec_id, task_id)
+
+    Specs define features with implementation details and link to tasks.
+    """
+    def _run():
+        with _with_engine() as engine:
+            if operation == "create":
+                if not title or not feature or not content:
+                    return _response(False, "keeli_specs", operation, engine, error="'title', 'feature', and 'content' required for create operation", code="missing_params")
+                sid = engine.spec_create(
+                    title=title,
+                    feature=feature,
+                    content=content,
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
+                spec = engine.spec_get(sid)
+                return _response(True, "keeli_specs", operation, engine, data={"spec_id": sid, "spec": spec}, session_id=session_id, branch=branch, actor=actor)
+
+            elif operation == "get":
+                if not spec_id:
+                    return _response(False, "keeli_specs", operation, engine, error="'spec_id' required for get operation", code="missing_spec_id")
+                spec = engine.spec_get(spec_id)
+                if not spec:
+                    return _response(False, "keeli_specs", operation, engine, error=f"Spec {spec_id} not found", code="not_found", session_id=session_id, branch=branch)
+                return _response(True, "keeli_specs", operation, engine, data={"spec": spec}, session_id=session_id, branch=branch)
+
+            elif operation == "list":
+                specs = engine.spec_list(feature=feature, status=status)
+                return _response(True, "keeli_specs", operation, engine, data={"count": len(specs), "specs": specs}, session_id=session_id, branch=branch)
+
+            elif operation == "update":
+                if not spec_id:
+                    return _response(False, "keeli_specs", operation, engine, error="'spec_id' required for update operation", code="missing_spec_id")
+                sid = engine.spec_update(
+                    spec_id=spec_id,
+                    title=title,
+                    content=content,
+                    status=status,
+                    linked_tasks=linked_tasks,
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
+                spec = engine.spec_get(sid)
+                return _response(True, "keeli_specs", operation, engine, data={"spec_id": sid, "spec": spec}, session_id=session_id, branch=branch, actor=actor)
+
+            elif operation == "link_task":
+                if not spec_id or not task_id:
+                    return _response(False, "keeli_specs", operation, engine, error="'spec_id' and 'task_id' required for link_task operation", code="missing_params")
+                sid = engine.spec_link_task(
+                    spec_id=spec_id,
+                    task_id=task_id,
+                    actor=actor,
+                    branch=branch,
+                    session_id=session_id,
+                )
+                spec = engine.spec_get(sid)
+                return _response(True, "keeli_specs", operation, engine, data={"spec_id": sid, "spec": spec}, session_id=session_id, branch=branch, actor=actor)
+
+            else:
+                return _response(False, "keeli_specs", operation, engine, error=f"Unknown operation '{operation}'. Valid: create, get, list, update, link_task", code="unknown_operation", session_id=session_id, branch=branch)
+
+    try:
+        return _retry_on_lock(_run)
+    except Exception as e:
+        with _with_engine() as engine:
+            return _response(False, "keeli_specs", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
+
+
+@mcp.tool()
+def keeli_branch(
+    operation: str,
+    branch_name: str = None,
+    base_branch: str = None,
+    actor: str = None,
+    session_id: str = None,
+):
+    """Branch automation for spec-driven feature loops.
+
+    Operations:
+    - create: Create a new feature branch (requires branch_name)
+    - cleanup: Clean up a feature branch (requires branch_name)
+
+    Use this to implement the spec-driven workflow: create branch per feature,
+    implement spec, verify, then cleanup.
+    """
+    def _run():
+        with _with_engine() as engine:
+            if operation == "create":
+                if not branch_name:
+                    return _response(False, "keeli_branch", operation, engine, error="'branch_name' required for create operation", code="missing_branch_name")
+                created_branch = engine.branch_create(
+                    branch_name=branch_name,
+                    base_branch=base_branch or "main",
+                    actor=actor,
+                    session_id=session_id,
+                )
+                return _response(True, "keeli_branch", operation, engine, data={"branch": created_branch}, session_id=session_id, branch=created_branch, actor=actor)
+
+            elif operation == "cleanup":
+                if not branch_name:
+                    return _response(False, "keeli_branch", operation, engine, error="'branch_name' required for cleanup operation", code="missing_branch_name")
+                engine.branch_cleanup(
+                    branch_name=branch_name,
+                    actor=actor,
+                    session_id=session_id,
+                )
+                return _response(True, "keeli_branch", operation, engine, data={"branch": branch_name, "status": "cleaned"}, session_id=session_id, branch="main", actor=actor)
+
+            else:
+                return _response(False, "keeli_branch", operation, engine, error=f"Unknown operation '{operation}'. Valid: create, cleanup", code="unknown_operation", session_id=session_id, branch=branch)
+
+    try:
+        return _retry_on_lock(_run)
+    except Exception as e:
+        with _with_engine() as engine:
+            return _response(False, "keeli_branch", operation, engine, error=str(e), code="internal_error", session_id=session_id, branch=branch)
 
 
 def main():

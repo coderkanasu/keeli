@@ -315,9 +315,286 @@ class WorkflowTemplateLibrary:
         self._templates[bug_fix_template.template_id] = bug_fix_template
         self._templates[feature_template.template_id] = feature_template
         self._templates[code_review_template.template_id] = code_review_template
-        
+
+        # Add spec-driven development templates
+        self._add_spec_driven_templates()
+
         # Add more specialized templates
         self._add_specialized_templates()
+
+    def _add_spec_driven_templates(self) -> None:
+        """Add templates for Spec-Driven Development methodology."""
+
+        # Greenfield Constitution Template
+        greenfield_constitution = WorkflowTemplate(
+            template_id="greenfield_constitution",
+            name="Greenfield Project Constitution",
+            description="Create project constitution for new projects via conversation with agent",
+            domain=TaskDomain.GENERAL,
+            complexity=TaskComplexity.MODERATE,
+            estimated_total_time="30-60 minutes",
+            steps=[
+                WorkflowStep(
+                    step_number=1,
+                    title="Architectural Conversation",
+                    description="Discuss key architectural choices with the coding agent",
+                    estimated_time="15-30 minutes",
+                    substeps=[
+                        "Discuss technology stack choices",
+                        "Define coding standards and conventions",
+                        "Establish testing strategy",
+                        "Decide on deployment approach",
+                        "Define API/communication patterns"
+                    ],
+                    success_criteria=["Key decisions documented", "Trade-offs understood"],
+                    common_pitfalls=["Skipping trade-off discussion", "Undocumented decisions"]
+                ),
+                WorkflowStep(
+                    step_number=2,
+                    title="Generate Constitution",
+                    description="Have agent summarize key decisions into markdown constitution",
+                    estimated_time="10-15 minutes",
+                    dependencies=[1],
+                    substeps=[
+                        "Request agent to summarize decisions",
+                        "Review generated constitution",
+                        "Adjust based on your preferences",
+                        "Finalize and save via keeli_constitution"
+                    ],
+                    success_criteria=["Constitution created and saved", "All key decisions captured"],
+                    common_pitfalls=["Agent hallucinating constraints", "Missing important standards"]
+                ),
+                WorkflowStep(
+                    step_number=3,
+                    title="Validate Constitution",
+                    description="Test that constitution guides agent behavior correctly",
+                    estimated_time="5-10 minutes",
+                    dependencies=[2],
+                    substeps=[
+                        "Ask agent to implement a simple feature",
+                        "Verify it follows constitution",
+                        "Adjust constitution if needed"
+                    ],
+                    success_criteria=["Agent follows constitution", "No contradictions"],
+                    common_pitfalls=["Constitution too vague", "Conflicting requirements"]
+                )
+            ],
+            prerequisites=["Project initialized", "Access to coding agent"],
+            deliverables=["Project constitution in keeli", "Architectural decisions documented"],
+            related_templates=["brownfield_constitution", "feature_loop"]
+        )
+
+        # Brownfield Constitution Template
+        brownfield_constitution = WorkflowTemplate(
+            template_id="brownfield_constitution",
+            name="Brownfield Constitution Generation",
+            description="Generate project constitution from existing codebase",
+            domain=TaskDomain.GENERAL,
+            complexity=TaskComplexity.COMPLEX,
+            estimated_total_time="1-2 hours",
+            steps=[
+                WorkflowStep(
+                    step_number=1,
+                    title="Codebase Analysis",
+                    description="Analyze existing codebase to extract patterns and standards",
+                    estimated_time="30-45 minutes",
+                    substeps=[
+                        "Review project structure",
+                        "Identify architectural patterns",
+                        "Extract coding conventions",
+                        "Document dependencies and frameworks",
+                        "Note testing approach"
+                    ],
+                    success_criteria=["Patterns identified", "Conventions documented"],
+                    common_pitfalls=["Missing edge cases", "Overgeneralizing patterns"]
+                ),
+                WorkflowStep(
+                    step_number=2,
+                    title="Generate Constitution",
+                    description="Have agent generate constitution from analysis",
+                    estimated_time="20-30 minutes",
+                    dependencies=[1],
+                    substeps=[
+                        "Provide analysis to agent",
+                        "Request constitution generation",
+                        "Review and refine",
+                        "Add missing standards manually"
+                    ],
+                    success_criteria=["Constitution reflects codebase", "Standards captured"],
+                    common_pitfalls["Agent ignoring constraints", "Missing implicit conventions"]
+                ),
+                WorkflowStep(
+                    step_number=3,
+                    title="Validate and Refine",
+                    description="Test constitution against existing code",
+                    estimated_time="10-15 minutes",
+                    dependencies=[2],
+                    substeps=[
+                        "Check if existing code violates constitution",
+                        "Update constitution or note exceptions",
+                        "Finalize and save"
+                    ],
+                    success_criteria=["Constitution accurate", "Exceptions documented"],
+                    common_pitfalls=["Constitution too strict", "Ignoring legacy constraints"]
+                )
+            ],
+            prerequisites=["Existing codebase", "Code analysis tools"],
+            deliverables=["Project constitution in keeli", "Legacy patterns documented"],
+            related_templates=["greenfield_constitution", "feature_loop"]
+        )
+
+        # Feature Development Loop Template
+        feature_loop = WorkflowTemplate(
+            template_id="feature_loop",
+            name="Spec-Driven Feature Loop",
+            description="Complete plan-implement-verify loop for a feature",
+            domain=TaskDomain.GENERAL,
+            complexity=TaskComplexity.MODERATE,
+            estimated_total_time="2-4 hours (varies by feature)",
+            steps=[
+                WorkflowStep(
+                    step_number=1,
+                    title="Create Feature Branch",
+                    description="Isolate feature work on its own branch",
+                    estimated_time="1-2 minutes",
+                    substeps=[
+                        "Use keeli_branch operation='create'",
+                        "Specify branch_name (e.g., feature/user-authentication)",
+                        "Set base_branch (default: main)"
+                    ],
+                    success_criteria=["Branch created", "On correct branch"],
+                    common_pitfalls=["Non-standard branch naming", "Unclean base branch"]
+                ),
+                WorkflowStep(
+                    step_number=2,
+                    title="Write Feature Spec",
+                    description="Create detailed specification for the feature",
+                    estimated_time="15-30 minutes",
+                    dependencies=[1],
+                    substeps=[
+                        "Define feature goal and scope",
+                        "List acceptance criteria",
+                        "Describe technical approach",
+                        "Identify dependencies",
+                        "Use keeli_specs operation='create'"
+                    ],
+                    success_criteria=["Spec created", "Linked to feature"],
+                    common_pitfalls=["Spec too vague", "Missing edge cases"]
+                ),
+                WorkflowStep(
+                    step_number=3,
+                    title="Plan Implementation",
+                    description="Generate implementation plan from spec",
+                    estimated_time="10-20 minutes",
+                    dependencies=[2],
+                    substeps=[
+                        "Have agent read spec",
+                        "Generate task breakdown",
+                        "Create tasks via keeli_tasks",
+                        "Link tasks to spec"
+                    ],
+                    success_criteria=["Tasks created", "All linked to spec"],
+                    common_pitfalls=["Tasks too large", "Missing tasks"]
+                ),
+                WorkflowStep(
+                    step_number=4,
+                    title="Implement Feature",
+                    description="Execute implementation plan with checkpoints",
+                    estimated_time="1-2 hours",
+                    dependencies=[3],
+                    substeps=[
+                        "Start session with keeli_sessions",
+                        "Work through tasks sequentially",
+                        "Checkpoint after major progress",
+                        "Update spec status to 'implemented'"
+                    ],
+                    success_criteria=["All tasks complete", "Code committed"],
+                    common_pitfalls=["Skipping checkpoints", "Deviating from spec"]
+                ),
+                WorkflowStep(
+                    step_number=5,
+                    title="Verify Feature",
+                    description="Test and validate implementation",
+                    estimated_time="15-30 minutes",
+                    dependencies=[4],
+                    substeps=[
+                        "Run acceptance tests",
+                        "Check for regressions",
+                        "Review against spec",
+                        "Update spec status to 'approved'"
+                    ],
+                    success_criteria=["Tests pass", "Matches spec"],
+                    common_pitfalls=["Incomplete testing", "Ignoring spec requirements"]
+                ),
+                WorkflowStep(
+                    step_number=6,
+                    title="Clean Up Branch",
+                    description="Merge or cleanup feature branch",
+                    estimated_time="2-5 minutes",
+                    dependencies=[5],
+                    substeps=[
+                        "If successful: merge to main",
+                        "If failed: use keeli_branch operation='cleanup'",
+                        "Return to main branch"
+                    ],
+                    success_criteria=["Branch merged or cleaned", "On main branch"],
+                    common_pitfalls=["Merging broken code", "Leaving stale branches"]
+                )
+            ],
+            prerequisites=["Project constitution", "Feature idea"],
+            deliverables=["Feature implemented", "Spec created and approved", "Clean branch history"],
+            related_templates=["greenfield_constitution", "brownfield_constitution"]
+        )
+
+        # Spec Creation Template
+        spec_creation = WorkflowTemplate(
+            template_id="spec_creation",
+            name="Feature Spec Creation",
+            description="Create detailed feature specification from conversation",
+            domain=TaskDomain.GENERAL,
+            complexity=TaskComplexity.SIMPLE,
+            estimated_total_time="15-30 minutes",
+            steps=[
+                WorkflowStep(
+                    step_number=1,
+                    title="Discuss Feature",
+                    description="Have detailed conversation about feature requirements",
+                    estimated_time="10-20 minutes",
+                    substeps=[
+                        "Define feature goal",
+                        "Discuss user stories",
+                        "Identify constraints",
+                        "Consider edge cases"
+                    ],
+                    success_criteria=["Requirements clear", "Constraints identified"],
+                    common_pitfalls=["Vague requirements", "Missing constraints"]
+                ),
+                WorkflowStep(
+                    step_number=2,
+                    title="Generate Spec",
+                    description="Request agent to generate markdown spec",
+                    estimated_time="5-10 minutes",
+                    dependencies=[1],
+                    substeps=[
+                        "Ask agent to summarize conversation",
+                        "Review generated spec",
+                        "Add missing details",
+                        "Save via keeli_specs"
+                    ],
+                    success_criteria=["Spec created", "Requirements captured"],
+                    common_pitfalls=["Agent missing details", "Spec too brief"]
+                )
+            ],
+            prerequisites=["Feature idea", "Access to coding agent"],
+            deliverables=["Feature spec in keeli"],
+            related_templates=["feature_loop"]
+        )
+
+        # Add to library
+        self._templates[greenfield_constitution.template_id] = greenfield_constitution
+        self._templates[brownfield_constitution.template_id] = brownfield_constitution
+        self._templates[feature_loop.template_id] = feature_loop
+        self._templates[spec_creation.template_id] = spec_creation
     
     def _add_specialized_templates(self) -> None:
         """Add specialized templates for specific domains."""

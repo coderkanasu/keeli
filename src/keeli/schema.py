@@ -15,7 +15,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
@@ -35,6 +35,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Note: 'feature' is a valid field for events (no schema change needed - field is free-text)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task ON task_events (task_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_branch ON task_events (branch)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON task_events (session_id)")
@@ -50,6 +51,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             priority TEXT DEFAULT 'P2',
             created TEXT,
             tags TEXT,                      -- Comma-separated
+            feature TEXT,                   -- Feature/component for organization
             depends_on TEXT,
             description TEXT,
             completed TEXT,
@@ -60,6 +62,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_status ON task_index (status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_priority ON task_index (priority)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_feature ON task_index (feature)")
 
     # ── Branch-Specific Snapshots (isolated branch views) ──
     conn.execute("""
@@ -164,6 +167,75 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             detected_at TEXT NOT NULL
         )
     """)
+
+    # ── Project Constitution (Immutable Standards) ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS constitution (
+            id TEXT PRIMARY KEY,
+            version TEXT NOT NULL,
+            content TEXT NOT NULL,         -- Markdown content
+            is_active BOOLEAN DEFAULT 1,
+            author TEXT NOT NULL,
+            created TEXT NOT NULL,
+            updated TEXT NOT NULL,
+            vector_clock TEXT NOT NULL      -- For CRDT tracking
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_constitution_active ON constitution (is_active)")
+
+    # ── Spec Documents (Feature Specifications) ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS specs (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            feature TEXT NOT NULL,         -- Associated feature/component
+            content TEXT NOT NULL,         -- Markdown spec content
+            status TEXT DEFAULT 'draft',   -- draft, approved, implemented, deprecated
+            linked_tasks TEXT,              -- Comma-separated task IDs
+            author TEXT NOT NULL,
+            created TEXT NOT NULL,
+            updated TEXT NOT NULL,
+            vector_clock TEXT NOT NULL      -- For CRDT tracking
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_specs_feature ON specs (feature)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_specs_status ON specs (status)")
+
+    # ── Spec Events (CRDT Event Log for Specs) ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS spec_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            spec_id TEXT NOT NULL,
+            field TEXT NOT NULL,
+            op TEXT NOT NULL CHECK(op IN ('init', 'set', 'add', 'remove')),
+            value TEXT,                     -- JSON-encoded
+            timestamp TEXT NOT NULL,        -- ISO-8601 UTC
+            actor TEXT NOT NULL,
+            branch TEXT,
+            session_id TEXT,
+            vector_clock TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_spec_events_spec ON spec_events (spec_id)")
+
+    # ── Constitution Events (CRDT Event Log for Constitution) ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS constitution_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            constitution_id TEXT NOT NULL,
+            field TEXT NOT NULL,
+            op TEXT NOT NULL CHECK(op IN ('init', 'set', 'add', 'remove')),
+            value TEXT,                     -- JSON-encoded
+            timestamp TEXT NOT NULL,        -- ISO-8601 UTC
+            actor TEXT NOT NULL,
+            branch TEXT,
+            session_id TEXT,
+            vector_clock TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_constitution_events_id ON constitution_events (constitution_id)")
 
     # ── FTS5 (rebuildable from task_index) ──
     try:

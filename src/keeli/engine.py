@@ -42,6 +42,20 @@ class KeeliEngine:
         self._actor = os.getenv("KEELI_ACTOR") or os.getenv("USER", "agent")
         self._current_branch = None
 
+    def __del__(self):
+        """Ensure connection is closed when engine is garbage collected."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def close(self):
+        """Explicitly close the database connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
     # ── Internal Utilities ──
 
     def _now_iso(self) -> str:
@@ -139,20 +153,20 @@ class KeeliEngine:
         filepath = target_dir / f"{task_id}-{slug}.md"
 
         self.conn.execute(
-            """INSERT INTO task_index 
-               (id, slug, title, status, priority, created, tags, depends_on, description, completed, path, updated, vector_clock)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO task_index
+               (id, slug, title, status, priority, created, tags, feature, depends_on, description, completed, path, updated, vector_clock)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                slug=excluded.slug, title=excluded.title, status=excluded.status,
                priority=excluded.priority, created=excluded.created, tags=excluded.tags,
-               depends_on=excluded.depends_on, description=excluded.description,
+               feature=excluded.feature, depends_on=excluded.depends_on, description=excluded.description,
                completed=excluded.completed, path=excluded.path, updated=excluded.updated,
                vector_clock=excluded.vector_clock""",
             (
                 task_id, slug, state["title"], state["status"], state["priority"],
-                state["created"], state["tags"], state["depends_on"],
-                state["description"], state["completed"], str(filepath),
-                self._now_iso(), json.dumps(state["vector_clock"], sort_keys=True),
+                state["created"], state["tags"], state.get("feature", ""),
+                state["depends_on"], state["description"], state["completed"],
+                str(filepath), self._now_iso(), json.dumps(state["vector_clock"], sort_keys=True),
             ),
         )
 
@@ -245,6 +259,7 @@ class KeeliEngine:
             title=state["title"],
             status=state["status"].capitalize(),
             priority=state["priority"],
+            feature=state.get("feature", "—"),
             timestamp=state["created"] or self._now_iso(),
             depends_on=state["depends_on"],
             tags=state["tags"] if state["tags"] else "—",
@@ -263,6 +278,7 @@ class KeeliEngine:
         tags: List[str] = None,
         description: str = None,
         depends_on: str = None,
+        feature: str = None,
         actor: Optional[str] = None,
         branch: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -293,7 +309,7 @@ class KeeliEngine:
                     session_id=session_id, vector_clock=vc.clocks,
                 )
                 cur = self.conn.execute(
-                    """INSERT INTO task_events 
+                    """INSERT INTO task_events
                        (task_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     evt.to_db_row(),
@@ -306,6 +322,8 @@ class KeeliEngine:
             _emit_init("status", "backlog")
             _emit_init("priority", priority)
             _emit_init("created", ts)
+            if feature:
+                _emit_init("feature", feature)
             _emit_init("description", description or "No description provided.")
             _emit_init("depends_on", depends_on or "—")
             if processed_tags:
@@ -456,15 +474,17 @@ class KeeliEngine:
         branch: Optional[str] = None,
         tags: Optional[List[str]] = None,
         tag_match: str = "any",
+        feature: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if branch:
             query = """
-            SELECT 
+            SELECT
                 COALESCE(bs.task_id, ti.id) as id,
                 COALESCE(bs.title, ti.title) as title,
                 COALESCE(bs.status, ti.status) as status,
                 COALESCE(bs.priority, ti.priority) as priority,
                 ti.tags,
+                ti.feature,
                 ti.vector_clock
             FROM task_index ti
             LEFT JOIN branch_snapshots bs ON ti.id = bs.task_id AND bs.branch = ?
@@ -475,11 +495,18 @@ class KeeliEngine:
                 tasks = [dict(r) for r in rows]
                 return self._filter_tasks_by_tags(tasks, tags, tag_match)
 
-        query = "SELECT id, title, status, priority, tags, vector_clock FROM task_index"
+        query = "SELECT id, title, status, priority, tags, feature, vector_clock FROM task_index"
         params = []
         if status:
             query += " WHERE status = ? COLLATE NOCASE"
             params.append(status.lower())
+        if feature:
+            if not status:
+                query += " WHERE"
+            else:
+                query += " AND"
+            query += " feature = ? COLLATE NOCASE"
+            params.append(feature.lower())
         tasks = [dict(r) for r in self.conn.execute(query, params).fetchall()]
         return self._filter_tasks_by_tags(tasks, tags, tag_match)
 
@@ -537,6 +564,7 @@ class KeeliEngine:
             title=state["title"],
             status=state["status"].capitalize(),
             priority=state["priority"],
+            feature=state.get("feature", "—"),
             timestamp=state["created"] or self._now_iso(),
             depends_on=state["depends_on"],
             tags=state["tags"] if state["tags"] else "—",
@@ -1068,6 +1096,307 @@ class KeeliEngine:
                 (session_id, note, current_digest, json.dumps(pending_decisions or []), context_snapshot, self._now_iso()),
             )
         return "checkpoint-saved"
+
+    # ── Constitution Management (Immutable Standards) ──
+
+    def _get_next_constitution_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT id FROM constitution WHERE id LIKE 'CON-%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            last_num = int(row["id"].split("-")[1])
+            return f"CON-{last_num + 1:04d}"
+        return "CON-0001"
+
+    def _emit_constitution_event(
+        self,
+        constitution_id: str,
+        field: str,
+        op: str,
+        value: Any,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Append a constitution CRDT event."""
+        actor = actor or self._actor
+        vc = VectorClock().increment(actor)
+
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO constitution_events
+                   (constitution_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (constitution_id, field, op, json.dumps(value) if isinstance(value, (dict, list)) else str(value),
+                 self._now_iso(), actor, branch, session_id, json.dumps(vc.clocks)),
+            )
+
+    def constitution_create(
+        self,
+        content: str,
+        version: str = "1.0",
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Create a new project constitution."""
+        constitution_id = self._get_next_constitution_id()
+        actor = actor or self._actor
+
+        with self.conn:
+            # Deactivate all existing constitutions
+            self.conn.execute("UPDATE constitution SET is_active = 0")
+            self.conn.execute(
+                """INSERT INTO constitution
+                   (id, version, content, is_active, author, created, updated, vector_clock)
+                   VALUES (?, ?, ?, 1, ?, ?, ?, ?)""",
+                (constitution_id, version, content, actor, self._now_iso(), self._now_iso(),
+                 json.dumps({actor: 1})),
+            )
+            self._log_audit(constitution_id, "create", actor, "Created project constitution", session_id)
+
+        return constitution_id
+
+    def constitution_get(self, active_only: bool = True) -> Optional[Dict[str, Any]]:
+        """Get the current constitution."""
+        query = "SELECT * FROM constitution"
+        if active_only:
+            query += " WHERE is_active = 1"
+        query += " ORDER BY created DESC LIMIT 1"
+        row = self.conn.execute(query).fetchone()
+        return dict(row) if row else None
+
+    def constitution_update(
+        self,
+        constitution_id: str,
+        content: str,
+        version: str = None,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Update a constitution (creates new version)."""
+        actor = actor or self._actor
+        version = version or "1.0"
+
+        with self.conn:
+            self.conn.execute(
+                """UPDATE constitution
+                   SET content = ?, version = ?, updated = ?, vector_clock = ?
+                   WHERE id = ?""",
+                (content, version, self._now_iso(), json.dumps({actor: 1}), constitution_id),
+            )
+            self._log_audit(constitution_id, "update", actor, "Updated constitution", session_id)
+
+        return constitution_id
+
+    # ── Spec Management (Feature Specifications) ──
+
+    def _get_next_spec_id(self) -> str:
+        row = self.conn.execute(
+            "SELECT id FROM specs WHERE id LIKE 'SPEC-%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            last_num = int(row["id"].split("-")[1])
+            return f"SPEC-{last_num + 1:04d}"
+        return "SPEC-0001"
+
+    def _emit_spec_event(
+        self,
+        spec_id: str,
+        field: str,
+        op: str,
+        value: Any,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Append a spec CRDT event."""
+        actor = actor or self._actor
+        vc = VectorClock().increment(actor)
+
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO spec_events
+                   (spec_id, field, op, value, timestamp, actor, branch, session_id, vector_clock)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (spec_id, field, op, json.dumps(value) if isinstance(value, (dict, list)) else str(value),
+                 self._now_iso(), actor, branch, session_id, json.dumps(vc.clocks)),
+            )
+
+    def spec_create(
+        self,
+        title: str,
+        feature: str,
+        content: str,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Create a new spec document."""
+        spec_id = self._get_next_spec_id()
+        actor = actor or self._actor
+
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO specs
+                   (id, title, feature, content, status, linked_tasks, author, created, updated, vector_clock)
+                   VALUES (?, ?, ?, ?, 'draft', '', ?, ?, ?, ?)""",
+                (spec_id, title, feature, content, actor, self._now_iso(), self._now_iso(),
+                 json.dumps({actor: 1})),
+            )
+            self._log_audit(spec_id, "create", actor, f"Created spec for feature: {feature}", session_id)
+
+        return spec_id
+
+    def spec_get(self, spec_id: str) -> Optional[Dict[str, Any]]:
+        """Get a spec by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM specs WHERE id = ?", (spec_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def spec_list(
+        self,
+        feature: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List specs with optional filters."""
+        query = "SELECT * FROM specs"
+        params = []
+        conditions = []
+
+        if feature:
+            conditions.append("feature = ?")
+            params.append(feature)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY created DESC"
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def spec_update(
+        self,
+        spec_id: str,
+        title: str = None,
+        content: str = None,
+        status: str = None,
+        linked_tasks: List[str] = None,
+        actor: Optional[str] = None,
+        branch: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Update a spec document."""
+        actor = actor or self._actor
+
+        updates = []
+        params = []
+
+        if title:
+            updates.append("title = ?")
+            params.append(title)
+        if content:
+            updates.append("content = ?")
+            params.append(content)
+        if status:
+            updates.append("status = ?")
+            params.append(status)
+        if linked_tasks is not None:
+            updates.append("linked_tasks = ?")
+            params.append(",".join(linked_tasks))
+
+        if not updates:
+            return spec_id
+
+        updates.append("updated = ?")
+        params.append(self._now_iso())
+        params.append(spec_id)
+
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE specs SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            self._log_audit(spec_id, "update", actor, "Updated spec", session_id)
+
+        return spec_id
+
+    def spec_link_task(self, spec_id: str, task_id: str, actor: Optional[str] = None,
+                      branch: Optional[str] = None, session_id: Optional[str] = None) -> str:
+        """Link a task to a spec."""
+        spec = self.spec_get(spec_id)
+        if not spec:
+            raise ValueError(f"Spec {spec_id} not found")
+
+        linked_tasks = spec["linked_tasks"].split(",") if spec["linked_tasks"] else []
+        if task_id not in linked_tasks:
+            linked_tasks.append(task_id)
+
+        return self.spec_update(
+            spec_id=spec_id,
+            linked_tasks=linked_tasks,
+            actor=actor,
+            branch=branch,
+            session_id=session_id,
+        )
+
+    # ── Branch Automation ──
+
+    def branch_create(self, branch_name: str, base_branch: str = "main",
+                     actor: Optional[str] = None, session_id: Optional[str] = None) -> str:
+        """Create a new feature branch."""
+        actor = actor or self._actor
+
+        try:
+            result = subprocess.run(
+                ["git", "checkout", "-b", branch_name, base_branch],
+                cwd=self.root_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Git checkout failed: {result.stderr}")
+
+            self._log_audit(None, "branch_create", actor, f"Created branch {branch_name} from {base_branch}", session_id)
+            return branch_name
+        except Exception as e:
+            self._log_audit(None, "branch_create", actor, f"Failed to create branch: {str(e)}", session_id)
+            raise
+
+    def branch_cleanup(self, branch_name: str, actor: Optional[str] = None,
+                      session_id: Optional[str] = None) -> None:
+        """Clean up a feature branch (checkout main, delete branch)."""
+        actor = actor or self._actor
+
+        try:
+            # Checkout main
+            subprocess.run(
+                ["git", "checkout", "main"],
+                cwd=self.root_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # Delete branch
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=self.root_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            self._log_audit(None, "branch_cleanup", actor, f"Cleaned up branch {branch_name}", session_id)
+        except Exception as e:
+            self._log_audit(None, "branch_cleanup", actor, f"Failed to cleanup branch: {str(e)}", session_id)
+            raise
 
     def session_list(self) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
